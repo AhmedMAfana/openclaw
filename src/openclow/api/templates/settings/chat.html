@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Chat Settings{% endblock %}
+
+{% block content %}
+<div class="mb-8">
+    <h2 class="text-2xl font-bold text-gray-900">Chat Platform</h2>
+    <p class="text-gray-500 mt-1">Configure how users interact with OpenClow — Telegram, Slack, or other platforms</p>
+</div>
+
+<!-- Warning banner for provider switching -->
+<div id="switch-warning" class="hidden mb-4 bg-amber-50 border border-amber-200 rounded-lg p-4">
+    <div class="flex items-center gap-2">
+        <svg class="w-5 h-5 text-amber-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
+        <p class="text-sm text-amber-800">Switching chat providers requires restarting the bot service: <code class="bg-amber-100 px-1 rounded">docker compose restart bot</code></p>
+    </div>
+</div>
+
+<div class="bg-white rounded-xl border border-gray-200 p-6">
+    <form id="chat-form" hx-put="/api/settings/config/chat" hx-swap="none" hx-ext="json-enc">
+        <!-- Provider Selector -->
+        <div class="mb-6">
+            <label class="block text-sm font-medium text-gray-700 mb-2">Provider</label>
+            <div class="flex gap-3">
+                {% for p in providers %}
+                <label class="flex items-center gap-2 px-4 py-3 border rounded-lg cursor-pointer transition-colors
+                    {% if config.get('type', 'telegram') == p %}border-brand-500 bg-brand-50{% else %}border-gray-200 hover:border-gray-300{% endif %}">
+                    <input type="radio" name="type" value="{{ p }}" class="text-brand-600"
+                        {% if config.get('type', 'telegram') == p %}checked{% endif %}
+                        hx-get="/settings/partials/provider-fields/chat/{{ p }}"
+                        hx-target="#provider-fields"
+                        hx-swap="innerHTML"
+                        onchange="document.getElementById('switch-warning').classList.remove('hidden')"
+                    >
+                    <span class="font-medium capitalize">{{ p }}</span>
+                </label>
+                {% endfor %}
+                <!-- Coming soon -->
+                {% if "slack" not in providers %}
+                <label class="flex items-center gap-2 px-4 py-3 border border-gray-200 rounded-lg opacity-50 cursor-not-allowed">
+                    <input type="radio" disabled>
+                    <span class="font-medium">Slack</span>
+                    <span class="provider-badge coming-soon ml-1">Soon</span>
+                </label>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Dynamic provider fields -->
+        <div id="provider-fields">
+            {% set current_type = config.get('type', 'telegram') %}
+            {% set fields = schemas.get(current_type, []) %}
+            {% for field in fields %}
+            <div class="mb-4">
+                <label for="{{ field.name }}" class="block text-sm font-medium text-gray-700 mb-1">
+                    {{ field.label }}
+                    {% if field.get('required') %}<span class="text-red-400">*</span>{% endif %}
+                </label>
+                <input type="{{ field.type }}" id="{{ field.name }}" name="{{ field.name }}"
+                    value="{{ config.get(field.name, field.get('default', '')) }}"
+                    placeholder="{{ field.get('help', '') }}"
+                    class="form-input"
+                    {% if field.get('required') %}required{% endif %}>
+                {% if field.get('help') %}<p class="text-xs text-gray-400 mt-1">{{ field.help }}</p>{% endif %}
+            </div>
+            {% endfor %}
+        </div>
+
+        <!-- Test & Save -->
+        <div class="flex items-center gap-3 mt-6 pt-6 border-t border-gray-100">
+            <button type="submit" class="px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors text-sm font-medium">
+                Save Configuration
+            </button>
+            <button type="button" id="test-chat-btn"
+                hx-post="/api/settings/test/chat"
+                hx-include="#chat-form"
+                hx-target="#test-result"
+                hx-swap="innerHTML"
+                class="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm"
+            >
+                <span class="btn-text">Test Connection</span>
+                <span class="btn-loading items-center gap-1">
+                    <svg class="w-4 h-4 spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" opacity="0.25"/><path d="M4 12a8 8 0 018-8" stroke-width="4"/></svg>
+                    Testing...
+                </span>
+            </button>
+        </div>
+        <div id="test-result" class="mt-3"></div>
+    </form>
+</div>
+
+<!-- Info box -->
+<div class="mt-6 bg-blue-50 rounded-xl border border-blue-200 p-5">
+    <h4 class="text-sm font-semibold text-blue-800 mb-1">Switching Chat Platforms</h4>
+    <p class="text-sm text-blue-700">
+        OpenClow supports multiple chat platforms. When you switch from one to another:
+    </p>
+    <ul class="text-sm text-blue-700 list-disc ml-5 mt-2 space-y-1">
+        <li>Save the new provider configuration</li>
+        <li>User IDs will need to be updated to match the new platform</li>
+        <li>Restart the bot service: <code class="bg-blue-100 px-1 rounded">docker compose restart bot</code></li>
+        <li>Your projects and tasks are preserved — only the communication channel changes</li>
+    </ul>
+</div>
+{% endblock %}

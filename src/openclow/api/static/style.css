@@ -1,0 +1,131 @@
+/* OpenClow Settings Dashboard — Custom Styles */
+
+/* Sidebar navigation links */
+.nav-link {
+    display: flex;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+    color: #9ca3af;
+    border-radius: 0.5rem;
+    transition: all 0.15s ease;
+}
+.nav-link:hover {
+    color: #ffffff;
+    background-color: rgba(255, 255, 255, 0.05);
+}
+.nav-link.active {
+    color: #ffffff;
+    background-color: rgba(59, 130, 246, 0.15);
+    border-left: 3px solid #3b82f6;
+}
+
+/* Status indicators */
+.status-dot {
+    width: 0.625rem;
+    height: 0.625rem;
+    border-radius: 50%;
+    display: inline-block;
+}
+.status-ok { background-color: #22c55e; }
+.status-error { background-color: #ef4444; }
+.status-warning { background-color: #f59e0b; }
+.status-unknown { background-color: #6b7280; }
+
+/* Card hover */
+.settings-card {
+    transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+.settings-card:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    transform: translateY(-1px);
+}
+
+/* Form inputs */
+.form-input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #d1d5db;
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    outline: none;
+}
+.form-input:focus {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+/* Test result animations */
+.test-result {
+    animation: fadeIn 0.3s ease;
+}
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* Wizard step indicator */
+.wizard-step {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    font-size: 0.75rem;
+    font-weight: 600;
+    border: 2px solid #d1d5db;
+    color: #6b7280;
+    background: white;
+    transition: all 0.2s ease;
+}
+.wizard-step.active {
+    border-color: #3b82f6;
+    color: #3b82f6;
+    background: #eff6ff;
+}
+.wizard-step.completed {
+    border-color: #22c55e;
+    color: white;
+    background: #22c55e;
+}
+.wizard-connector {
+    flex: 1;
+    height: 2px;
+    background: #d1d5db;
+    margin: 0 0.5rem;
+}
+.wizard-connector.completed {
+    background: #22c55e;
+}
+
+/* Provider badge */
+.provider-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.125rem 0.5rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+.provider-badge.coming-soon {
+    background: #f3f4f6;
+    color: #6b7280;
+}
+.provider-badge.available {
+    background: #ecfdf5;
+    color: #059669;
+}
+
+/* Loading spinner for test buttons */
+.htmx-request .btn-text { display: none; }
+.htmx-request .btn-loading { display: inline-flex; }
+.btn-loading { display: none; }
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+.spinner {
+    animation: spin 0.6s linear infinite;
+}

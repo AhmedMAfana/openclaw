@@ -1,0 +1,9 @@
+<div class="test-result flex items-center gap-2 text-sm mt-1">
+    {% if status == "ok" %}
+        <span class="status-dot status-ok"></span>
+        <span class="text-green-700">{{ message }}</span>
+    {% else %}
+        <span class="status-dot status-error"></span>
+        <span class="text-red-700">{{ message }}</span>
+    {% endif %}
+</div>

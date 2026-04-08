@@ -1,0 +1,36 @@
+"""Bootstrap settings — only what's needed before DB is available.
+
+Provider config (LLM, chat, git) is stored in the database,
+managed via `python -m openclow.setup`.
+"""
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    # Database (needed to boot)
+    database_url: str = "postgresql+asyncpg://openclow:openclow@postgres:5432/openclow"
+
+    # Redis (needed to boot)
+    redis_url: str = "redis://:openclow@redis:6379/0"
+    redis_password: str = "openclow"
+
+    # Workspace
+    workspace_base_path: str = "/workspaces"
+
+    # Groq API (speech-to-text fallback if DB config missing)
+    groq_api_key: str = ""
+
+    # Logging
+    log_level: str = "INFO"
+
+    # Activity log (JSONL file)
+    activity_log: str = "/app/logs/activity.jsonl"
+
+    # Claude agent limits
+    claude_coder_max_turns: int = 50
+    claude_reviewer_max_turns: int = 20
+
+    model_config = {"env_file": ".env", "extra": "ignore"}
+
+
+settings = Settings()

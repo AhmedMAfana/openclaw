@@ -1,0 +1,9 @@
+[     228ms] [LOG] Supported image mime types Set(5) @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[     283ms] [LOG] Elapsed time since unlocked: 3.26904296875 ms allStates loaded @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[     283ms] [LOG] Elapsed time since unlocked: 3.989990234375 ms singleInstance started @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[     285ms] [LOG] Elapsed time since unlocked: 5.151123046875 ms sent all states (1) @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[     291ms] [LOG] Elapsed time since unlocked: 11.291015625 ms await I18n.getCacheLangPack() @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[     310ms] [LOG] Elapsed time since unlocked: 30.878173828125 ms sent all states (2) @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[     314ms] [LOG] got state, time: 98.20000000001164 @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[     314ms] [LOG] Elapsed time since unlocked: 34.175048828125 ms IMAGE_MIME_TYPES_SUPPORTED_PROMISE @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[     314ms] [LOG] Will mount IM page: 1775658307.242 @ https://web.telegram.org/k/index-DNp74U6Y.js:22

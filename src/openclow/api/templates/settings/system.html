@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}System Settings{% endblock %}
+
+{% block content %}
+<div class="mb-8">
+    <h2 class="text-2xl font-bold text-gray-900">System Configuration</h2>
+    <p class="text-gray-500 mt-1">Infrastructure settings — configured via environment variables</p>
+</div>
+
+<div class="bg-white rounded-xl border border-gray-200 p-6">
+    <div class="space-y-5">
+        <!-- Database URL -->
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Database URL</label>
+            <div class="flex items-center gap-2">
+                <code class="flex-1 bg-gray-50 px-3 py-2 rounded-lg text-sm text-gray-600 font-mono border border-gray-100">
+                    {{ settings.database_url | replace(settings.database_url.split('@')[0].split('://')[-1], '****') if '@' in settings.database_url else settings.database_url }}
+                </code>
+                <button
+                    hx-post="/api/settings/test/database"
+                    hx-target="#db-test"
+                    hx-swap="innerHTML"
+                    class="px-3 py-2 text-xs bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+                >Test</button>
+            </div>
+            <div id="db-test" class="mt-1"></div>
+        </div>
+
+        <!-- Redis URL -->
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Redis URL</label>
+            <div class="flex items-center gap-2">
+                <code class="flex-1 bg-gray-50 px-3 py-2 rounded-lg text-sm text-gray-600 font-mono border border-gray-100">
+                    {{ settings.redis_url | replace(settings.redis_url.split('@')[0].split('://')[-1], '****') if '@' in settings.redis_url else settings.redis_url }}
+                </code>
+                <button
+                    hx-post="/api/settings/test/redis"
+                    hx-target="#redis-test"
+                    hx-swap="innerHTML"
+                    class="px-3 py-2 text-xs bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+                >Test</button>
+            </div>
+            <div id="redis-test" class="mt-1"></div>
+        </div>
+
+        <!-- Workspace Path -->
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Workspace Base Path</label>
+            <code class="block bg-gray-50 px-3 py-2 rounded-lg text-sm text-gray-600 font-mono border border-gray-100">
+                {{ settings.workspace_base_path }}
+            </code>
+        </div>
+
+        <!-- Log Level -->
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Log Level</label>
+            <code class="block bg-gray-50 px-3 py-2 rounded-lg text-sm text-gray-600 font-mono border border-gray-100">
+                {{ settings.log_level }}
+            </code>
+        </div>
+
+        <!-- Activity Log -->
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Activity Log Path</label>
+            <code class="block bg-gray-50 px-3 py-2 rounded-lg text-sm text-gray-600 font-mono border border-gray-100">
+                {{ settings.activity_log }}
+            </code>
+        </div>
+    </div>
+</div>
+
+<div class="mt-6 bg-amber-50 rounded-xl border border-amber-200 p-5">
+    <h4 class="text-sm font-semibold text-amber-800 mb-1">Read-Only Settings</h4>
+    <p class="text-sm text-amber-700">
+        System settings are configured via environment variables in <code class="bg-amber-100 px-1 rounded">.env</code>
+        or <code class="bg-amber-100 px-1 rounded">docker-compose.yml</code>. Changes require restarting the containers.
+    </p>
+</div>
+{% endblock %}

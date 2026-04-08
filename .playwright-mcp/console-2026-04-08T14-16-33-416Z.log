@@ -1,0 +1,21 @@
+[    4060ms] [LOG] Supported image mime types Set(5) @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[    4543ms] [LOG] Elapsed time since unlocked: 20.48095703125 ms allStates loaded @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[    4544ms] [LOG] Elapsed time since unlocked: 21.119873046875 ms singleInstance started @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[    4544ms] [LOG] Elapsed time since unlocked: 21.73681640625 ms sent all states (1) @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[    4772ms] [LOG] Elapsed time since unlocked: 249.138916015625 ms await I18n.getCacheLangPack() @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[    5034ms] [LOG] Elapsed time since unlocked: 511.52587890625 ms sent all states (2) @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[    5074ms] [LOG] got state, time: 1055.2999999970198 @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[    5074ms] [LOG] Elapsed time since unlocked: 551.517822265625 ms IMAGE_MIME_TYPES_SUPPORTED_PROMISE @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[    5074ms] [LOG] Will mount IM page: 1775657798.49 @ https://web.telegram.org/k/index-DNp74U6Y.js:22
+[    5882ms] TypeError: Cannot read properties of undefined (reading 'access_hash')
+    at qc.getUserInputPeer (https://web.telegram.org/k/index.worker-BYS_dkhc.js:6:902593)
+    at uc.getInputPeerById (https://web.telegram.org/k/index.worker-BYS_dkhc.js:6:825348)
+    at Bf.getStarsStatus (https://web.telegram.org/k/index.worker-BYS_dkhc.js:6:1002185)
+    at https://web.telegram.org/k/index.worker-BYS_dkhc.js:7:44091
+    at re (https://web.telegram.org/k/index.worker-BYS_dkhc.js:1:25000)
+    at Object.callback (https://web.telegram.org/k/index.worker-BYS_dkhc.js:7:43903)
+    at fe.invokeListenerCallback (https://web.telegram.org/k/index.worker-BYS_dkhc.js:1:3064)
+    at Na.processInvokeTask [as invoke] (https://web.telegram.org/k/index.worker-BYS_dkhc.js:1:6799)
+    at Na.onMessage (https://web.telegram.org/k/index.worker-BYS_dkhc.js:1:5370)
+    at https://web.telegram.org/k/index.worker-BYS_dkhc.js:1:6260
+[   84206ms] [WARNING] The ScriptProcessorNode is deprecated. Use AudioWorkletNode instead. (https://bit.ly/audio-worklet) @ https://web.telegram.org/k/recorder.min-Z1MzkvzX.js:0

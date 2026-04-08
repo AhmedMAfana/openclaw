@@ -1,0 +1,4 @@
+[  373865ms] [ERROR] Failed to load resource: net::ERR_HTTP2_PROTOCOL_ERROR @ https://works-hotels-pop-pump.trycloudflare.com/api/events/stream:0
+[ 1003085ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_CLOSED @ https://works-hotels-pop-pump.trycloudflare.com/api/events/stream:0
+[ 1115387ms] [ERROR] Failed to load resource: net::ERR_HTTP2_PROTOCOL_ERROR @ https://works-hotels-pop-pump.trycloudflare.com/api/events/stream:0
+[ 1344390ms] [ERROR] Failed to load resource: the server responded with a status of 530 () @ https://works-hotels-pop-pump.trycloudflare.com/api/events/stream:0

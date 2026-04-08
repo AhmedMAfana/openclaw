@@ -1,0 +1,54 @@
+<div class="bg-white rounded-xl border border-gray-200 p-6">
+    <h3 class="text-lg font-semibold text-gray-900 mb-1">Step 3: Git Provider</h3>
+    <p class="text-sm text-gray-500 mb-6">Connect to your source code hosting platform</p>
+
+    <form id="wizard-form">
+        <div class="mb-5">
+            <label class="block text-sm font-medium text-gray-700 mb-2">Provider</label>
+            <div class="flex gap-3">
+                <label class="flex items-center gap-2 px-4 py-3 border border-brand-500 bg-brand-50 rounded-lg cursor-pointer">
+                    <input type="radio" name="type" value="github" checked class="text-brand-600">
+                    <span class="font-medium">GitHub</span>
+                    <span class="provider-badge available">Active</span>
+                </label>
+                <label class="flex items-center gap-2 px-4 py-3 border border-gray-200 rounded-lg opacity-50 cursor-not-allowed">
+                    <input type="radio" name="type" value="gitlab" disabled>
+                    <span class="font-medium">GitLab</span>
+                    <span class="provider-badge coming-soon">Soon</span>
+                </label>
+            </div>
+        </div>
+
+        <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Personal Access Token <span class="text-red-400">*</span></label>
+            <input type="password" name="token" class="form-input" required placeholder="ghp_... or github_pat_...">
+            <p class="text-xs text-gray-400 mt-1">Fine-grained PAT with Contents + Pull Requests permissions</p>
+        </div>
+
+        <!-- Test -->
+        <div class="mb-4">
+            <button type="button"
+                hx-post="/api/settings/test/git"
+                hx-include="#wizard-form"
+                hx-target="#wizard-test"
+                hx-swap="innerHTML"
+                class="text-sm px-3 py-1.5 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+            >
+                <span class="btn-text">Test Connection</span>
+                <span class="btn-loading items-center gap-1">
+                    <svg class="w-3 h-3 spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" opacity="0.25"/><path d="M4 12a8 8 0 018-8" stroke-width="4"/></svg>
+                    Testing...
+                </span>
+            </button>
+            <div id="wizard-test" class="mt-2"></div>
+        </div>
+    </form>
+
+    <!-- Navigation -->
+    <div class="flex justify-between pt-5 border-t border-gray-100">
+        <button onclick="prevStep()" class="px-5 py-2 text-gray-600 hover:text-gray-800 text-sm">Back</button>
+        <button onclick="saveAndNext('git')" class="px-5 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700 text-sm font-medium">
+            Save & Next
+        </button>
+    </div>
+</div>

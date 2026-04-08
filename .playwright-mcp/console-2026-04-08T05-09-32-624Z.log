@@ -1,0 +1,411 @@
+[   60745ms] [VERBOSE] [DOM] Password forms should have (optionally hidden) username fields for accessibility: (More info: https://goo.gl/9p2vKq) %o @ https://web.telegram.org/a/:0
+[   74343ms] [ERROR] Error: Not connected
+    at Bt.send (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:279692)
+    at Jt._sendLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:306776) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[   74713ms] [INFO] This page uses Chrome's Built-In AI features (LanguageDetector)! We're always improving our models; please submit your feedback here: https://issues.chromium.org/issues/new?component=1583316 @ https://web.telegram.org/a/5378.29fab196131912ba812d.js:0
+[   75051ms] [LOG] %c[2026-04-08T05:10:47.673Z] [ERROR] - [WebSocket connection failed attempt: 1] color : #ff0000 @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[   75052ms] [ERROR] Error: WebSocket connection timeout
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:278022 @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[   75052ms] [ERROR] WebSocket error Event @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[   75052ms] [ERROR] Socket zws1.web.telegram.org closed. Code: 1006, reason: , was clean: false @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[   76054ms] [LOG] %c[2026-04-08T05:10:48.678Z] [WARN] - [Using fallback connection] color : #ff00ff @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[   76106ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[   94334ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  112555ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  130779ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  149009ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  167255ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  185478ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  203710ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  221939ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  240170ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  258416ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  276639ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  294873ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  313108ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  331342ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  349572ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  367802ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  386030ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  404257ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  422489ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  440718ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  458950ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  477184ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  495416ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  513644ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  531879ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  550106ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  568395ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  586686ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  604955ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  623177ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  641408ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  659680ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  677922ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  696158ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  714390ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  732636ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  750874ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  769682ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  787931ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  806173ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  824425ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  842659ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  860905ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  879186ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  897446ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  915700ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  933927ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  952156ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  970384ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[  988617ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1006836ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1025068ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1043291ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1061533ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1079758ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1097991ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1116217ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1134459ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1152672ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1170906ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1189133ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1207355ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1225577ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1243803ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1262029ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1280256ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1298484ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1316711ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1334944ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1353169ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1371402ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1389627ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1407865ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1426092ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1444315ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1462537ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1480768ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1498995ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1517240ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1535466ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1553696ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1571929ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1590156ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1608387ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1626618ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1644856ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1663089ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1681317ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1699537ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1717750ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1735968ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1754198ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1772423ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1790643ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1808891ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1827122ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1845352ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1863578ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
+[ 1881802ms] [WARNING] Error: TIMEOUT
+    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373029
+    at async ha (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:373130)
+    at async ga._updateLoop (https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:355067) @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0

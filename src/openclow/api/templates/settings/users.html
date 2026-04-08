@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Users{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-8">
+    <div>
+        <h2 class="text-2xl font-bold text-gray-900">Users</h2>
+        <p class="text-gray-500 mt-1">Manage who can interact with OpenClow via {{ chat_type | capitalize }}</p>
+    </div>
+    <button onclick="document.getElementById('add-user-modal').classList.remove('hidden')"
+        class="px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors text-sm font-medium">
+        Add User
+    </button>
+</div>
+
+<!-- Users Table -->
+<div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+    {% if users %}
+    <table class="w-full text-sm">
+        <thead class="bg-gray-50 border-b border-gray-200">
+            <tr>
+                <th class="text-left px-5 py-3 text-gray-500 font-medium">Platform</th>
+                <th class="text-left px-5 py-3 text-gray-500 font-medium">User ID</th>
+                <th class="text-left px-5 py-3 text-gray-500 font-medium">Username</th>
+                <th class="text-left px-5 py-3 text-gray-500 font-medium">Status</th>
+                <th class="text-right px-5 py-3 text-gray-500 font-medium">Actions</th>
+            </tr>
+        </thead>
+        <tbody id="users-table" class="divide-y divide-gray-100">
+            {% for user in users %}
+            <tr id="user-{{ user.id }}" class="hover:bg-gray-50">
+                <td class="px-5 py-3">
+                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 capitalize">
+                        {{ user.chat_provider_type }}
+                    </span>
+                </td>
+                <td class="px-5 py-3 font-mono text-xs text-gray-600">{{ user.chat_provider_uid }}</td>
+                <td class="px-5 py-3 text-gray-900">{{ user.username or '—' }}</td>
+                <td class="px-5 py-3">
+                    {% if user.is_allowed %}
+                        <span class="inline-flex items-center gap-1 text-green-700 text-xs">
+                            <span class="status-dot status-ok"></span> Authorized
+                        </span>
+                    {% else %}
+                        <span class="inline-flex items-center gap-1 text-gray-500 text-xs">
+                            <span class="status-dot status-unknown"></span> Disabled
+                        </span>
+                    {% endif %}
+                </td>
+                <td class="px-5 py-3 text-right">
+                    <button
+                        hx-delete="/api/settings/users/{{ user.id }}"
+                        hx-target="#user-{{ user.id }}"
+                        hx-swap="outerHTML"
+                        hx-confirm="Remove user '{{ user.username or user.chat_provider_uid }}'?"
+                        class="text-red-500 hover:text-red-700 text-xs"
+                    >Remove</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="p-12 text-center">
+        <svg class="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+        <p class="text-gray-500">No users yet</p>
+        <button onclick="document.getElementById('add-user-modal').classList.remove('hidden')"
+            class="mt-3 text-sm text-brand-600 hover:text-brand-700">Add your first user</button>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Add User Modal -->
+<div id="add-user-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md mx-4">
+        <div class="p-6 border-b border-gray-100">
+            <div class="flex items-center justify-between">
+                <h3 class="text-lg font-semibold text-gray-900">Add User</h3>
+                <button onclick="document.getElementById('add-user-modal').classList.add('hidden')" class="text-gray-400 hover:text-gray-600">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+        </div>
+        <form hx-post="/api/settings/users" hx-target="#users-table" hx-swap="beforeend" hx-ext="json-enc"
+              hx-on::after-request="if(event.detail.successful) document.getElementById('add-user-modal').classList.add('hidden')">
+            <div class="p-6 space-y-4">
+                <input type="hidden" name="chat_provider_type" value="{{ chat_type }}">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                        {{ chat_type | capitalize }} User ID <span class="text-red-400">*</span>
+                    </label>
+                    <input type="text" name="chat_provider_uid" class="form-input" required
+                        placeholder="{% if chat_type == 'telegram' %}e.g. 123456789{% else %}e.g. U0123456789{% endif %}">
+                    <p class="text-xs text-gray-400 mt-1">
+                        {% if chat_type == 'telegram' %}
+                            Send /start to @userinfobot on Telegram to get your user ID
+                        {% else %}
+                            Find the user ID in the platform's user profile
+                        {% endif %}
+                    </p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+                    <input type="text" name="username" class="form-input" placeholder="Optional display name">
+                </div>
+                <label class="flex items-center gap-2">
+                    <input type="checkbox" name="is_allowed" checked class="rounded text-brand-600">
+                    <span class="text-sm text-gray-700">Authorized to use OpenClow</span>
+                </label>
+            </div>
+            <div class="p-6 border-t border-gray-100 flex justify-end gap-3">
+                <button type="button" onclick="document.getElementById('add-user-modal').classList.add('hidden')"
+                    class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+                <button type="submit" class="px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700 text-sm font-medium">
+                    Add User
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

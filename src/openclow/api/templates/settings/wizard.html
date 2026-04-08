@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Setup Wizard{% endblock %}
+
+{% block content %}
+<div class="mb-8 text-center">
+    <h2 class="text-2xl font-bold text-gray-900">Setup Wizard</h2>
+    <p class="text-gray-500 mt-1">Configure OpenClow step by step — set up each integration, test it, and go</p>
+</div>
+
+<!-- Step Progress Bar -->
+<div class="flex items-center justify-center mb-10 max-w-2xl mx-auto">
+    <div class="wizard-step active" id="step-indicator-1">1</div>
+    <div class="wizard-connector" id="connector-1"></div>
+    <div class="wizard-step" id="step-indicator-2">2</div>
+    <div class="wizard-connector" id="connector-2"></div>
+    <div class="wizard-step" id="step-indicator-3">3</div>
+    <div class="wizard-connector" id="connector-3"></div>
+    <div class="wizard-step" id="step-indicator-4">4</div>
+    <div class="wizard-connector" id="connector-4"></div>
+    <div class="wizard-step" id="step-indicator-5">5</div>
+    <div class="wizard-connector" id="connector-5"></div>
+    <div class="wizard-step" id="step-indicator-6">6</div>
+</div>
+
+<!-- Step Labels -->
+<div class="flex justify-center gap-6 mb-8 max-w-2xl mx-auto text-xs text-gray-400">
+    <span class="text-center w-16">LLM</span>
+    <span class="text-center w-16 ml-2">Chat</span>
+    <span class="text-center w-16 ml-1">Git</span>
+    <span class="text-center w-16">Projects</span>
+    <span class="text-center w-16">Users</span>
+    <span class="text-center w-16">Review</span>
+</div>
+
+<!-- Wizard Content Area -->
+<div id="wizard-content" class="max-w-2xl mx-auto">
+    {% include "partials/wizard_steps/step_llm.html" %}
+</div>
+
+<script>
+let currentStep = 1;
+const totalSteps = 6;
+
+function goToStep(step) {
+    // Update step indicators
+    for (let i = 1; i <= totalSteps; i++) {
+        const indicator = document.getElementById('step-indicator-' + i);
+        const connector = document.getElementById('connector-' + (i - 1));
+        indicator.classList.remove('active', 'completed');
+        if (connector) connector.classList.remove('completed');
+
+        if (i < step) {
+            indicator.classList.add('completed');
+            indicator.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>';
+            if (connector) connector.classList.add('completed');
+        } else if (i === step) {
+            indicator.classList.add('active');
+            indicator.textContent = i;
+        } else {
+            indicator.textContent = i;
+        }
+    }
+    currentStep = step;
+
+    // Load step content via HTMX
+    const steps = ['step_llm', 'step_chat', 'step_git', 'step_projects', 'step_users', 'step_review'];
+    htmx.ajax('GET', '/settings/wizard/step/' + steps[step - 1], '#wizard-content');
+}
+
+function nextStep() {
+    if (currentStep < totalSteps) goToStep(currentStep + 1);
+}
+
+function prevStep() {
+    if (currentStep > 1) goToStep(currentStep - 1);
+}
+
+// Save config for current step then advance
+async function saveAndNext(category) {
+    const form = document.getElementById('wizard-form');
+    if (!form) { nextStep(); return; }
+
+    const formData = new FormData(form);
+    const data = Object.fromEntries(formData.entries());
+
+    // Convert number fields
+    for (const [key, val] of Object.entries(data)) {
+        if (!isNaN(val) && val !== '' && key !== 'type' && key !== 'token' && key !== 'name') {
+            data[key] = Number(val);
+        }
+    }
+
+    try {
+        const resp = await fetch('/api/settings/config/' + category, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+        const result = await resp.json();
+        if (resp.ok) {
+            showToast(result.message || 'Saved!', 'success');
+            nextStep();
+        } else {
+            showToast(result.detail || 'Save failed', 'error');
+        }
+    } catch (e) {
+        showToast('Network error', 'error');
+    }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="mb-8">
+    <h2 class="text-2xl font-bold text-gray-900">Settings Dashboard</h2>
+    <p class="text-gray-500 mt-1">Overview of all integrations and system status</p>
+</div>
+
+<!-- Quick Actions -->
+<div class="flex gap-3 mb-6">
+    <button
+        hx-post="/api/settings/test/database"
+        hx-target="#db-status"
+        hx-swap="innerHTML"
+        class="text-sm px-3 py-1.5 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+    >
+        Test All Connections
+    </button>
+    <a href="/settings/wizard" class="text-sm px-3 py-1.5 bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors">
+        Run Setup Wizard
+    </a>
+</div>
+
+<!-- Provider Cards -->
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
+    <!-- LLM Card -->
+    <div class="settings-card bg-white rounded-xl border border-gray-200 p-5">
+        <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center gap-2">
+                <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                <h3 class="font-semibold text-gray-900">LLM / AI</h3>
+            </div>
+            {% if categories.llm.configured %}
+                <span class="status-dot status-ok"></span>
+            {% else %}
+                <span class="status-dot status-warning"></span>
+            {% endif %}
+        </div>
+        {% if categories.llm.configured %}
+            <p class="text-sm text-gray-600">Provider: <span class="font-medium capitalize">{{ categories.llm.type }}</span></p>
+            <div id="llm-test" class="mt-2"></div>
+            <div class="mt-3 flex gap-2">
+                <button
+                    hx-post="/api/settings/test/llm"
+                    hx-vals='{"type": "{{ categories.llm.type }}"}'
+                    hx-target="#llm-test"
+                    hx-swap="innerHTML"
+                    class="text-xs px-2.5 py-1 bg-gray-100 rounded-md hover:bg-gray-200 transition-colors"
+                >
+                    <span class="btn-text">Test</span>
+                    <span class="btn-loading items-center gap-1"><svg class="w-3 h-3 spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" opacity="0.25"/><path d="M4 12a8 8 0 018-8" stroke-width="4"/></svg> Testing...</span>
+                </button>
+                <a href="/settings/llm" class="text-xs px-2.5 py-1 text-brand-600 hover:text-brand-700">Configure</a>
+            </div>
+        {% else %}
+            <p class="text-sm text-gray-400 italic">Not configured</p>
+            <a href="/settings/llm" class="mt-3 inline-block text-xs px-2.5 py-1 bg-brand-600 text-white rounded-md hover:bg-brand-700 transition-colors">Set Up</a>
+        {% endif %}
+    </div>
+
+    <!-- Chat Card -->
+    <div class="settings-card bg-white rounded-xl border border-gray-200 p-5">
+        <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center gap-2">
+                <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+                <h3 class="font-semibold text-gray-900">Chat Platform</h3>
+            </div>
+            {% if categories.chat.configured %}
+                <span class="status-dot status-ok"></span>
+            {% else %}
+                <span class="status-dot status-warning"></span>
+            {% endif %}
+        </div>
+        {% if categories.chat.configured %}
+            <p class="text-sm text-gray-600">Provider: <span class="font-medium capitalize">{{ categories.chat.type }}</span></p>
+            <div id="chat-test" class="mt-2"></div>
+            <div class="mt-3 flex gap-2">
+                <button
+                    hx-post="/api/settings/test/chat"
+                    hx-vals='{"type": "{{ categories.chat.type }}"}'
+                    hx-target="#chat-test"
+                    hx-swap="innerHTML"
+                    class="text-xs px-2.5 py-1 bg-gray-100 rounded-md hover:bg-gray-200 transition-colors"
+                >
+                    <span class="btn-text">Test</span>
+                    <span class="btn-loading items-center gap-1"><svg class="w-3 h-3 spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" opacity="0.25"/><path d="M4 12a8 8 0 018-8" stroke-width="4"/></svg> Testing...</span>
+                </button>
+                <a href="/settings/chat" class="text-xs px-2.5 py-1 text-brand-600 hover:text-brand-700">Configure</a>
+            </div>
+        {% else %}
+            <p class="text-sm text-gray-400 italic">Not configured</p>
+            <a href="/settings/chat" class="mt-3 inline-block text-xs px-2.5 py-1 bg-brand-600 text-white rounded-md hover:bg-brand-700 transition-colors">Set Up</a>
+        {% endif %}
+    </div>
+
+    <!-- Git Card -->
+    <div class="settings-card bg-white rounded-xl border border-gray-200 p-5">
+        <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center gap-2">
+                <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
+                <h3 class="font-semibold text-gray-900">Git Provider</h3>
+            </div>
+            {% if categories.git.configured %}
+                <span class="status-dot status-ok"></span>
+            {% else %}
+                <span class="status-dot status-warning"></span>
+            {% endif %}
+        </div>
+        {% if categories.git.configured %}
+            <p class="text-sm text-gray-600">Provider: <span class="font-medium capitalize">{{ categories.git.type }}</span></p>
+            <div id="git-test" class="mt-2"></div>
+            <div class="mt-3 flex gap-2">
+                <button
+                    hx-post="/api/settings/test/git"
+                    hx-vals='{"type": "{{ categories.git.type }}"}'
+                    hx-target="#git-test"
+                    hx-swap="innerHTML"
+                    class="text-xs px-2.5 py-1 bg-gray-100 rounded-md hover:bg-gray-200 transition-colors"
+                >
+                    <span class="btn-text">Test</span>
+                    <span class="btn-loading items-center gap-1"><svg class="w-3 h-3 spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" opacity="0.25"/><path d="M4 12a8 8 0 018-8" stroke-width="4"/></svg> Testing...</span>
+                </button>
+                <a href="/settings/git" class="text-xs px-2.5 py-1 text-brand-600 hover:text-brand-700">Configure</a>
+            </div>
+        {% else %}
+            <p class="text-sm text-gray-400 italic">Not configured</p>
+            <a href="/settings/git" class="mt-3 inline-block text-xs px-2.5 py-1 bg-brand-600 text-white rounded-md hover:bg-brand-700 transition-colors">Set Up</a>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Infrastructure Status -->
+<h3 class="text-lg font-semibold text-gray-900 mb-4">Infrastructure</h3>
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+    <!-- Database -->
+    <div class="settings-card bg-white rounded-xl border border-gray-200 p-5">
+        <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+                <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"/></svg>
+                <h3 class="font-semibold text-gray-900">Database</h3>
+            </div>
+            <button
+                hx-post="/api/settings/test/database"
+                hx-target="#db-status"
+                hx-swap="innerHTML"
+                class="text-xs px-2.5 py-1 bg-gray-100 rounded-md hover:bg-gray-200 transition-colors"
+            >
+                <span class="btn-text">Test</span>
+                <span class="btn-loading items-center gap-1"><svg class="w-3 h-3 spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" opacity="0.25"/><path d="M4 12a8 8 0 018-8" stroke-width="4"/></svg></span>
+            </button>
+        </div>
+        <div id="db-status" class="mt-2 text-sm text-gray-500">Click Test to check</div>
+    </div>
+
+    <!-- Redis -->
+    <div class="settings-card bg-white rounded-xl border border-gray-200 p-5">
+        <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+                <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+                <h3 class="font-semibold text-gray-900">Redis</h3>
+            </div>
+            <button
+                hx-post="/api/settings/test/redis"
+                hx-target="#redis-status"
+                hx-swap="innerHTML"
+                class="text-xs px-2.5 py-1 bg-gray-100 rounded-md hover:bg-gray-200 transition-colors"
+            >
+                <span class="btn-text">Test</span>
+                <span class="btn-loading items-center gap-1"><svg class="w-3 h-3 spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" opacity="0.25"/><path d="M4 12a8 8 0 018-8" stroke-width="4"/></svg></span>
+            </button>
+        </div>
+        <div id="redis-status" class="mt-2 text-sm text-gray-500">Click Test to check</div>
+    </div>
+</div>
+
+<!-- Counts -->
+<h3 class="text-lg font-semibold text-gray-900 mb-4">Management</h3>
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <a href="/settings/projects" class="settings-card bg-white rounded-xl border border-gray-200 p-5 block">
+        <div class="flex items-center justify-between">
+            <div>
+                <p class="text-sm text-gray-500">Active Projects</p>
+                <p class="text-3xl font-bold text-gray-900 mt-1">{{ project_count }}</p>
+            </div>
+            <svg class="w-8 h-8 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+        </div>
+    </a>
+    <a href="/settings/users" class="settings-card bg-white rounded-xl border border-gray-200 p-5 block">
+        <div class="flex items-center justify-between">
+            <div>
+                <p class="text-sm text-gray-500">Authorized Users</p>
+                <p class="text-3xl font-bold text-gray-900 mt-1">{{ user_count }}</p>
+            </div>
+            <svg class="w-8 h-8 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+        </div>
+    </a>
+</div>
+{% endblock %}

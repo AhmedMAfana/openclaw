@@ -1,0 +1,109 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - generic [ref=e4]:
+      - heading "OpenClow" [level=1] [ref=e5]
+      - paragraph [ref=e6]: Settings Dashboard
+    - navigation [ref=e7]:
+      - link "Dashboard" [ref=e8] [cursor=pointer]:
+        - /url: /settings
+        - img [ref=e9]
+        - text: Dashboard
+      - paragraph [ref=e11]: Providers
+      - link "LLM / AI" [ref=e12] [cursor=pointer]:
+        - /url: /settings/llm
+        - img [ref=e13]
+        - text: LLM / AI
+      - link "Chat Platform" [ref=e15] [cursor=pointer]:
+        - /url: /settings/chat
+        - img [ref=e16]
+        - text: Chat Platform
+      - link "Git Provider" [ref=e18] [cursor=pointer]:
+        - /url: /settings/git
+        - img [ref=e19]
+        - text: Git Provider
+      - link "System" [ref=e21] [cursor=pointer]:
+        - /url: /settings/system
+        - img [ref=e22]
+        - text: System
+      - paragraph [ref=e25]: Management
+      - link "Projects" [ref=e26] [cursor=pointer]:
+        - /url: /settings/projects
+        - img [ref=e27]
+        - text: Projects
+      - link "Users" [ref=e29] [cursor=pointer]:
+        - /url: /settings/users
+        - img [ref=e30]
+        - text: Users
+    - link "Setup Wizard" [ref=e33] [cursor=pointer]:
+      - /url: /settings/wizard
+      - img [ref=e34]
+      - text: Setup Wizard
+  - main [ref=e36]:
+    - generic [ref=e37]:
+      - generic [ref=e38]:
+        - heading "Settings Dashboard" [level=2] [ref=e39]
+        - paragraph [ref=e40]: Overview of all integrations and system status
+      - generic [ref=e41]:
+        - button "Test All Connections" [ref=e42] [cursor=pointer]
+        - link "Run Setup Wizard" [ref=e43] [cursor=pointer]:
+          - /url: /settings/wizard
+      - generic [ref=e44]:
+        - generic [ref=e45]:
+          - generic [ref=e47]:
+            - img [ref=e48]
+            - heading "LLM / AI" [level=3] [ref=e50]
+          - paragraph [ref=e52]: "Provider: claude"
+          - generic [ref=e53]:
+            - button "Test" [ref=e54] [cursor=pointer]
+            - link "Configure" [ref=e55] [cursor=pointer]:
+              - /url: /settings/llm
+        - generic [ref=e56]:
+          - generic [ref=e58]:
+            - img [ref=e59]
+            - heading "Chat Platform" [level=3] [ref=e61]
+          - paragraph [ref=e63]: "Provider: telegram"
+          - generic [ref=e64]:
+            - button "Test" [ref=e65] [cursor=pointer]
+            - link "Configure" [ref=e66] [cursor=pointer]:
+              - /url: /settings/chat
+        - generic [ref=e67]:
+          - generic [ref=e69]:
+            - img [ref=e70]
+            - heading "Git Provider" [level=3] [ref=e72]
+          - paragraph [ref=e74]: "Provider: github"
+          - generic [ref=e75]:
+            - button "Test" [ref=e76] [cursor=pointer]
+            - link "Configure" [ref=e77] [cursor=pointer]:
+              - /url: /settings/git
+      - heading "Infrastructure" [level=3] [ref=e78]
+      - generic [ref=e79]:
+        - generic [ref=e80]:
+          - generic [ref=e81]:
+            - generic [ref=e82]:
+              - img [ref=e83]
+              - heading "Database" [level=3] [ref=e85]
+            - button "Test" [active] [ref=e86] [cursor=pointer]
+          - generic [ref=e114]: PostgreSQL connected
+        - generic [ref=e88]:
+          - generic [ref=e89]:
+            - generic [ref=e90]:
+              - img [ref=e91]
+              - heading "Redis" [level=3] [ref=e93]
+            - button "Test" [ref=e94] [cursor=pointer]
+          - generic [ref=e95]: Click Test to check
+      - heading "Management" [level=3] [ref=e96]
+      - generic [ref=e97]:
+        - link "Active Projects 2" [ref=e98] [cursor=pointer]:
+          - /url: /settings/projects
+          - generic [ref=e99]:
+            - generic [ref=e100]:
+              - paragraph [ref=e101]: Active Projects
+              - paragraph [ref=e102]: "2"
+            - img [ref=e103]
+        - link "Authorized Users 1" [ref=e105] [cursor=pointer]:
+          - /url: /settings/users
+          - generic [ref=e106]:
+            - generic [ref=e107]:
+              - paragraph [ref=e108]: Authorized Users
+              - paragraph [ref=e109]: "1"
+            - img [ref=e110]

@@ -1,0 +1,70 @@
+FROM python:3.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl wget ca-certificates gnupg openssh-client jq unzip procps ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 20
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# PHP + Composer (Debian default PHP — works with Laravel 10/11)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    php-cli php-mbstring php-xml php-curl \
+    php-zip php-mysql php-pgsql php-sqlite3 \
+    php-bcmath php-intl php-gd \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+# Docker CLI (to manage project containers)
+RUN curl -fsSL https://get.docker.com | sh
+
+# Cloudflare Tunnel (temporary public URLs for project health checks)
+RUN curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(dpkg --print-architecture) \
+    -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
+
+# Claude Code CLI + Playwright MCP
+RUN npm install -g @anthropic-ai/claude-code@latest @playwright/mcp@latest
+
+# Playwright browsers (headless Chromium for visual testing)
+RUN npx playwright install --with-deps chromium
+
+# Git identity
+RUN git config --system user.email "openclow@bot.local" \
+    && git config --system user.name "OpenClow Bot"
+
+# Python app
+WORKDIR /app
+COPY pyproject.toml ./
+COPY src/ ./src/
+
+RUN pip install --no-cache-dir -e .
+
+# Workspace + user
+RUN mkdir -p /workspaces \
+    && useradd -m -s /bin/bash openclow \
+    && groupadd -f docker \
+    && usermod -aG docker openclow \
+    && mkdir -p /home/openclow/.claude \
+    && chown -R openclow:openclow /app /workspaces /home/openclow
+# Entrypoint that restores Claude credentials from volume
+COPY scripts/worker-entrypoint.sh /usr/local/bin/worker-entrypoint.sh
+RUN chmod +x /usr/local/bin/worker-entrypoint.sh
+
+USER openclow
+
+ENTRYPOINT ["worker-entrypoint.sh"]
+CMD ["arq", "openclow.worker.arq_app.WorkerSettings"]

@@ -1,0 +1,50 @@
+# Dev overrides — auto-loaded by docker compose
+services:
+  bot:
+    command: >
+      bash -c "
+        pip install -e /app --quiet 2>&1 | tail -1;
+        exec watchfiles 'python -m openclow.bot.main' src/
+      "
+    user: root
+    volumes:
+      - ./src:/app/src:cached
+    environment:
+      - LOG_LEVEL=DEBUG
+
+  api:
+    command: >
+      bash -c "
+        pip install -e /app --quiet 2>&1 | tail -1;
+        exec uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+    user: root
+    volumes:
+      - ./src:/app/src:cached
+    environment:
+      - LOG_LEVEL=DEBUG
+
+  worker:
+    command: >
+      bash -c "
+        chmod 666 /var/run/docker.sock 2>/dev/null || true;
+        cp /home/openclow/.claude/.claude.json.persistent /home/openclow/.claude.json 2>/dev/null || echo '{}' > /home/openclow/.claude.json;
+        echo '[worker] Claude auth:';
+        claude auth status 2>/dev/null | grep loggedIn || echo 'not logged in';
+        exec su openclow -c 'arq openclow.worker.arq_app.WorkerSettings'
+      "
+    user: root
+    volumes:
+      - ./src:/app/src:cached
+      - ./workspaces_dev:/workspaces
+      - claude_auth:/home/openclow/.claude
+    environment:
+      - LOG_LEVEL=DEBUG
+
+  postgres:
+    ports:
+      - "5432:5432"
+
+  redis:
+    ports:
+      - "6379:6379"

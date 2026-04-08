@@ -1,0 +1,49 @@
+{% if not is_available %}
+<div class="bg-gray-50 rounded-lg p-4 text-center">
+    <span class="provider-badge coming-soon">Coming Soon</span>
+    <p class="text-sm text-gray-500 mt-2">{{ provider_type | capitalize }} integration is not yet available.</p>
+</div>
+{% else %}
+{% for field in fields %}
+<div class="mb-4">
+    <label for="{{ field.name }}" class="block text-sm font-medium text-gray-700 mb-1">
+        {{ field.label }}
+        {% if field.get('required') %}<span class="text-red-400">*</span>{% endif %}
+    </label>
+    {% if field.type == "password" %}
+        <input
+            type="password"
+            id="{{ field.name }}"
+            name="{{ field.name }}"
+            value="{{ config.get(field.name, '') }}"
+            placeholder="{{ field.get('help', '') }}"
+            class="form-input"
+            {% if field.get('required') %}required{% endif %}
+        >
+    {% elif field.type == "number" %}
+        <input
+            type="number"
+            id="{{ field.name }}"
+            name="{{ field.name }}"
+            value="{{ config.get(field.name, field.get('default', '')) }}"
+            min="{{ field.get('min', '') }}"
+            max="{{ field.get('max', '') }}"
+            class="form-input"
+        >
+    {% else %}
+        <input
+            type="text"
+            id="{{ field.name }}"
+            name="{{ field.name }}"
+            value="{{ config.get(field.name, field.get('default', '')) }}"
+            placeholder="{{ field.get('help', '') }}"
+            class="form-input"
+            {% if field.get('required') %}required{% endif %}
+        >
+    {% endif %}
+    {% if field.get('help') %}
+        <p class="text-xs text-gray-400 mt-1">{{ field.help }}</p>
+    {% endif %}
+</div>
+{% endfor %}
+{% endif %}

@@ -1,0 +1,605 @@
+- generic [ref=e1]:
+  - generic:
+    - generic:
+      - generic: 
+  - generic [ref=e3]:
+    - generic [ref=e5]:
+      - generic [ref=e7]:
+        - generic [ref=e8]:
+          - button "Open menu" [ref=e9] [cursor=pointer]
+          - generic:       
+        - generic [ref=e12]:
+          - generic [ref=e15]: 
+          - generic:
+            - button "Open Story List"
+          - textbox "Search" [ref=e16]
+      - generic [ref=e22]:
+        - button "Archived Chats طلبة فروع قطاع غزة" [ref=e24] [cursor=pointer]:
+          - img [ref=e28]: 
+          - generic [ref=e29]:
+            - heading "Archived Chats" [level=3] [ref=e32]
+            - generic [ref=e34]: طلبة فروع قطاع غزة
+        - link "OpenClow Bot OpenClow Bot 16:13 🤖 Setting up tagh-test (418s) ━━━━━━━━━━━━━━━━━━━━━━━ Node.js, Vue, PHP/Laravel, Laravel ✅ Clone repository ✅ Setup environment — .env ready ✅ Copy auth.json for composer GitLab private packages — C..." [ref=e6064] [cursor=pointer]:
+          - /url: "#8606963465"
+          - generic "OpenClow Bot" [ref=e39]:
+            - generic [ref=e41]: OB
+          - generic [ref=e42]:
+            - generic [ref=e43]:
+              - button "OpenClow Bot" [ref=e45]
+              - generic [ref=e47]: 16:13
+            - paragraph [ref=e49]:
+              - generic [ref=e50]:
+                - img "🤖" [ref=e6050]
+                - text: Setting up tagh-test (418s) ━━━━━━━━━━━━━━━━━━━━━━━ Node.js, Vue, PHP/Laravel, Laravel
+                - img "✅" [ref=e6051]
+                - text: Clone repository
+                - img "✅" [ref=e6052]
+                - text: Setup environment — .env ready
+                - img "✅" [ref=e6053]
+                - text: Copy auth.json for composer GitLab private packages — C...
+        - 'link "المستشار احمد ابو اياد المستشار احمد ابو اياد 15:54 ✈️ التلفزيون الإيراني: أميركا وإسرائيل قصفوا مصفاة الطاقة في جزيرة لاون وردينا بقصف في الكويت والإمارات .. ✅ https://t.me/Almustashaar" [ref=e4200] [cursor=pointer]':
+          - /url: "#-1001307326930"
+          - img "المستشار احمد ابو اياد" [ref=e77]
+          - generic [ref=e78]:
+            - generic [ref=e79]:
+              - generic [ref=e80]:
+                - button "المستشار احمد ابو اياد" [ref=e81]
+                - img [ref=e82]
+              - generic [ref=e713]: 15:54
+            - paragraph [ref=e714]:
+              - generic [ref=e4115]:
+                - generic [ref=e4116]: 
+                - img "✈️" [ref=e4194]
+                - text: "التلفزيون الإيراني: أميركا وإسرائيل قصفوا مصفاة الطاقة في جزيرة لاون وردينا بقصف في الكويت والإمارات .."
+                - img "✅" [ref=e4197]
+                - text: https://t.me/Almustashaar
+        - link "قناة رصد العدو قناة رصد العدو 15:53 مصادر عدد كبير من الشهداء والمصابين تصل مشافي لبنان" [ref=e4201] [cursor=pointer]:
+          - /url: "#-1001471257233"
+          - img "قناة رصد العدو" [ref=e57]
+          - generic [ref=e58]:
+            - generic [ref=e59]:
+              - button "قناة رصد العدو" [ref=e61]
+              - generic [ref=e728]: 15:53
+            - paragraph [ref=e729]:
+              - generic [ref=e730]: مصادر عدد كبير من الشهداء والمصابين تصل مشافي لبنان
+        - link "BotFather BotFather Tue Done! Congratulations on your new bot. You will find it at t.me/open_clow_ami_bot. You can now add a description, about section and profile picture for your bot, see /help for a list of commands. By t... Open" [ref=e97] [cursor=pointer]:
+          - /url: "#93372553"
+          - img "BotFather" [ref=e102]
+          - generic [ref=e103]:
+            - generic [ref=e104]:
+              - generic [ref=e105]:
+                - button "BotFather" [ref=e106]
+                - img [ref=e107]
+              - generic [ref=e111]: Tue
+            - generic [ref=e112]:
+              - paragraph [ref=e113]:
+                - generic [ref=e114]: Done! Congratulations on your new bot. You will find it at t.me/open_clow_ami_bot. You can now add a description, about section and profile picture for your bot, see /help for a list of commands. By t...
+              - button "Open" [ref=e116]
+        - link "Mohammed Mohammed Mar 31 كيف يعني خازوق" [ref=e118] [cursor=pointer]:
+          - /url: "#947555590"
+          - generic "Mohammed" [ref=e121]:
+            - generic [ref=e123]: M
+          - generic [ref=e124]:
+            - generic [ref=e125]:
+              - button "Mohammed" [ref=e127]
+              - generic [ref=e128]:
+                - generic [ref=e132]: 
+                - generic [ref=e133]: Mar 31
+            - paragraph [ref=e135]:
+              - generic [ref=e136]: كيف يعني خازوق
+      - generic [ref=e137]:
+        - button "New Message" [ref=e138] [cursor=pointer]:
+          - generic [ref=e139]: 
+          - generic [ref=e140]: 
+        - generic:   
+    - generic [ref=e141]:
+      - generic [ref=e4202]:
+        - generic [ref=e4203]:
+          - generic [ref=e4207] [cursor=pointer]:
+            - generic "OpenClow Bot" [ref=e4208]:
+              - generic [ref=e4210]: OB
+            - generic [ref=e4211]:
+              - button "OpenClow Bot" [ref=e4213]
+              - generic [ref=e4214]: bot
+          - generic [ref=e4216]:
+            - button "Search this chat" [ref=e4217] [cursor=pointer]:
+              - generic [ref=e4218]: 
+            - button "More actions" [ref=e4219] [cursor=pointer]:
+              - generic [ref=e4220]: 
+        - generic [ref=e4223]:
+          - generic [ref=e4632]:
+            - generic:
+              - generic: Today
+            - generic [ref=e5461]:
+              - generic [ref=e5463]:
+                - text: /bootstrap trade-bot
+                - generic [ref=e5464] [cursor=pointer]:
+                  - generic [ref=e5465]: 09:13
+                  - generic [ref=e5469]: 
+              - img [ref=e5470]
+              - img "Red Heart" [ref=e5476] [cursor=pointer]
+            - generic [ref=e5479]:
+              - generic [ref=e5481]:
+                - img "⚙️" [ref=e5482]
+                - text: Setting up trade-bot
+                - img "✅" [ref=e5483]
+                - text: Repository updated
+                - img "✅" [ref=e5484]
+                - text: "Environment: .env exists"
+                - img "❌" [ref=e5485]
+                - text: Docker build/start failed
+                - img "🔧" [ref=e5486]
+                - text: Build error detected — starting auto-repair...
+                - img "🔧" [ref=e5487]
+                - text: "[build] Fixing build error (attempt 1/2)..."
+                - img "🚫" [ref=e5488]
+                - text: "[build] Cannot auto-fix build: Claude agent error: Command failed with exit code 1 (exit code: 1)"
+                - img "❌" [ref=e5489]
+                - text: "Build repair failed: Claude agent error: Command failed with exit code 1 (exit code: 1)"
+                - text: ────────────────────
+                - img "📌" [ref=e5490]
+                - text: Setup Failed
+                - img "❌" [ref=e5491]
+                - text: Could not build Docker containers
+                - img "💡" [ref=e5492]
+                - text: Check the Dockerfile and requirements
+                - img "💡" [ref=e5493]
+                - text: "Run manually: docker compose -f infra/docker/docker-compose.yml up --build"
+                - generic [ref=e5495] [cursor=pointer]: 09:13
+              - img [ref=e5496]
+              - img "Red Heart" [ref=e5502] [cursor=pointer]
+            - generic [ref=e5505]:
+              - generic [ref=e5507]:
+                - text: /projects
+                - generic [ref=e5508] [cursor=pointer]:
+                  - generic [ref=e5509]: 10:44
+                  - generic [ref=e5513]: 
+              - img [ref=e5514]
+              - img "Red Heart" [ref=e5520] [cursor=pointer]
+            - generic [ref=e5523]:
+              - generic [ref=e5525]:
+                - img "🔗" [ref=e5526]
+                - text: Unlinking trade-bot...
+                - img "✅" [ref=e5527]
+                - text: Docker containers stopped
+                - img "✅" [ref=e5528]
+                - text: Tunnel stopped
+                - img "✅" [ref=e5529]
+                - text: Marked as inactive
+                - img "🔗" [ref=e5530]
+                - text: trade-bot unlinked.
+                - text: Use /bootstrap or re-link to reconnect.
+                - generic [ref=e5532] [cursor=pointer]: 10:44
+              - img [ref=e5533]
+              - img "Red Heart" [ref=e5539] [cursor=pointer]
+            - generic [ref=e5542]:
+              - generic [ref=e5544]:
+                - text: hi
+                - generic [ref=e5545] [cursor=pointer]:
+                  - generic [ref=e5546]: 11:02
+                  - generic [ref=e5550]: 
+              - img [ref=e5551]
+              - img "Red Heart" [ref=e5557] [cursor=pointer]
+            - generic [ref=e5559]:
+              - generic [ref=e5560]:
+                - generic [ref=e5562]:
+                  - img "📊" [ref=e5563]
+                  - text: tagh-works — Health Check
+                  - img "❌" [ref=e5564]
+                  - text: No running containers found.
+                  - img "❌" [ref=e5565]
+                  - text: "Docker: no running containers"
+                  - img "✅" [ref=e5566]
+                  - text: "Config: all fields set"
+                  - img "🔧" [ref=e5567]
+                  - text: "Repair Summary:"
+                  - img "❌" [ref=e5568]
+                  - text: "1: could not auto-repair"
+                  - text: "→ CLI error:"
+                  - img "🔧" [ref=e5569]
+                  - text: "[1] Repair attempt 1/3..."
+                  - img "❌" [ref=e5570]
+                  - text: "[1] Repair failed after 3 attempts"
+                  - img "❌" [ref=e5571]
+                  - text: "1: could not auto-repair"
+                  - text: "→ CLI error:"
+                  - img "🔧" [ref=e5572]
+                  - text: "[1] Repair attempt 1/3..."
+                  - img "❌" [ref=e5573]
+                  - text: "[1] Repair failed after 3 attempts"
+                  - img "❌" [ref=e5574]
+                  - text: "1: could not auto-repair"
+                  - text: "→ CLI error:"
+                  - generic [ref=e5576] [cursor=pointer]: 11:02
+                - img "Red Heart" [ref=e5579] [cursor=pointer]
+              - button "🔄 Refresh" [ref=e5582] [cursor=pointer]:
+                - generic [ref=e5583]:
+                  - img "🔄" [ref=e5584]
+                  - text: Refresh
+            - generic [ref=e5588]:
+              - generic [ref=e5590]:
+                - text: hi
+                - generic [ref=e5591] [cursor=pointer]:
+                  - generic [ref=e5592]: 11:36
+                  - generic [ref=e5596]: 
+              - img [ref=e5597]
+              - img "Red Heart" [ref=e5603] [cursor=pointer]
+            - generic [ref=e5606]:
+              - generic [ref=e5608]:
+                - img "⚙️" [ref=e5609]
+                - text: Setting up tagh-works
+                - img "✅" [ref=e5610]
+                - text: Repository cloned
+                - img "✅" [ref=e5611]
+                - text: "Environment: copied .env.example → .env"
+                - img "❌" [ref=e5612]
+                - text: Docker build/start failed
+                - img "🔧" [ref=e5613]
+                - text: Build error detected — starting auto-repair...
+                - img "🔧" [ref=e5614]
+                - text: "[build] Fixing build error (attempt 1/2)..."
+                - img "🚫" [ref=e5615]
+                - text: "[build] Cannot auto-fix build: Claude diagnosis timed out"
+                - img "❌" [ref=e5616]
+                - text: "Build repair failed: Claude diagnosis timed out"
+                - text: ────────────────────
+                - img "📌" [ref=e5617]
+                - text: Setup Failed
+                - img "❌" [ref=e5618]
+                - text: Could not build Docker containers
+                - img "💡" [ref=e5619]
+                - text: Check the Dockerfile and requirements
+                - img "💡" [ref=e5620]
+                - text: "Run manually: docker compose -f docker-compose.yml up --build"
+                - generic [ref=e5622] [cursor=pointer]: 11:36
+              - img [ref=e5623]
+              - img "Red Heart" [ref=e5629] [cursor=pointer]
+            - generic [ref=e5632]:
+              - generic [ref=e5634]:
+                - text: /addproject
+                - link "https://github.com/AhmedMAfana/tagh-test" [ref=e5635] [cursor=pointer]:
+                  - /url: https://github.com/AhmedMAfana/tagh-test
+                - generic [ref=e5636] [cursor=pointer]:
+                  - generic [ref=e5637]: 13:25
+                  - generic [ref=e5641]: 
+              - img [ref=e5642]
+              - img "Red Heart" [ref=e5648] [cursor=pointer]
+            - generic [ref=e5650]:
+              - generic [ref=e5651]:
+                - generic [ref=e5653]:
+                  - img "🤖" [ref=e5654]
+                  - text: Setting up tagh-test (196s)
+                  - text: ━━━━━━━━━━━━━━━━━━━━━━━
+                  - text: Node.js, Vue, PHP/Laravel, Laravel
+                  - img "✅" [ref=e5655]
+                  - text: Clone repository
+                  - img "✅" [ref=e5656]
+                  - text: Setup environment — .env ready
+                  - img "✅" [ref=e5657]
+                  - text: Copy .env.example to .env and configure environment variables for Docker — Configured .env with Docker variables, DB host, Re
+                  - img "❌" [ref=e5658]
+                  - text: "Install PHP dependencies (composer install) — Command failed with exit code 1 (exit code: 1)"
+                  - text: Err
+                  - img "⬜" [ref=e5659]
+                  - text: Install Node dependencies (npm install)
+                  - img "⬜" [ref=e5660]
+                  - text: Build frontend assets (npm run build)
+                  - img "⬜" [ref=e5661]
+                  - text: Start Docker containers
+                  - img "⬜" [ref=e5662]
+                  - text: Generate Laravel app key
+                  - img "❌" [ref=e5663]
+                  - text: Setup failed — check errors above
+                  - generic [ref=e5665] [cursor=pointer]: 13:25
+                - img "Red Heart" [ref=e5668] [cursor=pointer]
+              - generic [ref=e5669]:
+                - button "🔄 Retry Bootstrap" [ref=e5671] [cursor=pointer]:
+                  - generic [ref=e5672]:
+                    - img "🔄" [ref=e5673]
+                    - text: Retry Bootstrap
+                - generic [ref=e5675]:
+                  - button "🔗 Unlink" [ref=e5676] [cursor=pointer]:
+                    - generic [ref=e5677]:
+                      - img "🔗" [ref=e5678]
+                      - text: Unlink
+                  - button "🗑 Remove" [ref=e5680] [cursor=pointer]:
+                    - generic [ref=e5681]:
+                      - img "🗑" [ref=e5682]
+                      - text: Remove
+                - button "◀️ Main Menu" [ref=e5685] [cursor=pointer]:
+                  - generic [ref=e5686]:
+                    - img "◀️" [ref=e5687]
+                    - text: Main Menu
+            - generic [ref=e5691]:
+              - generic [ref=e5693]:
+                - button "Play audio" [ref=e5695] [cursor=pointer]:
+                  - generic [ref=e5696]: 
+                  - generic [ref=e5697]: 
+                - paragraph [ref=e5703]: 0:04
+              - generic [ref=e5704] [cursor=pointer]:
+                - generic [ref=e5705]: 14:51
+                - generic [ref=e5709]: 
+              - img [ref=e5710]
+              - img "Red Heart" [ref=e5716] [cursor=pointer]
+            - generic [ref=e5718]:
+              - generic [ref=e5719]:
+                - generic [ref=e5721]:
+                  - text: To help with that, I'd need more context.
+                  - text: Can you tell me which project is failing?
+                  - generic [ref=e5723] [cursor=pointer]: 14:51
+                - img "Red Heart" [ref=e5726] [cursor=pointer]
+              - generic [ref=e5727]:
+                - generic [ref=e5728]:
+                  - button "🚀 New Task" [ref=e5729] [cursor=pointer]:
+                    - generic [ref=e5730]:
+                      - img "🚀" [ref=e5731]
+                      - text: New Task
+                  - button "📂 Projects" [ref=e5733] [cursor=pointer]:
+                    - generic [ref=e5734]:
+                      - img "📂" [ref=e5735]
+                      - text: Projects
+                - generic [ref=e5737]:
+                  - button "📊 Status" [ref=e5738] [cursor=pointer]:
+                    - generic [ref=e5739]:
+                      - img "📊" [ref=e5740]
+                      - text: Status
+                  - button "📋 Logs" [ref=e5742] [cursor=pointer]:
+                    - generic [ref=e5743]:
+                      - img "📋" [ref=e5744]
+                      - text: Logs
+                - generic [ref=e5746]:
+                  - button "📈 Dashboard" [ref=e5747] [cursor=pointer]:
+                    - generic [ref=e5748]:
+                      - img "📈" [ref=e5749]
+                      - text: Dashboard
+                  - button "➕ Add Project" [ref=e5751] [cursor=pointer]:
+                    - generic [ref=e5752]:
+                      - img "➕" [ref=e5753]
+                      - text: Add Project
+                - button "❓ Help" [ref=e5756] [cursor=pointer]:
+                  - generic [ref=e5757]:
+                    - img "❓" [ref=e5758]
+                    - text: Help
+            - generic [ref=e5762]:
+              - generic [ref=e5764]:
+                - button "Play audio" [ref=e5766] [cursor=pointer]:
+                  - generic [ref=e5767]: 
+                  - generic [ref=e5768]: 
+                - paragraph [ref=e5774]: 0:04
+              - generic [ref=e5775] [cursor=pointer]:
+                - generic [ref=e5776]: 14:52
+                - generic [ref=e5780]: 
+              - img [ref=e5781]
+              - img "Red Heart" [ref=e5787] [cursor=pointer]
+            - generic [ref=e5789]:
+              - generic [ref=e5790]:
+                - generic [ref=e5792]:
+                  - img "📈" [ref=e5793]
+                  - strong [ref=e5794]: Live Dashboard
+                  - text: ━━━━━━━━━━━━━━━━━━━━━━━
+                  - text: Real-time container logs via Dozzle.
+                  - img "🔗" [ref=e5795]
+                  - textbox [ref=e5796] [cursor=pointer]
+                  - generic [ref=e5798] [cursor=pointer]: 14:52
+                - img "Red Heart" [ref=e5801] [cursor=pointer]
+              - generic [ref=e5802]:
+                - button "🌐 Open Dashboard" [ref=e5804] [cursor=pointer]:
+                  - generic [ref=e5805]: 
+                  - generic [ref=e5806]:
+                    - img "🌐" [ref=e5807]
+                    - text: Open Dashboard
+                - generic [ref=e5809]:
+                  - button "🔄 New Link" [ref=e5810] [cursor=pointer]:
+                    - generic [ref=e5811]:
+                      - img "🔄" [ref=e5812]
+                      - text: New Link
+                  - button "🛑 Stop Tunnel" [ref=e5814] [cursor=pointer]:
+                    - generic [ref=e5815]:
+                      - img "🛑" [ref=e5816]
+                      - text: Stop Tunnel
+                - button "◀️ Main Menu" [ref=e5819] [cursor=pointer]:
+                  - generic [ref=e5820]:
+                    - img "◀️" [ref=e5821]
+                    - text: Main Menu
+            - generic [ref=e5825]:
+              - generic [ref=e5827]:
+                - text: can u tolde please why the app setup failed
+                - generic [ref=e5828] [cursor=pointer]:
+                  - generic [ref=e5829]: 14:52
+                  - generic [ref=e5833]: 
+              - img [ref=e5834]
+              - img "Red Heart" [ref=e5840] [cursor=pointer]
+            - generic [ref=e5842]:
+              - generic [ref=e5843]:
+                - generic [ref=e5845]:
+                  - img "📊" [ref=e5846]
+                  - text: tagh-test — Health Check
+                  - img "❌" [ref=e5847]
+                  - text: No running containers found.
+                  - img "❌" [ref=e5848]
+                  - text: "Docker: no running containers"
+                  - img "⚠️" [ref=e5849]
+                  - text: "Config: missing: app_container_name, app_port"
+                  - img "🔧" [ref=e5850]
+                  - text: "Repair Summary:"
+                  - img "📊" [ref=e5851]
+                  - text: tagh-test — Health Check
+                  - img "❌" [ref=e5852]
+                  - text: No running containers found.
+                  - img "❌" [ref=e5853]
+                  - text: "Docker: no running containers"
+                  - img "⚠️" [ref=e5854]
+                  - text: "Config: missing: app_container_name, app_port"
+                  - generic [ref=e5856] [cursor=pointer]: 14:52
+                - img "Red Heart" [ref=e5859] [cursor=pointer]
+              - button "🔄 Refresh" [ref=e5862] [cursor=pointer]:
+                - generic [ref=e5863]:
+                  - img "🔄" [ref=e5864]
+                  - text: Refresh
+            - generic [ref=e5868]:
+              - generic [ref=e5870]:
+                - text: why did the tagh-test setup fail?
+                - generic [ref=e5871] [cursor=pointer]:
+                  - generic [ref=e5872]: 15:43
+                  - generic [ref=e5876]: 
+              - img [ref=e5877]
+              - img "Red Heart" [ref=e5883] [cursor=pointer]
+            - generic [ref=e5885]:
+              - generic [ref=e5886]:
+                - generic [ref=e5888]:
+                  - text: The tagh-test setup failed due to a docker compose error.
+                  - text: It seems the "NGINX_SSL_PATH" variable was not set.
+                  - text: Also, there was an issue with collecting a Python wheel.
+                  - generic [ref=e5890] [cursor=pointer]: 15:43
+                - img "Red Heart" [ref=e5893] [cursor=pointer]
+              - generic [ref=e5894]:
+                - generic [ref=e5895]:
+                  - button "🚀 New Task" [ref=e5896] [cursor=pointer]:
+                    - generic [ref=e5897]:
+                      - img "🚀" [ref=e5898]
+                      - text: New Task
+                  - button "📂 Projects" [ref=e5900] [cursor=pointer]:
+                    - generic [ref=e5901]:
+                      - img "📂" [ref=e5902]
+                      - text: Projects
+                - generic [ref=e5904]:
+                  - button "📊 Status" [ref=e5905] [cursor=pointer]:
+                    - generic [ref=e5906]:
+                      - img "📊" [ref=e5907]
+                      - text: Status
+                  - button "📋 Logs" [ref=e5909] [cursor=pointer]:
+                    - generic [ref=e5910]:
+                      - img "📋" [ref=e5911]
+                      - text: Logs
+                - generic [ref=e5913]:
+                  - button "📈 Dashboard" [ref=e5914] [cursor=pointer]:
+                    - generic [ref=e5915]:
+                      - img "📈" [ref=e5916]
+                      - text: Dashboard
+                  - button "➕ Add Project" [ref=e5918] [cursor=pointer]:
+                    - generic [ref=e5919]:
+                      - img "➕" [ref=e5920]
+                      - text: Add Project
+                - button "❓ Help" [ref=e5923] [cursor=pointer]:
+                  - generic [ref=e5924]:
+                    - img "❓" [ref=e5925]
+                    - text: Help
+            - generic [ref=e5929]:
+              - generic [ref=e5931]:
+                - text: /bootstrap tagh-test
+                - generic [ref=e5932] [cursor=pointer]:
+                  - generic [ref=e5933]: 15:43
+                  - generic [ref=e5937]: 
+              - img [ref=e5938]
+              - img "Red Heart" [ref=e5944] [cursor=pointer]
+            - generic [ref=e5947]:
+              - generic [ref=e5949]:
+                - img "🤖" [ref=e5950]
+                - text: Setting up tagh-test (755s)
+                - text: ━━━━━━━━━━━━━━━━━━━━━━━
+                - text: Node.js, Vue, PHP/Laravel, Laravel
+                - img "✅" [ref=e5951]
+                - text: Clone repository
+                - img "✅" [ref=e5952]
+                - text: Setup environment — .env ready
+                - img "✅" [ref=e5953]
+                - text: Copy .env.abc.test to .env and create nginx log directory — Copied .env.abc.test to .env and created nginx log
+                - img "✅" [ref=e5954]
+                - text: Copy auth.json for Composer GitLab authentication — Copied auth.json to ~/.composer/ for GitLab privat
+                - img "✅" [ref=e5955]
+                - text: Install PHP dependencies (composer install) — Installed 172 PHP packages via composer
+                - img "✅" [ref=e5956]
+                - text: Install Node dependencies (npm install) — Installed Node.js dependencies (with --legacy-peer
+                - img "🔄" [ref=e5957]
+                - text: Build frontend assets (npm run build) — npm run build 2>&1 | tail -30
+                - img "⬜" [ref=e5958]
+                - text: Start Docker containers
+                - img "⬜" [ref=e5959]
+                - text: Run database migrations
+                - generic [ref=e5961] [cursor=pointer]: 15:43
+              - img [ref=e5962]
+              - img "Red Heart" [ref=e5968] [cursor=pointer]
+            - generic [ref=e6014]:
+              - generic [ref=e6016]:
+                - text: /bootstrap tagh-test
+                - generic [ref=e6017] [cursor=pointer]:
+                  - generic [ref=e6018]: 16:13
+                  - generic [ref=e6020]:
+                    - text: 
+                    - generic [ref=e6022]: 
+              - img [ref=e6023]
+              - img "Red Heart" [ref=e6029] [cursor=pointer]
+            - generic [ref=e6035]:
+              - generic [ref=e6037]:
+                - img "🤖" [ref=e6054]
+                - text: Setting up tagh-test (418s)
+                - text: ━━━━━━━━━━━━━━━━━━━━━━━
+                - text: Node.js, Vue, PHP/Laravel, Laravel
+                - img "✅" [ref=e6055]
+                - text: Clone repository
+                - img "✅" [ref=e6056]
+                - text: Setup environment — .env ready
+                - img "✅" [ref=e6057]
+                - text: Copy auth.json for composer GitLab private packages — Copied auth.json to composer global config for Git
+                - img "✅" [ref=e6058]
+                - text: Verify PHP dependencies (vendor/ exists, validate autoload) — PHP vendor/ exists and autoload verified — skippin
+                - img "✅" [ref=e6059]
+                - text: Verify Node dependencies (node_modules/ exists, validate) — node_modules/ exists with key packages — skipping
+                - img "✅" [ref=e6060]
+                - text: Skip frontend build (public/build/ already has assets) — public/build/ already contains assets (manifest.js
+                - img "🔄" [ref=e6061]
+                - text: Start Docker containers (mysql, redis, meilisearch, mailpit, selenium, nginx, php-fpm) — docker compose -f docker-compose.yml -p
+                - img "⬜" [ref=e6062]
+                - text: Run database migrations via php-fpm container
+                - generic [ref=e6041] [cursor=pointer]: 16:13
+              - img [ref=e6042]
+              - img "Red Heart" [ref=e6048] [cursor=pointer]
+          - generic [ref=e5969]:
+            - generic:
+              - generic:
+                - button "Go to next unread reactions":
+                  - generic: 
+                - generic: 
+              - generic:
+                - button "Go to next mention":
+                  - generic: 
+                - generic: 
+              - generic:
+                - button "Go to bottom":
+                  - generic: 
+            - generic [ref=e5970]:
+              - generic [ref=e5971]:
+                - img [ref=e5972]
+                - generic [ref=e5976]:
+                  - button "Choose emoji, sticker or GIF" [ref=e5977] [cursor=pointer]:
+                    - generic [ref=e5978]: 
+                  - generic:              
+                  - generic [ref=e5981]:
+                    - textbox "Message" [active] [ref=e5982]
+                    - generic: Message
+                  - generic [ref=e5983]:
+                    - button "Add an attachment" [ref=e5984] [cursor=pointer]:
+                      - generic [ref=e5985]: 
+                    - menu "Add an attachment":    
+              - button "Record voice message" [ref=e5986] [cursor=pointer]:
+                - generic [ref=e5987]: 
+                - generic [ref=e5988]: 
+                - generic [ref=e5989]: 
+                - generic [ref=e5990]: 
+              - generic:  
+            - generic:
+              - generic:
+                - button "Exit select mode":
+                  - generic: 
+                - generic "MessagesSelected"
+      - generic [ref=e5991]:
+        - generic "OpenClow Bot" [ref=e5992]:
+          - generic [ref=e5994]: OB
+        - generic [ref=e5995]:
+          - generic [ref=e5998]: 
+          - textbox "Search" [ref=e5999]
+          - button [ref=e6002] [cursor=pointer]:
+            - generic [ref=e6003]: 
+        - button "Jump to Date" [ref=e6005] [cursor=pointer]:
+          - generic [ref=e6006]: 
+  - img

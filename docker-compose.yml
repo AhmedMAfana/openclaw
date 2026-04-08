@@ -1,0 +1,142 @@
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile.app
+  env_file: .env
+  restart: unless-stopped
+  environment:
+    ACTIVITY_LOG: /app/logs/activity.jsonl
+  volumes:
+    - activity_logs:/app/logs
+    - ./src:/app/src  # live-reload: code changes without rebuild
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  # ======== Infrastructure ========
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: openclow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-openclow}
+      POSTGRES_DB: openclow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openclow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD:-openclow}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-openclow}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  # ======== Application ========
+
+  bot:
+    <<: *app
+    command: python -m openclow.bot.main
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,time; s=os.stat('/tmp/bot_health'); exit(0 if time.time()-s.st_mtime < 30 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  api:
+    <<: *app
+    command: uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ACTIVITY_LOG: /app/logs/activity.jsonl
+    volumes:
+      - workspaces:/workspaces
+      - claude_auth:/home/openclow/.claude
+      - activity_logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock  # access to host Docker
+      - ./src:/app/src  # live-reload: code changes without rebuild
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import redis; r=redis.from_url('redis://:openclow@redis:6379/0'); r.ping()\""]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ======== Observability ========
+
+  dozzle:
+    image: amir20/dozzle:latest
+    container_name: dozzle
+    ports:
+      - "9999:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+
+  # ======== Run once ========
+
+  migrate:
+    <<: *app
+    command: alembic upgrade head
+    restart: "no"
+
+  # ======== Setup wizard (run interactively) ========
+  setup:
+    <<: *app
+    command: python -m openclow.setup
+    stdin_open: true
+    tty: true
+    restart: "no"
+
+volumes:
+  postgres_data:
+  redis_data:
+  workspaces:
+  claude_auth:
+  activity_logs:

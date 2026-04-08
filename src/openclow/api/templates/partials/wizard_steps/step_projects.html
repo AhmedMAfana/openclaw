@@ -1,0 +1,100 @@
+<div class="bg-white rounded-xl border border-gray-200 p-6">
+    <h3 class="text-lg font-semibold text-gray-900 mb-1">Step 4: Projects</h3>
+    <p class="text-sm text-gray-500 mb-6">Add GitHub repositories for OpenClow to work on</p>
+
+    <!-- Existing projects list -->
+    <div id="wizard-projects-list" class="space-y-2 mb-4">
+        <!-- Populated by HTMX / JS -->
+    </div>
+
+    <!-- Add project form -->
+    <form id="wizard-project-form" class="space-y-4 border border-gray-200 rounded-lg p-4 bg-gray-50">
+        <div class="grid grid-cols-2 gap-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Repository <span class="text-red-400">*</span></label>
+                <input type="text" name="github_repo" placeholder="owner/repo" class="form-input" required>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Project Name <span class="text-red-400">*</span></label>
+                <input type="text" name="name" placeholder="my-project" class="form-input" required>
+            </div>
+        </div>
+        <div class="grid grid-cols-3 gap-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Branch</label>
+                <input type="text" name="default_branch" value="main" class="form-input">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Tech Stack</label>
+                <input type="text" name="tech_stack" placeholder="e.g. Laravel" class="form-input">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">App Port</label>
+                <input type="number" name="app_port" placeholder="8000" class="form-input">
+            </div>
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+            <input type="text" name="description" placeholder="Brief project description" class="form-input">
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Setup Commands</label>
+                <input type="text" name="setup_commands" placeholder="cp .env.example .env" class="form-input">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">App Container</label>
+                <input type="text" name="app_container_name" placeholder="app" class="form-input">
+            </div>
+        </div>
+        <button type="button" onclick="addWizardProject()" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium">
+            Add Project
+        </button>
+    </form>
+
+    <!-- Navigation -->
+    <div class="flex justify-between pt-5 mt-5 border-t border-gray-100">
+        <button onclick="prevStep()" class="px-5 py-2 text-gray-600 hover:text-gray-800 text-sm">Back</button>
+        <button onclick="nextStep()" class="px-5 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700 text-sm font-medium">
+            Next
+        </button>
+    </div>
+</div>
+
+<script>
+async function addWizardProject() {
+    const form = document.getElementById('wizard-project-form');
+    const formData = new FormData(form);
+    const data = Object.fromEntries(formData.entries());
+
+    // Set defaults
+    data.is_dockerized = true;
+    data.docker_compose_file = 'docker-compose.yml';
+    if (data.app_port) data.app_port = Number(data.app_port);
+    else delete data.app_port;
+
+    try {
+        const resp = await fetch('/api/settings/projects', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+        const result = await resp.json();
+        if (resp.ok) {
+            showToast('Project added: ' + result.name, 'success');
+            // Add to list
+            const list = document.getElementById('wizard-projects-list');
+            const item = document.createElement('div');
+            item.className = 'flex items-center justify-between px-4 py-2 bg-white border border-gray-200 rounded-lg';
+            item.innerHTML = `<div><span class="font-medium text-sm">${result.name}</span> <span class="text-xs text-gray-400 font-mono">${result.github_repo}</span></div><span class="text-xs text-green-600">Added</span>`;
+            list.appendChild(item);
+            form.reset();
+            form.querySelector('[name=default_branch]').value = 'main';
+        } else {
+            showToast(result.detail || 'Failed to add project', 'error');
+        }
+    } catch(e) {
+        showToast('Network error', 'error');
+    }
+}
+</script>

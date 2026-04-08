@@ -1,0 +1,85 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - generic [ref=e4]:
+      - heading "OpenClow" [level=1] [ref=e5]
+      - paragraph [ref=e6]: Settings Dashboard
+    - navigation [ref=e7]:
+      - link "Dashboard" [ref=e8] [cursor=pointer]:
+        - /url: /settings
+        - img [ref=e9]
+        - text: Dashboard
+      - paragraph [ref=e11]: Providers
+      - link "LLM / AI" [ref=e12] [cursor=pointer]:
+        - /url: /settings/llm
+        - img [ref=e13]
+        - text: LLM / AI
+      - link "Chat Platform" [ref=e15] [cursor=pointer]:
+        - /url: /settings/chat
+        - img [ref=e16]
+        - text: Chat Platform
+      - link "Git Provider" [ref=e18] [cursor=pointer]:
+        - /url: /settings/git
+        - img [ref=e19]
+        - text: Git Provider
+      - link "System" [ref=e21] [cursor=pointer]:
+        - /url: /settings/system
+        - img [ref=e22]
+        - text: System
+      - paragraph [ref=e25]: Management
+      - link "Projects" [ref=e26] [cursor=pointer]:
+        - /url: /settings/projects
+        - img [ref=e27]
+        - text: Projects
+      - link "Users" [ref=e29] [cursor=pointer]:
+        - /url: /settings/users
+        - img [ref=e30]
+        - text: Users
+    - link "Setup Wizard" [ref=e33] [cursor=pointer]:
+      - /url: /settings/wizard
+      - img [ref=e34]
+      - text: Setup Wizard
+  - main [ref=e36]:
+    - generic [ref=e37]:
+      - generic [ref=e38]:
+        - heading "Setup Wizard" [level=2] [ref=e39]
+        - paragraph [ref=e40]: Configure OpenClow step by step — set up each integration, test it, and go
+      - generic [ref=e41]:
+        - generic [ref=e42]: "1"
+        - generic [ref=e44]: "2"
+        - generic [ref=e46]: "3"
+        - generic [ref=e48]: "4"
+        - generic [ref=e50]: "5"
+        - generic [ref=e52]: "6"
+      - generic [ref=e53]:
+        - generic [ref=e54]: LLM
+        - generic [ref=e55]: Chat
+        - generic [ref=e56]: Git
+        - generic [ref=e57]: Projects
+        - generic [ref=e58]: Users
+        - generic [ref=e59]: Review
+      - generic [ref=e61]:
+        - 'heading "Step 1: LLM / AI Provider" [level=3] [ref=e62]'
+        - paragraph [ref=e63]: Choose which AI model powers your development agents
+        - generic [ref=e64]:
+          - generic [ref=e65]:
+            - generic [ref=e66]: Provider
+            - generic [ref=e67]:
+              - generic [ref=e68] [cursor=pointer]:
+                - radio "Claude Active" [checked] [ref=e69]
+                - generic [ref=e70]: Claude
+                - generic [ref=e71]: Active
+              - generic [ref=e72]:
+                - radio "OpenAI Soon" [disabled] [ref=e73]
+                - generic [ref=e74]: OpenAI
+                - generic [ref=e75]: Soon
+          - generic [ref=e76]:
+            - generic [ref=e77]:
+              - generic [ref=e78]: Coder Max Turns
+              - spinbutton [ref=e79]: "50"
+              - paragraph [ref=e80]: Max tool-use turns for the coder agent
+            - generic [ref=e81]:
+              - generic [ref=e82]: Reviewer Max Turns
+              - spinbutton [ref=e83]: "20"
+              - paragraph [ref=e84]: Max tool-use turns for the reviewer agent
+          - button "Test Connection" [ref=e86] [cursor=pointer]
+        - button "Save & Next" [ref=e88] [cursor=pointer]

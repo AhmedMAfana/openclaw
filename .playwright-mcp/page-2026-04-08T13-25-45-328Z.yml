@@ -1,0 +1,75 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - generic [ref=e4]:
+      - heading "OpenClow" [level=1] [ref=e5]
+      - paragraph [ref=e6]: Settings Dashboard
+    - navigation [ref=e7]:
+      - link "Dashboard" [ref=e8] [cursor=pointer]:
+        - /url: /settings
+        - img [ref=e9]
+        - text: Dashboard
+      - paragraph [ref=e11]: Providers
+      - link "LLM / AI" [ref=e12] [cursor=pointer]:
+        - /url: /settings/llm
+        - img [ref=e13]
+        - text: LLM / AI
+      - link "Chat Platform" [ref=e15] [cursor=pointer]:
+        - /url: /settings/chat
+        - img [ref=e16]
+        - text: Chat Platform
+      - link "Git Provider" [ref=e18] [cursor=pointer]:
+        - /url: /settings/git
+        - img [ref=e19]
+        - text: Git Provider
+      - link "System" [ref=e21] [cursor=pointer]:
+        - /url: /settings/system
+        - img [ref=e22]
+        - text: System
+      - paragraph [ref=e25]: Management
+      - link "Projects" [ref=e26] [cursor=pointer]:
+        - /url: /settings/projects
+        - img [ref=e27]
+        - text: Projects
+      - link "Users" [ref=e29] [cursor=pointer]:
+        - /url: /settings/users
+        - img [ref=e30]
+        - text: Users
+    - link "Setup Wizard" [ref=e33] [cursor=pointer]:
+      - /url: /settings/wizard
+      - img [ref=e34]
+      - text: Setup Wizard
+  - main [ref=e36]:
+    - generic [ref=e37]:
+      - generic [ref=e38]:
+        - generic [ref=e39]:
+          - heading "Projects" [level=2] [ref=e40]
+          - paragraph [ref=e41]: Manage GitHub repositories connected to OpenClow
+        - button "Add Project" [ref=e42] [cursor=pointer]
+      - table [ref=e44]:
+        - rowgroup [ref=e45]:
+          - row "Name Repository Branch Tech Stack Docker Actions" [ref=e46]:
+            - columnheader "Name" [ref=e47]
+            - columnheader "Repository" [ref=e48]
+            - columnheader "Branch" [ref=e49]
+            - columnheader "Tech Stack" [ref=e50]
+            - columnheader "Docker" [ref=e51]
+            - columnheader "Actions" [ref=e52]
+        - rowgroup [ref=e53]:
+          - row "uk-post-map ahmedMAfani/uk-post-map main Unknown No Remove" [ref=e54]:
+            - cell "uk-post-map" [ref=e55]
+            - cell "ahmedMAfani/uk-post-map" [ref=e56]
+            - cell "main" [ref=e57]
+            - cell "Unknown" [ref=e58]
+            - cell "No" [ref=e59]:
+              - generic [ref=e60]: "No"
+            - cell "Remove" [ref=e61]:
+              - button "Remove" [ref=e62] [cursor=pointer]
+          - row "tagh-test AhmedMAfana/tagh-test main Node.js, Vue, PHP/Laravel, Laravel Yes Remove" [ref=e63]:
+            - cell "tagh-test" [ref=e64]
+            - cell "AhmedMAfana/tagh-test" [ref=e65]
+            - cell "main" [ref=e66]
+            - cell "Node.js, Vue, PHP/Laravel, Laravel" [ref=e67]
+            - cell "Yes" [ref=e68]:
+              - generic [ref=e69]: "Yes"
+            - cell "Remove" [ref=e70]:
+              - button "Remove" [ref=e71] [cursor=pointer]

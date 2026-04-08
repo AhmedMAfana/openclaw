@@ -1,0 +1,9 @@
+- generic [ref=e6]:
+  - heading "Log in to Telegram by QR Code" [level=1] [ref=e12]
+  - list [ref=e13]:
+    - listitem [ref=e14]:
+      - generic [ref=e15]: Open Telegram on your phone
+    - listitem [ref=e16]:
+      - generic [ref=e17]: Go to Settings > Devices > Link Desktop Device
+    - listitem [ref=e18]:
+      - generic [ref=e19]: Point your phone at this screen to confirm login

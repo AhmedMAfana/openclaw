@@ -1,0 +1,444 @@
+- generic [ref=e1]:
+  - generic [ref=e30]:
+    - generic [ref=e32]:
+      - generic [ref=e34]:
+        - generic [ref=e35]:
+          - button "Open menu" [ref=e36] [cursor=pointer]
+          - generic:       
+        - generic [ref=e39]:
+          - generic [ref=e42]: 
+          - generic:
+            - button "Open Story List"
+          - textbox "Search" [ref=e43]
+      - generic [ref=e49]:
+        - button "Archived Chats طلبة فروع قطاع غزة" [ref=e51] [cursor=pointer]:
+          - img [ref=e55]: 
+          - generic [ref=e56]:
+            - heading "Archived Chats" [level=3] [ref=e59]
+            - generic [ref=e61]: طلبة فروع قطاع غزة
+        - 'link "OpenClow Bot OpenClow Bot 07:36 📊 trade-bot — Health Check ❌ No running containers found. ❌ Docker: no running containers ✅ Config: all fields set 🔧 Repair Summary: 📊 trade-bot — Health Check ❌ No running containers found..." [ref=e650] [cursor=pointer]':
+          - /url: "#8606963465"
+          - generic "OpenClow Bot" [ref=e66]:
+            - generic [ref=e68]: OB
+          - generic [ref=e69]:
+            - generic [ref=e70]:
+              - button "OpenClow Bot" [ref=e72]
+              - generic [ref=e74]: 07:36
+            - paragraph [ref=e76]:
+              - generic [ref=e77]:
+                - img "📊" [ref=e651]
+                - text: trade-bot — Health Check
+                - img "❌" [ref=e652]
+                - text: No running containers found.
+                - img "❌" [ref=e653]
+                - text: "Docker: no running containers"
+                - img "✅" [ref=e654]
+                - text: "Config: all fields set"
+                - img "🔧" [ref=e655]
+                - text: "Repair Summary:"
+                - img "📊" [ref=e656]
+                - text: trade-bot — Health Check
+                - img "❌" [ref=e657]
+                - text: No running containers found...
+        - 'link "قناة رصد العدو قناة رصد العدو 06:56 نتنياهو: وقف إطلاق النار لمدة أسبوعين لا يشمل #لبنان" [ref=e79] [cursor=pointer]':
+          - /url: "#-1001471257233"
+          - img "قناة رصد العدو" [ref=e84]
+          - generic [ref=e85]:
+            - generic [ref=e86]:
+              - button "قناة رصد العدو" [ref=e88]
+              - generic [ref=e90]: 06:56
+            - paragraph [ref=e92]:
+              - generic [ref=e93]: "نتنياهو: وقف إطلاق النار لمدة أسبوعين لا يشمل #لبنان"
+        - link "المستشار احمد ابو اياد المستشار احمد ابو اياد 05:02 🔴 🚫 الان المرشد الأعلى الإيراني يصدر تعليمات لجميع الوحدات العسكرية بوقف إطلاق النار .. ✅ https://t.me/Almustashaar" [ref=e95] [cursor=pointer]:
+          - /url: "#-1001307326930"
+          - img "المستشار احمد ابو اياد" [ref=e100]
+          - generic [ref=e101]:
+            - generic [ref=e102]:
+              - generic [ref=e103]:
+                - button "المستشار احمد ابو اياد" [ref=e104]
+                - img [ref=e105]
+              - generic [ref=e109]: 05:02
+            - paragraph [ref=e111]:
+              - generic [ref=e112]:
+                - img "🔴" [ref=e114]
+                - img "🚫" [ref=e116]
+                - text: الان المرشد الأعلى الإيراني يصدر تعليمات لجميع الوحدات العسكرية بوقف إطلاق النار ..
+                - img "✅" [ref=e118]
+                - text: https://t.me/Almustashaar
+        - link "BotFather BotFather Tue Done! Congratulations on your new bot. You will find it at t.me/open_clow_ami_bot. You can now add a description, about section and profile picture for your bot, see /help for a list of commands. By t... Open" [ref=e120] [cursor=pointer]:
+          - /url: "#93372553"
+          - img "BotFather" [ref=e125]
+          - generic [ref=e126]:
+            - generic [ref=e127]:
+              - generic [ref=e128]:
+                - button "BotFather" [ref=e129]
+                - img [ref=e130]
+              - generic [ref=e134]: Tue
+            - generic [ref=e135]:
+              - paragraph [ref=e136]:
+                - generic [ref=e137]: Done! Congratulations on your new bot. You will find it at t.me/open_clow_ami_bot. You can now add a description, about section and profile picture for your bot, see /help for a list of commands. By t...
+              - button "Open" [ref=e139]
+        - link "Mohammed Mohammed Mar 31 كيف يعني خازوق" [ref=e141] [cursor=pointer]:
+          - /url: "#947555590"
+          - generic "Mohammed" [ref=e144]:
+            - generic [ref=e146]: M
+          - generic [ref=e147]:
+            - generic [ref=e148]:
+              - button "Mohammed" [ref=e150]
+              - generic [ref=e151]:
+                - generic [ref=e155]: 
+                - generic [ref=e156]: Mar 31
+            - paragraph [ref=e158]:
+              - generic [ref=e159]: كيف يعني خازوق
+      - generic [ref=e160]:
+        - button "New Message" [ref=e161] [cursor=pointer]:
+          - generic [ref=e162]: 
+          - generic [ref=e163]: 
+        - generic:   
+    - generic [ref=e167]:
+      - generic [ref=e168]:
+        - generic [ref=e172] [cursor=pointer]:
+          - generic "OpenClow Bot" [ref=e173]:
+            - generic [ref=e175]: OB
+          - generic [ref=e176]:
+            - button "OpenClow Bot" [ref=e178]
+            - generic [ref=e179]: bot
+        - generic [ref=e181]:
+          - button "Search this chat" [ref=e182] [cursor=pointer]:
+            - generic [ref=e183]: 
+          - button "More actions" [ref=e184] [cursor=pointer]:
+            - generic [ref=e185]: 
+      - generic [ref=e188]:
+        - generic [ref=e192]:
+          - generic:
+            - generic: Today
+          - generic [ref=e196]:
+            - generic [ref=e198]:
+              - text: Send /task to start a new development task.
+              - generic [ref=e200] [cursor=pointer]: 06:14
+            - img [ref=e201]
+            - img "Red Heart" [ref=e207] [cursor=pointer]
+          - generic [ref=e210]:
+            - generic [ref=e212]:
+              - text: /task
+              - generic [ref=e213] [cursor=pointer]:
+                - generic [ref=e214]: 06:14
+                - generic [ref=e218]: 
+            - img [ref=e219]
+            - img "Red Heart" [ref=e225] [cursor=pointer]
+          - generic [ref=e228]:
+            - generic [ref=e230]:
+              - text: "Project: trade-bot"
+              - text: "Describe your task:"
+              - generic [ref=e232] [cursor=pointer]: 06:14
+            - img [ref=e233]
+            - img "Red Heart" [ref=e239] [cursor=pointer]
+          - generic [ref=e242]:
+            - generic [ref=e244]:
+              - text: give me a summary of what this project do
+              - generic [ref=e245] [cursor=pointer]:
+                - generic [ref=e246]: 06:15
+                - generic [ref=e250]: 
+            - img [ref=e251]
+            - img "Red Heart" [ref=e257] [cursor=pointer]
+          - generic [ref=e260]:
+            - generic [ref=e262]:
+              - text: Discarding changes...
+              - generic [ref=e264] [cursor=pointer]: 06:15
+            - img [ref=e265]
+            - img "Red Heart" [ref=e271] [cursor=pointer]
+          - generic [ref=e274]:
+            - generic [ref=e276]:
+              - text: Send /task to start a new development task.
+              - generic [ref=e278] [cursor=pointer]: 06:26
+            - img [ref=e279]
+            - img "Red Heart" [ref=e285] [cursor=pointer]
+          - generic [ref=e288]:
+            - generic [ref=e290]:
+              - text: /task
+              - generic [ref=e291] [cursor=pointer]:
+                - generic [ref=e292]: 06:26
+                - generic [ref=e296]: 
+            - img [ref=e297]
+            - img "Red Heart" [ref=e303] [cursor=pointer]
+          - generic [ref=e306]:
+            - generic [ref=e308]:
+              - text: Task cancelled.
+              - generic [ref=e310] [cursor=pointer]: 06:26
+            - img [ref=e311]
+            - img "Red Heart" [ref=e317] [cursor=pointer]
+          - generic [ref=e320]:
+            - generic [ref=e322]:
+              - text: nnnbb
+              - generic [ref=e323] [cursor=pointer]:
+                - generic [ref=e324]: 06:26
+                - generic [ref=e328]: 
+            - img [ref=e329]
+            - img "Red Heart" [ref=e335] [cursor=pointer]
+          - generic [ref=e337]:
+            - generic [ref=e338]:
+              - generic [ref=e340]:
+                - img "📊" [ref=e341]
+                - text: trade-bot — Health Check
+                - img "❌" [ref=e342]
+                - text: No running containers found.
+                - img "❌" [ref=e343]
+                - text: "Docker: no running containers"
+                - img "✅" [ref=e344]
+                - text: "Config: all fields set"
+                - img "✅" [ref=e345]
+                - text: Everything looks healthy!
+                - generic [ref=e347] [cursor=pointer]: 06:26
+              - img "Red Heart" [ref=e350] [cursor=pointer]
+            - button "🔄 Refresh" [ref=e353] [cursor=pointer]:
+              - generic [ref=e354]:
+                - img "🔄" [ref=e355]
+                - text: Refresh
+          - generic [ref=e359]:
+            - generic [ref=e361]:
+              - text: /task
+              - generic [ref=e362] [cursor=pointer]:
+                - generic [ref=e363]: 06:30
+                - generic [ref=e367]: 
+            - img [ref=e368]
+            - img "Red Heart" [ref=e374] [cursor=pointer]
+          - generic [ref=e377]:
+            - generic [ref=e379]:
+              - text: "Project: trade-bot"
+              - text: "Describe your task:"
+              - generic [ref=e381] [cursor=pointer]: 06:30
+            - img [ref=e382]
+            - img "Red Heart" [ref=e388] [cursor=pointer]
+          - generic [ref=e391]:
+            - generic [ref=e393]:
+              - text: give me full description of the data flow saved from csv to db and the pipline
+              - generic [ref=e394] [cursor=pointer]:
+                - generic [ref=e395]: 06:31
+                - generic [ref=e399]: 
+            - img [ref=e400]
+            - img "Red Heart" [ref=e406] [cursor=pointer]
+          - generic [ref=e408]:
+            - generic [ref=e409]:
+              - generic [ref=e411]:
+                - text: "Here's my implementation plan:"
+                - text: Here is the full description of the data flow and ML pipeline in Aurora Trading Bot.
+                - text: "---"
+                - text: "## Important Clarification: No CSV-to-DB Ingestion Exists"
+                - text: "After a thorough search, **there is no CSV import/ingestion path in this codebase**. CSV only appears as a **frontend export** feature (downloading fills/trades from the UI as `.csv`). All data enters the database from the **Binance exchange** via two channels: REST backfill and WebSocket live streaming."
+                - text: "---"
+                - text: "## Complete Data Flow: Exchange → DB → ML Pipeline"
+                - text: "### 1. Data Ingestion Layer"
+                - text: "```"
+                - text: ┌───────────────────────────────────────────────────┐
+                - text: │ BINANCE EXCHANGE │
+                - text: └─────────┬──────────────────────────┬──────────────┘
+                - text: │ │
+                - text: CCXT REST API CCXT Pro WebSocket
+                - text: (Historical) (Real-time)
+                - text: │ │
+                - text: ▼ ▼
+                - text: ┌──────────────────┐ ┌──────────────────────┐
+                - text: │
+                - link "backfill.py" [ref=e412] [cursor=pointer]:
+                  - /url: https://backfill.py
+                - text: │ │ live_stream.py │
+                - text: │ │ │ │
+                - text: │ • 365-day lookback│ │ • Auto-reconnect │
+                - text: │ • 1000-candle │ │ • Exponential backoff│
+                - text: │ batches │ │ • Dedup cache (1000) │
+                - text: │ • Rate-limited │ │ • Health monitoring │
+                - text: │ (0.1s/batch) │ │ • Multi-symbol │
+                - text: "│ • UPSERT on │ │ • Streams: OHLCV, │"
+                - text: │ conflict │ │ Trades, OrderBook │
+                - text: └────────┬─────────┘ └──────────┬───────────┘
+                - text: │ │
+                - text: └──────────┬─────────────────┘
+                - text: ▼
+                - text: ┌─────────────────────┐
+                - text: │ data_validator.py │
+                - text: │ • OHLCV integrity │
+                - text: │ (o≤h, l≤c, etc.) │
+                - text: │ • Price/volume │
+                - text: │ range checks │
+                - text: │ • Duplicate detect │
+                - text: │ • Gap detection │
+                - text: └─────────┬───────────┘
+                - text: ▼
+                - text: ┌─────────────────────┐
+                - text: │
+                - link "orchestrator.py" [ref=e413] [cursor=pointer]:
+                  - /url: https://orchestrator.py
+                - text: │
+                - text: │ • Coordinates both │
+                - text: │ ingestion modes │
+                - text: │ • Gap healing │
+                - text: │ • Max 5 concurrent │
+                - text: │ symbol inits │
+                - text: └─────────┬───────────┘
+                - text: ▼
+                - text: ┌──────────────────────────────────────────────────┐
+                - text: │ PostgreSQL + TimescaleDB │
+                - text: │ │
+                - text: │ OHLCV hypertable (ts, symbol, o,h,l,c,v) │
+                - text: │ Trades hypertable (ts, symbol, price, size) │
+                - text: │ Features hypertable (ts, symbol, 50+ columns) │
+                - text: │ Labels hypertable (ts, symbol, y, return_pct) │
+                - text: │ Signals hypertable (ts, symbol, side, prob) │
+                - text: │ PnL hypertable (ts, cumulative, drawdown) │
+                - text: │ │
+                - text: "│ Chunk interval: 1 day │"
+                - text: "│ Compression: after 7 days │"
+                - text: "│ Pool: 20 connections, 30 overflow │"
+                - text: └──────────────────────────────────────────────────┘
+                - text: "```"
+                - text: "### 2. ML Pipeline (Features → Labels → Training → Signals)"
+                - text: "```"
+                - text: OHLCV Table
+                - text: │
+                - text: ┌─────────────┴──────────────┐
+                - text: ▼ ▼
+                - text: ┌──────────────────────┐ ┌───────────────────────┐
+                - text: │ FEATURE PIPELINE │ │ LABEL GENERATOR │
+                - text: │ (
+                - link "pipeline.py" [ref=e414] [cursor=pointer]:
+                  - /url: https://pipeline.py
+                - text: ) │ │ (
+                - link "generator.py" [ref=e415] [cursor=pointer]:
+                  - /url: https://generator.py
+                - text: ) │
+                - text: │ │ │ │
+                - text: "│ Load 1500 periods │ │ 3 methods: │"
+                - text: │ ↓ │ │ │
+                - text: "│ Technical (25+): │"
+                - text: Approve to start coding?
+                - generic [ref=e417] [cursor=pointer]: 06:31
+              - img "Red Heart" [ref=e420] [cursor=pointer]
+            - generic [ref=e422]:
+              - button "Approve Plan" [ref=e423] [cursor=pointer]:
+                - generic [ref=e424]: Approve Plan
+              - button "Reject" [ref=e426] [cursor=pointer]:
+                - generic [ref=e427]: Reject
+          - generic [ref=e431]:
+            - generic [ref=e433]:
+              - text: hi
+              - generic [ref=e434] [cursor=pointer]:
+                - generic [ref=e435]: 07:35
+                - generic [ref=e439]: 
+            - img [ref=e440]
+            - img "Red Heart" [ref=e446] [cursor=pointer]
+          - generic [ref=e448]:
+            - generic [ref=e449]:
+              - generic [ref=e451]:
+                - img "📊" [ref=e452]
+                - text: trade-bot — Health Check
+                - img "❌" [ref=e453]
+                - text: No running containers found.
+                - img "❌" [ref=e454]
+                - text: "Docker: no running containers"
+                - img "✅" [ref=e455]
+                - text: "Config: all fields set"
+                - img "✅" [ref=e456]
+                - text: Everything looks healthy!
+                - generic [ref=e458] [cursor=pointer]: 07:35
+              - img "Red Heart" [ref=e461] [cursor=pointer]
+            - button "🔄 Refresh" [ref=e464] [cursor=pointer]:
+              - generic [ref=e465]:
+                - img "🔄" [ref=e466]
+                - text: Refresh
+          - generic [ref=e470]:
+            - generic [ref=e472]:
+              - text: ...
+              - generic [ref=e473] [cursor=pointer]:
+                - generic [ref=e474]: 07:35
+                - generic [ref=e478]: 
+            - img [ref=e479]
+            - img "Red Heart" [ref=e485] [cursor=pointer]
+          - generic [ref=e487]:
+            - generic [ref=e488]:
+              - generic [ref=e490]:
+                - img "📊" [ref=e491]
+                - text: trade-bot — Health Check
+                - img "❌" [ref=e492]
+                - text: No running containers found.
+                - img "❌" [ref=e493]
+                - text: "Docker: no running containers"
+                - img "✅" [ref=e494]
+                - text: "Config: all fields set"
+                - img "✅" [ref=e495]
+                - text: Everything looks healthy!
+                - generic "Apr 8, 2026, 07:35:38" [ref=e644] [cursor=pointer]: 07:35
+              - img "Red Heart" [ref=e500] [cursor=pointer]
+            - button "🔄 Refresh" [ref=e503] [cursor=pointer]:
+              - generic [ref=e504]:
+                - img "🔄" [ref=e505]
+                - text: Refresh
+          - generic [ref=e509]:
+            - generic [ref=e511]:
+              - button "Play audio" [ref=e513] [cursor=pointer]:
+                - generic [ref=e514]: 
+                - generic [ref=e515]: 
+              - paragraph [ref=e521]: 0:01
+            - generic [ref=e522] [cursor=pointer]:
+              - generic [ref=e523]: 07:36
+              - generic [ref=e527]: 
+            - img [ref=e528]
+            - img "Red Heart" [ref=e534] [cursor=pointer]
+          - generic [ref=e536]:
+            - generic [ref=e537]:
+              - generic [ref=e539]:
+                - img "📊" [ref=e658]
+                - text: trade-bot — Health Check
+                - img "❌" [ref=e659]
+                - text: No running containers found.
+                - img "❌" [ref=e660]
+                - text: "Docker: no running containers"
+                - img "✅" [ref=e661]
+                - text: "Config: all fields set"
+                - img "🔧" [ref=e662]
+                - text: "Repair Summary:"
+                - img "📊" [ref=e663]
+                - text: trade-bot — Health Check
+                - img "❌" [ref=e664]
+                - text: No running containers found.
+                - img "❌" [ref=e665]
+                - text: "Docker: no running containers"
+                - img "✅" [ref=e666]
+                - text: "Config: all fields set"
+                - generic [ref=e541] [cursor=pointer]: 07:36
+              - img "Red Heart" [ref=e544] [cursor=pointer]
+            - button "🔄 Refresh" [ref=e669] [cursor=pointer]:
+              - generic [ref=e670]:
+                - img "🔄" [ref=e671]
+                - text: Refresh
+        - generic [ref=e578]:
+          - generic:
+            - generic:
+              - button "Go to next unread reactions":
+                - generic: 
+              - generic: 
+            - generic:
+              - button "Go to next mention":
+                - generic: 
+              - generic: 
+            - generic:
+              - button "Go to bottom":
+                - generic: 
+          - generic [ref=e579]:
+            - generic [ref=e580]:
+              - img [ref=e581]
+              - generic [ref=e585]:
+                - button "Choose emoji, sticker or GIF" [ref=e586] [cursor=pointer]:
+                  - generic [ref=e587]: 
+                - generic [ref=e590]:
+                  - textbox "Message" [active] [ref=e591]
+                  - generic: Message
+                - generic [ref=e592]:
+                  - button "Add an attachment" [ref=e593] [cursor=pointer]:
+                    - generic [ref=e594]: 
+                  - menu "Add an attachment":    
+            - button "Record voice message" [ref=e595] [cursor=pointer]:
+              - generic [ref=e596]: 
+              - generic [ref=e597]: 
+              - generic [ref=e598]: 
+              - generic [ref=e599]: 
+  - img
