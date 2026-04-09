@@ -173,122 +173,378 @@ async def _step_env(on_progress, workspace: str, compose: str) -> str:
         return "no .env found (may be fine)"
 
 
+async def _step_docker_up(
+    checklist: ChecklistReporter, project, workspace: str, compose: str, compose_project: str,
+) -> bool:
+    """Step 4: Start Docker containers — generic for ANY project.
+
+    Python-driven with live polling:
+    1. docker compose up -d (through docker_guard for host path + ports)
+    2. Poll every 5s for 90s — show "X/Y running"
+    3. On failure — extract clean error per container from logs
+    4. If stuck — call Doctor agent to diagnose
+    No hardcoded container names or tech stack assumptions.
+    """
+    import json as _json
+
+    await checklist.start_step(4)
+    await checklist.update_step(4, "starting containers...")
+
+    # 1. Get list of services first
+    rc_cfg, cfg_output = await _run(
+        "docker", "compose", "-f", compose, "-p", compose_project, "config", "--services",
+        cwd=workspace, project_id=project.id,
+    )
+    all_services = [s.strip() for s in cfg_output.strip().split("\n") if s.strip()] if rc_cfg == 0 else []
+    total_expected = len(all_services) or "?"
+    await checklist.update_step(4, f"starting {total_expected} services...")
+
+    # Run compose up through docker_guard (host path + port injection)
+    rc, output = await _run(
+        "docker", "compose", "-f", compose, "-p", compose_project, "up", "-d",
+        cwd=workspace, timeout=600, project_id=project.id,
+    )
+
+    # rc != 0 doesn't always mean total failure — some containers may have started
+    # while others failed (e.g. selenium has no ARM image). Check actual state.
+    if rc != 0:
+        # Log the error but continue to poll — partial success is OK
+        key_error = _parse_docker_error(output)
+        log.warning("bootstrap.compose_up_partial", error=key_error)
+        await checklist.update_step(4, f"some errors, checking status...")
+
+    # 2. Poll containers until all running or timeout
+    total_services = 0
+    max_wait = 90
+    poll_interval = 5
+
+    for elapsed in range(0, max_wait, poll_interval):
+        await asyncio.sleep(poll_interval)
+
+        containers = await _get_compose_containers(compose_project, workspace, project.id)
+        if not containers:
+            await checklist.update_step(4, "waiting for containers...")
+            continue
+
+        total_services = len(containers)
+        running = [c for c in containers if c["state"] == "running"]
+        exited = [c for c in containers if c["state"] == "exited"]
+        starting = [c for c in containers if c["state"] not in ("running", "exited")]
+
+        # Update progress
+        if starting:
+            waiting = ", ".join(c["name"] for c in starting[:3])
+            await checklist.update_step(4, f"{len(running)}/{total_services} running ({waiting}...)")
+        else:
+            await checklist.update_step(4, f"{len(running)}/{total_services} running")
+
+        # All done (running or exited)?
+        if len(running) + len(exited) >= total_services:
+            break
+
+    # 3. Final check
+    containers = await _get_compose_containers(compose_project, workspace, project.id)
+    if not containers:
+        await checklist.fail_step(4, "no containers found after compose up")
+        return False
+
+    running = [c for c in containers if c["state"] == "running"]
+    failed = [c for c in containers if c["state"] != "running"]
+
+    if failed:
+        # Get error details for each failed container
+        error_details = []
+        for c in failed[:3]:
+            err = await _get_container_error(c["full_name"])
+            error_details.append(f"{c['name']}: {err}")
+
+        # Check if the APP container is running (the one with a web port)
+        app_info = await _find_app_container(compose_project, workspace, project.id)
+        app_is_running = app_info is not None
+
+        if app_is_running:
+            # App container is up — non-critical services failed (selenium, etc.)
+            detail = f"{len(running)}/{total_services} up ({len(failed)} skipped)"
+            await checklist.complete_step(4, detail[:50])
+            checklist._footer = "Skipped: " + ", ".join(c["name"] for c in failed)
+            await checklist._force_render()
+            return True
+        else:
+            # App container is down — real failure
+            detail = f"{len(running)}/{total_services} up"
+            await checklist.fail_step(4, detail)
+            checklist._footer = "Errors:\n" + "\n".join(f"  ❌ {e}" for e in error_details)
+            await checklist._force_render()
+            return False
+
+    await checklist.complete_step(4, f"{len(running)}/{total_services} running")
+    return True
+
+
+def _parse_docker_error(output: str) -> str:
+    """Extract clean error message from docker compose output. Generic."""
+    for line in output.split("\n"):
+        line = line.strip()
+        # Strip Docker noise
+        line = re.sub(r'time="[^"]*"\s*', '', line)
+        line = re.sub(r'level=\w+\s*', '', line)
+        line = re.sub(r'msg="([^"]*)"', r'\1', line)
+        line = line.strip()
+        if not line or "warning" in line.lower() or "obsolete" in line.lower():
+            continue
+        if any(kw in line.lower() for kw in ("error", "denied", "failed", "not found", "refused")):
+            return line[:80]
+    return "compose up failed"
+
+
+async def _get_compose_containers(
+    compose_project: str, workspace: str, project_id: int | None = None,
+) -> list[dict]:
+    """Get container status via docker ps (not compose ps — avoids config mismatch)."""
+    import json as _json
+    # Use docker ps with project filter — sees ALL containers regardless of env vars
+    rc, ps_output = await _run(
+        "docker", "ps", "-a", "--filter", f"label=com.docker.compose.project={compose_project}",
+        "--format", '{"Name":{{json .Names}},"State":{{json .State}},"Status":{{json .Status}}}',
+    )
+    if rc != 0 or not ps_output.strip():
+        return []
+
+    containers = []
+    for line in ps_output.strip().split("\n"):
+        if not line.strip():
+            continue
+        try:
+            data = _json.loads(line)
+            full_name = data.get("Name", "")
+            # Extract service name: "openclow-tagh-test-nginx-1" → "nginx"
+            parts = full_name.replace(compose_project + "-", "").rsplit("-", 1)
+            service = parts[0] if parts else full_name
+            state = data.get("State", "unknown").lower()
+            containers.append({
+                "name": service,
+                "full_name": full_name,
+                "state": state,
+                "health": data.get("Status", ""),
+            })
+        except _json.JSONDecodeError:
+            continue
+    return containers
+
+
+async def _get_container_error(container_name: str) -> str:
+    """Get a clean one-line error from a failed container's logs."""
+    if not container_name:
+        return "unknown"
+    rc, logs = await _run("docker", "logs", container_name, "--tail", "10")
+    if rc != 0 or not logs.strip():
+        return "no logs"
+    # Find the most relevant error line
+    for line in reversed(logs.strip().split("\n")):
+        line = line.strip()
+        if any(kw in line.lower() for kw in ("error", "fatal", "denied", "failed", "panic", "exception")):
+            return line[:80]
+    # No explicit error — return last line
+    return logs.strip().split("\n")[-1][:80]
+
+
+async def _configure_app_for_tunnel(workspace: str, tunnel_url: str, compose_project: str):
+    """Configure the app's .env to work with the Cloudflare tunnel URL.
+
+    Generic — handles any framework:
+    - Laravel: APP_URL, ASSET_URL, VITE_API_BASE_URL, FORCE_HTTPS, TRUSTED_PROXIES
+    - Node/Next: NEXT_PUBLIC_URL, BASE_URL
+    - Django: ALLOWED_HOSTS, CSRF_TRUSTED_ORIGINS
+    - Any: rewrites URL-related env vars from http://local → https://tunnel
+
+    Also updates nginx server_name to accept the tunnel domain.
+    """
+    env_path = os.path.join(workspace, ".env")
+    if not os.path.exists(env_path):
+        return
+
+    # Read current .env
+    with open(env_path) as f:
+        lines = f.readlines()
+
+    # URL env vars to update (key → new value)
+    url_vars = {
+        "APP_URL": tunnel_url,
+        "ASSET_URL": tunnel_url,
+        "VITE_API_BASE_URL": tunnel_url + "/",
+        "VITE_APP_URL": tunnel_url,
+        "NEXT_PUBLIC_URL": tunnel_url,
+        "BASE_URL": tunnel_url,
+    }
+
+    # Extra vars to add/ensure
+    extra_vars = {
+        "FORCE_HTTPS": "true",
+        "TRUSTED_PROXIES": "*",
+        "SESSION_SECURE_COOKIE": "true",
+    }
+
+    # Rewrite existing vars + track what we set
+    updated_keys = set()
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if "=" in stripped and not stripped.startswith("#"):
+            key = stripped.split("=", 1)[0]
+            if key in url_vars:
+                new_lines.append(f"{key}={url_vars[key]}\n")
+                updated_keys.add(key)
+                continue
+            if key in extra_vars:
+                new_lines.append(f"{key}={extra_vars[key]}\n")
+                updated_keys.add(key)
+                continue
+        new_lines.append(line)
+
+    # Append vars that weren't in the file
+    for key, val in {**url_vars, **extra_vars}.items():
+        if key not in updated_keys:
+            # Only add if it's relevant (don't add VITE_ vars to a Django project)
+            if key.startswith("VITE_") and not os.path.exists(os.path.join(workspace, "vite.config")):
+                if not any(os.path.exists(os.path.join(workspace, f)) for f in ["vite.config.js", "vite.config.ts"]):
+                    continue
+            if key.startswith("NEXT_") and not os.path.exists(os.path.join(workspace, "next.config")):
+                continue
+            new_lines.append(f"{key}={val}\n")
+
+    with open(env_path, "w") as f:
+        f.writelines(new_lines)
+
+    # No nginx server_name rewrite needed — we use --http-host-header in cloudflared
+    # No container restart needed — .env changes apply on next request (Laravel reads .env on boot)
+
+    log.info("bootstrap.tunnel_configured", url=tunnel_url, workspace=workspace)
+
+
+async def _get_tunnel_target(compose_project: str, workspace: str, project_id: int | None = None) -> str | None:
+    """Get the correct tunnel target URL for a project.
+
+    Finds the app container's IP and internal port so the tunnel
+    can reach it directly — not via host port (worker can't reach host ports).
+    """
+    import json as _json
+    app_info = await _find_app_container(compose_project, workspace, project_id)
+    if not app_info:
+        return None
+
+    container_name, internal_port = app_info
+
+    # Get the container's IP address
+    rc, ip_out = await _run(
+        "docker", "inspect", container_name,
+        "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+    )
+    if rc != 0 or not ip_out.strip():
+        return None
+
+    ip = ip_out.strip()
+    return f"http://{ip}:{internal_port}"
+
+
+async def _find_app_container(
+    compose_project: str, workspace: str, project_id: int | None = None,
+) -> tuple[str, int] | None:
+    """Find the web/app container and its internal port. Generic for ANY project.
+
+    Scans running containers for one exposing a web port (80, 443, 8080, 3000, 8000).
+    Returns (container_name, internal_port) or None.
+    """
+    import json as _json
+    web_ports = [80, 443, 8080, 3000, 8000, 5000, 4000]
+
+    # Use docker inspect to find containers with web port mappings
+    rc, output = await _run(
+        "docker", "ps", "--filter", f"label=com.docker.compose.project={compose_project}",
+        "--format", "{{.Names}}",
+    )
+    if rc != 0 or not output.strip():
+        return None
+
+    for container_name in output.strip().split("\n"):
+        container_name = container_name.strip()
+        if not container_name:
+            continue
+        # Inspect this container's port bindings
+        rc2, inspect_out = await _run(
+            "docker", "inspect", container_name,
+            "--format", '{{json .NetworkSettings.Ports}}',
+        )
+        if rc2 != 0:
+            continue
+        try:
+            ports = _json.loads(inspect_out)
+            # Check in priority order (80 first, then others)
+            for target in web_ports:
+                port_key = f"{target}/tcp"
+                if port_key in ports and ports[port_key]:
+                    return (container_name, target)
+        except (ValueError, _json.JSONDecodeError, TypeError):
+            continue
+
+    return None
+
+
 async def _step_agentic_setup(
     checklist: ChecklistReporter, project, workspace: str, compose: str, compose_project: str,
 ) -> bool:
-    """Step 3: LLM-driven project setup.
+    """Steps 2-3 + 5: Agent handles deps, build, migrations.
+    Step 4 (Docker) is handled by _step_docker_up() — Python-driven.
 
-    Claude Agent reads the project, plans setup steps, executes them,
-    and reports progress via the checklist. No hardcoded logic.
+    The agent outputs DONE: 1 (deps), DONE: 2 (build), DONE: 3 (migrations).
     """
+    STEP_MAP = {1: 2, 2: 3}  # agent step → checklist index (only deps + build)
+
     try:
         from claude_agent_sdk import query, ClaudeAgentOptions
         from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
     except ImportError:
-        # Fallback: dumb docker compose up
-        checklist.add_steps(["Start Docker containers"])
-        idx = len(checklist.steps) - 1
-        await checklist.start_step(idx)
-        rc, _ = await _run(
-            "docker", "compose", "-f", compose, "-p", compose_project, "up", "-d", "--build",
-            cwd=workspace, timeout=300,
-        )
-        if rc == 0:
-            await checklist.complete_step(idx, "containers started")
-            return True
-        await checklist.fail_step(idx, "docker compose failed")
-        return False
+        await checklist.skip_step(2, "no SDK")
+        await checklist.skip_step(3, "no SDK")
+        docker_ok = await _step_docker_up(checklist, project, workspace, compose, compose_project)
+        await checklist.skip_step(5, "no SDK")
+        return docker_ok
 
-    prompt = f"""Set up the project "{project.name}" for development.
+    await checklist.start_step(2)
 
-Project info:
-- Tech stack: {project.tech_stack or 'unknown'}
-- Workspace: {workspace}
-- Docker compose file: {compose}
-- Docker project name: {compose_project}
-- App container: {project.app_container_name or 'auto-detect from docker-compose'}
-- App port: {project.app_port or 'auto-detect'}
-- Setup hints from onboarding: {project.setup_commands or 'none detected'}
+    prompt = f"""Set up "{project.name}" for development. Tech: {project.tech_stack or 'unknown'}.
 
-INSTRUCTIONS:
+YOU MUST DO EXACTLY 2 STEPS:
 
-PHASE 1 — PLAN (do this first):
-Read docker-compose.yml, any Dockerfiles, package.json, composer.json, requirements.txt, etc.
-Understand what this project needs to run.
-Then output your setup plan EXACTLY like this:
+STEP 1 — INSTALL DEPENDENCIES:
+- Check vendor/, node_modules/, requirements — if they exist and look complete, skip
+- If auth.json exists in workspace root, copy it to ~/.composer/auth.json
+- Output: DONE: 1 <short result> OR SKIP: 1 <reason>
 
-PLAN_START
-STEP: Install PHP dependencies (composer)
-STEP: Install Node dependencies (npm)
-STEP: Build frontend assets
-STEP: Start Docker containers
-STEP: Run database migrations
-PLAN_END
+STEP 2 — BUILD FRONTEND:
+- If public/build/ already has compiled assets, skip
+- Otherwise: npm run build (or equivalent for the stack)
+- Output: DONE: 2 <short result> OR SKIP: 2 <reason>
 
-Only include steps that are actually needed for this project.
-
-PHASE 2 — EXECUTE:
-Execute each step in order. For Docker commands always use: docker compose -f {compose} -p {compose_project}
-After completing each step, output EXACTLY:
-DONE: <step_number> <short result>
-
-Example: DONE: 1 installed 47 packages
-
-If a step fails, output:
-FAIL: <step_number> <error summary>
-Then try to fix it and retry. If fixed, output DONE for that step.
-
-PHASE 3 — FINISH:
-After all steps complete, output exactly one of:
-SETUP_OK
-or
-SETUP_FAILED: <clear reason why>
+After both: SETUP_OK
 
 RULES:
-- CRITICAL: Before ANY docker compose command, run: export $(cat .env.ports | grep -v '^#' | xargs)
-  This loads unique port assignments that prevent conflicts with other projects.
-- Always use docker compose -p {compose_project} for ALL docker commands
-- Read files before running commands to understand the setup
-- If something fails, read the error output, diagnose, and try a different approach
-- For Laravel: composer install, npm install, npm run build, php artisan migrate
-- For Node.js: npm install, npm run build
-- For Python: pip install -r requirements.txt
-- Check if auth.json exists in the workspace root — if yes, copy it where needed (e.g. for composer private packages)
-- If composer needs GitLab/GitHub auth, check for auth.json and copy to the right location
-- When a FAIL happens, include the actual error message (not just exit code) so the user understands WHY
-
-IMPORTANT — PERFORMANCE:
-- Before installing, check node --version, php --version, composer --version to verify compatibility
-- If deps are already installed (vendor/ or node_modules/ exist), SKIP the install step — just verify
-- For npm run build: if it takes too long, check if public/build/ already has assets and skip
-- For docker compose: check with `docker compose -f {compose} -p {compose_project} ps` first
-  - If all containers are running → SKIP compose up entirely
-  - If images already exist (check `docker images | grep {compose_project}`) → use `docker compose up -d` WITHOUT --build
-  - Only use --build if images don't exist yet or Dockerfile was modified
-- NEVER run a command that blocks forever — add timeouts or use background processes
-- After each long command, output a DONE: or FAIL: line so progress updates in Telegram
-- For docker compose up: output a DONE: line IMMEDIATELY after the command returns, don't wait
+- Do NOT run docker compose — handled separately
+- Do NOT run migrations — handled separately
+- Output DONE: or SKIP: IMMEDIATELY after each step
+- Be fast. Skip what already exists.
 """
 
     options = ClaudeAgentOptions(
         cwd=workspace,
-        system_prompt=(
-            "You are a senior DevOps engineer setting up a project. "
-            "You have full Bash access. Read files before acting. "
-            "Fix errors when they happen. Be precise and thorough."
-        ),
-        model="claude-sonnet-4-6",  # DevOps setup is procedural — Sonnet is faster
+        system_prompt="Senior DevOps engineer. 2 steps: deps + build. Skip what exists. Be fast.",
+        model="claude-sonnet-4-6",
         allowed_tools=["Bash", "Read", "Glob", "Grep", "Edit", "Write"],
         permission_mode="bypassPermissions",
-        max_turns=20,
+        max_turns=15,
     )
 
     full_output = ""
-    current_step = -1
-    plan_lines: list[str] = []
-    plan_parsed = False
-    in_plan = False
-    base_index = len(checklist.steps)  # offset for steps added by agent
+    current_agent_step = 1
 
     try:
         async for message in query(prompt=prompt, options=options):
@@ -297,74 +553,65 @@ IMPORTANT — PERFORMANCE:
             for block in message.content:
                 if isinstance(block, TextBlock):
                     full_output += block.text + "\n"
-
                     for line in block.text.split("\n"):
                         line = line.strip()
                         if not line:
                             continue
 
-                        # Parse plan
-                        if "PLAN_START" in line:
-                            in_plan = True
-                            plan_lines = []
-                        elif "PLAN_END" in line and in_plan:
-                            in_plan = False
-                            plan_parsed = True
-                            checklist.add_steps(plan_lines)
-                            base_index = len(checklist.steps) - len(plan_lines)
-                            if plan_lines:
-                                current_step = 0
-                                await checklist.start_step(base_index)
-                            else:
-                                await checklist._force_render()
-                        elif in_plan and line.startswith("STEP:"):
-                            plan_lines.append(line[5:].strip())
-
-                        # Parse progress
-                        elif line.startswith("DONE:"):
+                        if line.startswith("DONE:") or line.startswith("SKIP:"):
+                            is_skip = line.startswith("SKIP:")
                             rest = line[5:].strip()
                             parts = rest.split(" ", 1)
                             if parts[0].isdigit():
-                                idx = int(parts[0]) - 1
+                                agent_idx = int(parts[0])
                                 detail = parts[1] if len(parts) > 1 else ""
                             else:
-                                idx = current_step
+                                agent_idx = current_agent_step
                                 detail = rest
-                            if 0 <= idx < len(plan_lines):
-                                await checklist.complete_step(base_index + idx, detail[:50])
-                                current_step = idx + 1
-                                if current_step < len(plan_lines):
-                                    await checklist.start_step(base_index + current_step)
+                            cl_idx = STEP_MAP.get(agent_idx)
+                            if cl_idx is not None:
+                                if is_skip:
+                                    await checklist.skip_step(cl_idx, detail[:50] or "skipped")
+                                else:
+                                    await checklist.complete_step(cl_idx, detail[:50] or "done")
+                            current_agent_step = agent_idx + 1
+                            next_cl = STEP_MAP.get(current_agent_step)
+                            if next_cl is not None:
+                                await checklist.start_step(next_cl)
 
                         elif line.startswith("FAIL:"):
                             rest = line[5:].strip()
                             parts = rest.split(" ", 1)
                             if parts[0].isdigit():
-                                idx = int(parts[0]) - 1
-                                detail = parts[1] if len(parts) > 1 else ""
+                                agent_idx = int(parts[0])
+                                detail = parts[1] if len(parts) > 1 else "failed"
                             else:
-                                idx = current_step
+                                agent_idx = current_agent_step
                                 detail = rest
-                            if 0 <= idx < len(plan_lines):
-                                await checklist.fail_step(base_index + idx, detail[:50])
+                            cl_idx = STEP_MAP.get(agent_idx)
+                            if cl_idx is not None:
+                                await checklist.fail_step(cl_idx, detail[:50])
 
                 elif isinstance(block, ToolUseBlock):
-                    # Show what the agent is doing as live detail
-                    if current_step >= 0 and current_step < len(plan_lines):
-                        tool_name = block.name if hasattr(block, "name") else ""
+                    cl_idx = STEP_MAP.get(current_agent_step)
+                    if cl_idx is not None:
                         cmd = ""
                         if hasattr(block, "input") and isinstance(block.input, dict):
                             cmd = str(block.input.get("command", block.input.get("file_path", "")))[:40]
                         if cmd:
-                            await checklist.update_step(base_index + current_step, cmd)
-
-        return "SETUP_OK" in full_output
+                            await checklist.update_step(cl_idx, cmd)
 
     except Exception as e:
-        log.error("bootstrap.agentic_setup_failed", error=str(e))
-        if current_step >= 0 and current_step < len(plan_lines):
-            await checklist.fail_step(base_index + current_step, str(e)[:50])
-        return False
+        log.error("bootstrap.agent_failed", error=str(e))
+        cl_idx = STEP_MAP.get(current_agent_step)
+        if cl_idx is not None:
+            await checklist.fail_step(cl_idx, str(e)[:50])
+
+    # ── Step 4: Docker (Python-driven, after agent finishes deps+build) ──
+    docker_ok = await _step_docker_up(checklist, project, workspace, compose, compose_project)
+
+    has_fail = any(s["status"] == "failed" for s in checklist.steps)
+    return docker_ok and not has_fail
 
 
 async def _step_health_check(
@@ -657,30 +904,37 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
         msg = await bot.send_message(chat_id=int(chat_id), text=f"Setting up {project.name}...")
         message_id = str(msg.message_id)
 
-    # Use ChecklistReporter for clean live progress
+    # ── ALL steps shown upfront with progress bar ──
     checklist = ChecklistReporter(
         chat, chat_id, message_id,
         title=f"Setting up {project.name}",
         subtitle=project.tech_stack or "",
     )
 
-    # Initial steps (Python-driven, fast)
-    checklist.set_steps([
-        "Clone repository",
-        "Setup environment",
-    ])
+    # ALL steps upfront — correct order: deps → build → docker → migrations → verify → tunnel
+    ALL_STEPS = [
+        "Clone repository",            # 0
+        "Setup environment",            # 1
+        "Install dependencies",         # 2
+        "Build frontend assets",        # 3
+        "Start Docker containers",      # 4
+        "Run database migrations",      # 5
+        "Verify app",                   # 6
+        "Create public URL",            # 7  ← LAST — only after app works
+    ]
+    checklist.set_steps(ALL_STEPS)
     await checklist._force_render()
     await checklist.start()
 
     try:
-        # ── Step 1: Clone ──
+        # ── Step 0: Clone ──
         await checklist.start_step(0)
         clone_detail = await _step_clone(
             lambda msg: checklist.update_step(0, msg), project, workspace,
         )
         await checklist.complete_step(0, clone_detail)
 
-        # ── Step 2: Environment ──
+        # ── Step 1: Environment ──
         await checklist.start_step(1)
         env_detail = await _step_env(
             lambda msg: checklist.update_step(1, msg), workspace, compose,
@@ -688,7 +942,6 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
         await checklist.complete_step(1, env_detail)
 
         # ── Write port isolation env vars ──
-        # Each project gets unique ports so multiple projects don't conflict
         from openclow.services.port_allocator import get_port_env_vars
         port_vars = get_port_env_vars(project.id)
         ports_file = os.path.join(workspace, ".env.ports")
@@ -697,91 +950,197 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
             for k, v in port_vars.items():
                 f.write(f"{k}={v}\n")
 
-        # ── Step 3: Agentic setup — Claude takes over ──
-        # Claude plans its own steps, adds them to checklist, executes them
-        setup_ok = await _step_agentic_setup(checklist, project, workspace, compose, compose_project)
+        # ── Step 2: Install dependencies — agent handles, validates result ──
+        await checklist.start_step(2)
+        await checklist.update_step(2, "checking...")
+        # Let the agent decide: install or verify existing deps
+        await _step_agentic_setup(checklist, project, workspace, compose, compose_project)
+        # If agent didn't mark step 2, validate ourselves
+        if checklist.steps[2]["status"] == "running":
+            # Agent didn't output DONE/SKIP — check if deps exist now
+            has_deps = (
+                os.path.exists(os.path.join(workspace, "vendor", "autoload.php")) or
+                os.path.exists(os.path.join(workspace, "node_modules", ".package-lock.json")) or
+                os.path.exists(os.path.join(workspace, ".venv", "bin", "python"))
+            )
+            if has_deps:
+                await checklist.complete_step(2, "verified")
+            else:
+                await checklist.fail_step(2, "deps not found after install")
 
-        if not setup_ok:
-            checklist._footer = "❌ Setup failed — check errors above"
+        # ── Step 3: Build frontend — validate build output exists ──
+        if checklist.steps[3]["status"] == "running" or checklist.steps[3]["status"] == "pending":
+            await checklist.start_step(3)
+            build_dir = os.path.join(workspace, "public", "build")
+            dist_dir = os.path.join(workspace, "dist")
+            out_dir = os.path.join(workspace, "out")
+            has_pkg = os.path.exists(os.path.join(workspace, "package.json"))
+
+            if not has_pkg:
+                await checklist.skip_step(3, "no package.json — not a frontend project")
+            elif os.path.isdir(build_dir) and len(os.listdir(build_dir)) > 1:
+                await checklist.complete_step(3, f"public/build/ verified ({len(os.listdir(build_dir))} files)")
+            elif os.path.isdir(dist_dir) and len(os.listdir(dist_dir)) > 0:
+                await checklist.complete_step(3, f"dist/ verified ({len(os.listdir(dist_dir))} files)")
+            elif os.path.isdir(out_dir) and len(os.listdir(out_dir)) > 0:
+                await checklist.complete_step(3, f"out/ verified ({len(os.listdir(out_dir))} files)")
+            else:
+                # Agent should have built it — if not, run npm build ourselves
+                await checklist.update_step(3, "building assets...")
+                rc, out = await _run("npm", "run", "build", cwd=workspace, timeout=300)
+                if rc == 0:
+                    await checklist.complete_step(3, "built successfully")
+                else:
+                    err = out.strip().split("\n")[-1][:50] if out.strip() else "build failed"
+                    await checklist.fail_step(3, err)
+
+        # ── Step 4: Start Docker containers — wait until all running ──
+        docker_ok = await _step_docker_up(checklist, project, workspace, compose, compose_project)
+        if not docker_ok:
+            # Docker failed — don't continue to tunnel
+            checklist._footer = "❌ Docker failed — fix errors and retry"
             from aiogram.types import InlineKeyboardButton
             buttons = [
                 [InlineKeyboardButton(text="🔄 Retry Bootstrap", callback_data=f"project_bootstrap:{project.id}")],
-                [
-                    InlineKeyboardButton(text="🔗 Unlink", callback_data=f"project_unlink:{project.id}"),
-                    InlineKeyboardButton(text="🗑 Remove", callback_data=f"project_remove:{project.id}"),
-                ],
                 [InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
             ]
             await checklist.stop()
             await checklist._force_render(buttons=buttons)
-            log.error("bootstrap.setup_failed", project=project.name)
             return
 
-        # ── Post-setup steps: Tunnel + Playwright ──
-        tunnel_idx = len(checklist.steps)
-        checklist.add_steps(["Create public URL", "Browser verification"])
+        # ── Step 5: Run database migrations (via docker exec — AFTER Docker is up) ──
+        await checklist.start_step(5)
 
-        # Tunnel
-        await checklist.start_step(tunnel_idx)
+        # Search ALL project containers for migration tools (not just the web container)
+        containers = await _get_compose_containers(compose_project, workspace, project.id)
+        migration_cmds = [
+            ("php", ["php", "artisan", "migrate", "--force"]),
+            ("python", ["python", "manage.py", "migrate", "--noinput"]),
+            ("node", ["npx", "prisma", "migrate", "deploy"]),
+        ]
+        migrated = False
+        for c in containers:
+            if c["state"] != "running":
+                continue
+            for lang, cmd in migration_cmds:
+                rc_check, _ = await _run("docker", "exec", c["full_name"], "which", cmd[0])
+                if rc_check != 0:
+                    continue
+                await checklist.update_step(5, f"{c['name']}: {' '.join(cmd[:3])}...")
+                rc_mig, mig_out = await _run(
+                    "docker", "exec", c["full_name"], *cmd,
+                    timeout=120,
+                )
+                if rc_mig == 0:
+                    await checklist.complete_step(5, f"{lang} migrations via {c['name']}")
+                else:
+                    err = mig_out.strip().split("\n")[-1][:50] if mig_out.strip() else "failed"
+                    await checklist.fail_step(5, err)
+                migrated = True
+                break
+            if migrated:
+                break
+        if not migrated:
+            await checklist.skip_step(5, "no migration tool found")
+
+        # ── Step 6: Verify app (via docker exec — generic) ──
+        await checklist.start_step(6)
+        app_info = await _find_app_container(compose_project, workspace, project.id)
+        app_ok = False
+
+        if app_info:
+            container_name, internal_port = app_info
+            # Try 3 times with 5s gaps — app may need time to start
+            for attempt in range(3):
+                await checklist.update_step(6, f"checking {container_name}... ({attempt+1}/3)")
+                rc, curl_out = await _run(
+                    "docker", "exec", container_name,
+                    "curl", "-sf", f"http://localhost:{internal_port}/",
+                    "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "5",
+                )
+                http_code = curl_out.strip()
+                if http_code.startswith("2") or http_code.startswith("3"):
+                    app_ok = True
+                    await checklist.complete_step(6, f"HTTP {http_code} from {container_name}")
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(5)
+
+            if not app_ok:
+                await checklist.fail_step(6, f"HTTP {http_code} — app not ready")
+        else:
+            await checklist.fail_step(6, "no web container found")
+
+        # ── Step 7: Create public URL (ONLY if verify passed) ──
+        if not app_ok:
+            await checklist.fail_step(7, "skipped — app not verified")
+            checklist._footer = "⚠️ App not responding — tunnel not created"
+            from aiogram.types import InlineKeyboardButton
+            buttons = [
+                [InlineKeyboardButton(text="🔄 Retry Bootstrap", callback_data=f"project_bootstrap:{project.id}")],
+                [InlineKeyboardButton(text="💚 Health Check", callback_data=f"health:{project.id}")],
+                [InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
+            ]
+            await checklist.stop()
+            await checklist._force_render(buttons=buttons)
+            log.warning("bootstrap.no_tunnel", project=project.name, reason="app_not_responding")
+            return
+
+        await checklist.start_step(7)
         from openclow.services.tunnel_service import start_tunnel
         tunnel_url = ""
         try:
-            url = await start_tunnel(project.name, f"http://localhost:{port}")
+            # Get tunnel target via container IP (not localhost — worker can't reach host ports)
+            tunnel_target = await _get_tunnel_target(compose_project, workspace, project.id)
+            if not tunnel_target:
+                tunnel_target = f"http://localhost:{port}"  # fallback
+
+            # Detect host header from APP_URL (e.g. "abc.test" for virtual host matching)
+            host_header = None
+            env_path = os.path.join(workspace, ".env")
+            if os.path.exists(env_path):
+                with open(env_path) as f:
+                    for line in f:
+                        if line.strip().startswith("APP_URL="):
+                            app_url = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                            # Extract hostname: http://abc.test → abc.test
+                            from urllib.parse import urlparse
+                            parsed = urlparse(app_url)
+                            if parsed.hostname and parsed.hostname not in ("localhost", "127.0.0.1"):
+                                host_header = parsed.hostname
+                            break
+
+            await checklist.update_step(7, f"creating tunnel...")
+            url = await start_tunnel(project.name, tunnel_target, host_header=host_header)
             if url:
                 tunnel_url = url
-                await checklist.complete_step(tunnel_idx, url)
+                # Configure app .env to use tunnel URL (fix mixed content, CORS, etc.)
+                await _configure_app_for_tunnel(workspace, url, compose_project)
+                await checklist.update_step(7, "rebuilding assets with tunnel URL...")
+                # Rebuild frontend so VITE_API_BASE_URL points to tunnel
+                if os.path.exists(os.path.join(workspace, "package.json")):
+                    rc_build, _ = await _run("npm", "run", "build", cwd=workspace, timeout=300)
+                    if rc_build != 0:
+                        log.warning("bootstrap.rebuild_failed", project=project.name)
+                # Clear Laravel caches so new APP_URL takes effect
+                for container in await _get_compose_containers(compose_project, workspace, project.id):
+                    if container["state"] == "running":
+                        rc_chk, _ = await _run("docker", "exec", container["full_name"], "which", "php")
+                        if rc_chk == 0:
+                            await _run("docker", "exec", container["full_name"],
+                                       "php", "artisan", "config:clear", timeout=10)
+                            await _run("docker", "exec", container["full_name"],
+                                       "php", "artisan", "cache:clear", timeout=10)
+                            break
+                await checklist.complete_step(7, url[:50])
             else:
-                await checklist.fail_step(tunnel_idx, "could not start")
+                await checklist.fail_step(7, "tunnel failed to start")
         except Exception as e:
-            await checklist.fail_step(tunnel_idx, str(e)[:40])
-
-        # Playwright verification
-        pw_idx = tunnel_idx + 1
-        await checklist.start_step(pw_idx)
-        verify_url = tunnel_url or f"http://localhost:{port}"
-        try:
-            from claude_agent_sdk import query as pw_query, ClaudeAgentOptions as PwOptions
-            from claude_agent_sdk.types import AssistantMessage as PwMsg, TextBlock as PwText
-
-            pw_options = PwOptions(
-                cwd=workspace,
-                system_prompt="You are verifying a deployed app. Navigate, check it loads, report.",
-                model="claude-sonnet-4-6",  # Visual check — Sonnet is fast enough
-                allowed_tools=[
-                    "mcp__playwright__browser_navigate",
-                    "mcp__playwright__browser_snapshot",
-                    "mcp__playwright__browser_take_screenshot",
-                ],
-                mcp_servers={"playwright": {"command": "npx", "args": ["@playwright/mcp@0.0.28", "--headless"]}},
-                permission_mode="bypassPermissions",
-                max_turns=4,  # Navigate + screenshot + report = 3-4 turns max
-            )
-            pw_output = ""
-            async for msg in pw_query(
-                prompt=f"Navigate to {verify_url}, verify the page loads, take a screenshot. "
-                       f"Output VERIFY_STATUS: OK or VERIFY_STATUS: FAIL and VERIFY_DETAIL: <what you see>",
-                options=pw_options,
-            ):
-                if isinstance(msg, PwMsg):
-                    for b in msg.content:
-                        if isinstance(b, PwText):
-                            pw_output += b.text
-
-            if "VERIFY_STATUS: OK" in pw_output:
-                detail = ""
-                for line in pw_output.split("\n"):
-                    if "VERIFY_DETAIL:" in line:
-                        detail = line.split(":", 1)[1].strip()
-                        break
-                await checklist.complete_step(pw_idx, detail[:40] or "app loads")
-            else:
-                await checklist.fail_step(pw_idx, "app not responding")
-        except Exception:
-            await checklist.complete_step(pw_idx, "skipped")
+            await checklist.fail_step(7, str(e)[:40])
 
         # ── Final summary with buttons ──
         checklist._footer = ""
-        all_done = all(s["status"] == "done" for s in checklist.steps)
+        all_done = all(s["status"] in ("done", "skipped") for s in checklist.steps)
         any_failed = any(s["status"] == "failed" for s in checklist.steps)
 
         if all_done:

@@ -1,16 +1,16 @@
 """Live checklist reporter that updates a single Telegram message in-place.
 
-Shows all steps upfront with status icons, then ticks each one off
-as the agent works. Background heartbeat keeps the elapsed timer alive
-even during long-running commands.
+Shows ALL steps upfront with status icons and a progress bar,
+then ticks each one off as work completes. Background heartbeat
+keeps the elapsed timer alive even during long-running commands.
 """
 from openclow.services.base_reporter import BaseReporter
 
-ICONS = {"pending": "⬜", "running": "🔄", "done": "✅", "failed": "❌"}
+ICONS = {"pending": "⬜", "running": "🔄", "done": "✅", "failed": "❌", "skipped": "⏭️"}
 
 
 class ChecklistReporter(BaseReporter):
-    """Step-based checklist with live Telegram updates."""
+    """Step-based checklist with progress bar and live Telegram updates."""
 
     def __init__(self, chat, chat_id: str, message_id: str, title: str, subtitle: str = ""):
         super().__init__(chat, chat_id, message_id, heartbeat_interval=5.0, rate_limit=1.5)
@@ -54,14 +54,40 @@ class ChecklistReporter(BaseReporter):
                 self.steps[index]["detail"] = detail
             await self._render()
 
+    async def skip_step(self, index: int, detail: str = ""):
+        if 0 <= index < len(self.steps):
+            self.steps[index]["status"] = "skipped"
+            if detail:
+                self.steps[index]["detail"] = detail
+            await self._render()
+
     # -- Rendering -------------------------------------------------------------
 
     def _build_text(self) -> str:
-        lines = [f"🤖 {self.title} ({self.elapsed}s)", "━━━━━━━━━━━━━━━━━━━━━━━"]
+        total = len(self.steps)
+        done = sum(1 for s in self.steps if s["status"] in ("done", "skipped"))
+        failed = sum(1 for s in self.steps if s["status"] == "failed")
+
+        # Header with title
+        lines = [f"🤖 {self.title} ({self.elapsed}s)"]
+
+        # Progress bar
+        if total > 0:
+            filled = done + failed
+            bar_len = 20
+            bar_filled = int((filled / total) * bar_len)
+            bar = "█" * bar_filled + "░" * (bar_len - bar_filled)
+            pct = int((filled / total) * 100)
+            lines.append(f"[{bar}] {filled}/{total} ({pct}%)")
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
+
         if self.subtitle:
             lines.append(self.subtitle)
+
         lines.append("")
 
+        # Steps
         for step in self.steps:
             icon = ICONS.get(step["status"], "⬜")
             line = f"{icon} {step['name']}"

@@ -32,11 +32,20 @@ _active_processes: dict[str, asyncio.subprocess.Process] = {}
 _worker_instance_id: str = uuid.uuid4().hex[:12]
 
 
-async def start_tunnel(service_name: str, target_url: str) -> str | None:
+async def start_tunnel(
+    service_name: str, target_url: str, host_header: str | None = None,
+) -> str | None:
     """Start a cloudflared quick-tunnel to target_url.
 
     Idempotent: if tunnel already running for this service, returns existing URL.
     Persists URL in DB under category="tunnel", key=service_name.
+
+    Args:
+        service_name: Unique name for this tunnel (e.g. "tagh-test")
+        target_url: URL to proxy to (e.g. "http://172.21.0.7:80")
+        host_header: Override Host header sent to origin (e.g. "abc.test").
+                     Required for apps that use virtual hosts / server_name matching.
+
     Returns the public URL or None on failure.
     """
     # Check if we already have an active process
@@ -50,9 +59,13 @@ async def start_tunnel(service_name: str, target_url: str) -> str | None:
     await stop_tunnel(service_name)
 
     # Start cloudflared
+    cmd = ["cloudflared", "tunnel", "--url", target_url]
+    if host_header:
+        cmd.extend(["--http-host-header", host_header])
+
     try:
         proc = await asyncio.create_subprocess_exec(
-            "cloudflared", "tunnel", "--url", target_url,
+            *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

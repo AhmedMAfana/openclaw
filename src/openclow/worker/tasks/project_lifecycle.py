@@ -89,38 +89,47 @@ async def docker_up_task(ctx: dict, project_id: int, chat_id: str, message_id: s
 
         await status.add("✅", "Docker containers started", replace_last=True)
 
-        # 2. Wait for health
-        await status.add("🔄", "Waiting for containers to initialize...")
-        await asyncio.sleep(10)
+        # 2. Wait for health — check via Docker exec (generic, works for any project)
+        await status.add("🔄", "Checking app health...")
+        await asyncio.sleep(8)
 
-        # Quick health check via curl
+        from openclow.worker.tasks.bootstrap import _find_app_container
         app_ok = False
-        for attempt in range(3):
-            try:
-                proc = await asyncio.create_subprocess_shell(
-                    f'curl -sf http://localhost:{port}/ -o /dev/null -w "%{{http_code}}" --max-time 5',
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
-                code = stdout.decode().strip()
-                if code.startswith("2") or code.startswith("3"):
-                    app_ok = True
-                    break
-            except Exception:
-                pass
-            if attempt < 2:
-                await asyncio.sleep(5)
+        app_info = await _find_app_container(compose_project, workspace, project_id)
+        if app_info:
+            container_name, internal_port = app_info
+            for attempt in range(3):
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        "docker", "exec", container_name,
+                        "curl", "-sf", f"http://localhost:{internal_port}/",
+                        "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "5",
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
+                    code = stdout.decode().strip()
+                    if code.startswith("2") or code.startswith("3"):
+                        app_ok = True
+                        break
+                except Exception:
+                    pass
+                if attempt < 2:
+                    await asyncio.sleep(5)
 
         if app_ok:
-            await status.add("✅", f"App responding on port {port}", replace_last=True)
+            await status.add("✅", "App responding", replace_last=True)
         else:
-            await status.add("⚠️", f"App not responding on port {port} yet", replace_last=True)
+            await status.add("⚠️", "App not responding yet (may need time)", replace_last=True)
 
-        # 3. Start tunnel
+        # 3. Start tunnel (target container IP, not host port)
         await status.add("🔄", "Creating public URL...")
         tunnel_url = ""
         try:
-            url = await start_tunnel(project.name, f"http://localhost:{port}")
+            from openclow.worker.tasks.bootstrap import _get_tunnel_target
+            tunnel_target = await _get_tunnel_target(compose_project, workspace, project_id)
+            if not tunnel_target:
+                tunnel_target = f"http://localhost:{port}"
+            url = await start_tunnel(project.name, tunnel_target)
             if url:
                 tunnel_url = url
                 await status.add("✅", f"Public URL: {url}", replace_last=True)

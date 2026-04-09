@@ -80,8 +80,17 @@ async def on_startup(ctx: dict):
             )
             projects = result.scalars().all()
         for p in projects:
-            port = p.app_port or 8000
-            proj_url = await start_tunnel(p.name, f"http://localhost:{port}")
+            # Find container IP for tunnel target (not host port)
+            compose_project = f"openclow-{p.name}"
+            try:
+                from openclow.worker.tasks.bootstrap import _get_tunnel_target
+                tunnel_target = await _get_tunnel_target(compose_project, f"/workspaces/_cache/{p.name}", p.id)
+            except Exception:
+                tunnel_target = None
+            if not tunnel_target:
+                from openclow.services.port_allocator import get_app_port
+                tunnel_target = f"http://localhost:{get_app_port(p.id)}"
+            proj_url = await start_tunnel(p.name, tunnel_target)
             if proj_url:
                 log.info("worker.project_tunnel_restored", project=p.name, url=proj_url)
     except Exception as e:

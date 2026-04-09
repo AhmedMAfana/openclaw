@@ -1,0 +1,373 @@
+- generic [active] [ref=e1]:
+  - img [ref=e2]
+  - generic [ref=e4]:
+    - generic [ref=e7]:
+      - generic [ref=e8]:
+        - button [ref=e11] [cursor=pointer]
+        - generic [ref=e13]:
+          - textbox [ref=e14]:
+            - /placeholder: " "
+          - generic: 
+          - generic: Search
+      - generic [ref=e15]:
+        - generic [ref=e17]:
+          - generic [ref=e20] [cursor=pointer]:
+            - button "" [ref=e22]:
+              - generic: 
+            - generic:
+              - generic:
+                - generic: Never miss a message! 🔔
+            - generic:
+              - generic: Enable notifications to stay updated.
+          - list [ref=e27]:
+            - generic [ref=e28] [cursor=pointer]:
+              - generic:
+                - generic:
+                  - generic: 
+              - generic:
+                - generic: Archived Chats
+              - generic:
+                - generic: طلبة فروع قطاع غزة
+                - generic: "1"
+            - link "🤖 Setting up tagh-test (18s) [████████████████████] 8/8 (100%) ━━━━━━━━━━━━━━━━━━━━━━━ Node.js, Vue... OpenClow Bot 10:22 AM OB" [ref=e343] [cursor=pointer]:
+              - /url: "#8606963465"
+              - generic:
+                - generic:
+                  - generic: 🤖 Setting up tagh-test (18s) [████████████████████] 8/8 (100%) ━━━━━━━━━━━━━━━━━━━━━━━ Node.js, Vue...
+              - generic:
+                - generic:
+                  - generic: OpenClow Bot
+                - generic:
+                  - generic: 10:22 AM
+              - generic: OB
+            - link "عاجل زوارق الاحتلال تطلق قذائف تجاه شاطئ بحر مدينة رفح، جنوب قطاع غزة. قناة رصد العدو 07:53 AM" [ref=e32] [cursor=pointer]:
+              - /url: "#-1471257233"
+              - generic:
+                - generic:
+                  - generic: عاجل زوارق الاحتلال تطلق قذائف تجاه شاطئ بحر مدينة رفح، جنوب قطاع غزة.
+              - generic:
+                - generic:
+                  - generic: قناة رصد العدو
+                - generic:
+                  - generic: 07:53 AM
+              - generic:
+                - img
+            - link " هاي الأردنية الي بتدافع عن امريكا والي الجزيرة مقدمتها على أنها ما بتحكي عربي وعاوجه لسانها وما بت... المستشار احمد ابو اياد 02:53 AM" [ref=e34] [cursor=pointer]:
+              - /url: "#-1307326930"
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic: 
+                      - img
+                  - generic: هاي الأردنية الي بتدافع عن امريكا والي الجزيرة مقدمتها على أنها ما بتحكي عربي وعاوجه لسانها وما بت...
+              - generic:
+                - generic:
+                  - generic:
+                    - generic: المستشار احمد ابو اياد
+                    - generic:
+                      - img
+                - generic:
+                  - generic: 02:53 AM
+              - generic:
+                - img
+            - link "Done! Congratulations on your new bot. You will find it at t.me/open_clow_ami_bot. You can now add a... BotFather Tue" [ref=e36] [cursor=pointer]:
+              - /url: "#93372553"
+              - generic:
+                - generic:
+                  - generic: Done! Congratulations on your new bot. You will find it at t.me/open_clow_ami_bot. You can now add a...
+              - generic:
+                - generic:
+                  - generic:
+                    - generic: BotFather
+                    - generic:
+                      - img
+                - generic:
+                  - generic: Tue
+              - generic:
+                - img
+            - link "كيف يعني خازوق Mohammed  Mar 31 M" [ref=e38] [cursor=pointer]:
+              - /url: "#947555590"
+              - generic:
+                - generic:
+                  - generic: كيف يعني خازوق
+              - generic:
+                - generic:
+                  - generic: Mohammed
+                - generic:
+                  - generic:
+                    - generic: 
+                  - generic: Mar 31
+              - generic: M
+        - button " " [ref=e40] [cursor=pointer]:
+          - generic: 
+          - generic: 
+        - generic [ref=e44] [cursor=pointer]: UPDATE
+    - generic [ref=e48]:
+      - generic [ref=e54] [cursor=pointer]:
+        - generic [ref=e56]:
+          - generic [ref=e57]: OB
+          - generic [ref=e58]:
+            - generic [ref=e61]: OpenClow Bot
+            - generic [ref=e63]: bot
+        - generic [ref=e64]:
+          - text: "#"
+          - button "" [ref=e65]:
+            - generic: 
+          - button "" [ref=e67]:
+            - generic: 
+      - generic [ref=e72]:
+        - generic [ref=e75]: Today
+        - generic [ref=e114]:
+          - generic [ref=e115]:
+            - link "/bootstrap" [ref=e116] [cursor=pointer]:
+              - /url: tg://bot_command?command=bootstrap
+            - text: tagh-test
+            - generic "9 April 2026, 08:26:42" [ref=e117] [cursor=pointer]:
+              - generic: 
+              - generic [ref=e118]: 08:26 AM
+          - img [ref=e119]
+        - generic [ref=e123]:
+          - generic [ref=e124]:
+            - generic [ref=e125]:
+              - generic [ref=e126]:
+                - text: 🤖 Setting up tagh-test (77s) [██████████░░░░░░░░░░] 4/8 (50%) ━━━━━━━━━━━━━━━━━━━━━━━ Node.js, Vue, PHP/Laravel, Laravel ✅ Clone repository — updated ✅ Setup environment — .env exists 🔄 Install dependencies — export $(cat
+                - link "/workspaces" [ref=e127] [cursor=pointer]:
+                  - /url: tg://bot_command?command=workspaces
+                - link "/_cache" [ref=e128] [cursor=pointer]:
+                  - /url: tg://bot_command?command=_cache
+                - link "/tagh" [ref=e129] [cursor=pointer]:
+                  - /url: tg://bot_command?command=tagh
+                - text: "-tes ⬜ Build frontend assets ✅ Start Docker containers — 2/2 running ⬜ Run database migrations ✅ Create public URL —"
+                - link "https://canyon-speaks-exposure-action.trycloudflar" [ref=e130] [cursor=pointer]:
+                  - /url: https://canyon-speaks-exposure-action.trycloudflar
+                - text: 🔄 Verify app... ❌ name 'pw_idx' is not defined
+              - generic "9 April 2026, 08:26:43" [ref=e131] [cursor=pointer]:
+                - generic [ref=e132]: 08:26 AM
+            - img [ref=e133]
+          - generic [ref=e135]:
+            - button "🔄 Retry Bootstrap" [ref=e137] [cursor=pointer]:
+              - generic: 🔄 Retry Bootstrap
+            - generic [ref=e139]:
+              - button "🔗 Unlink" [ref=e140] [cursor=pointer]:
+                - generic: 🔗 Unlink
+              - button "🗑 Remove" [ref=e142] [cursor=pointer]:
+                - generic: 🗑 Remove
+            - button "◀️ Main Menu" [ref=e145] [cursor=pointer]:
+              - generic: ◀️ Main Menu
+        - generic [ref=e150]:
+          - generic [ref=e151]:
+            - link "/bootstrap" [ref=e152] [cursor=pointer]:
+              - /url: tg://bot_command?command=bootstrap
+            - text: tagh-test
+            - generic "9 April 2026, 08:31:00" [ref=e153] [cursor=pointer]:
+              - generic: 
+              - generic [ref=e154]: 08:31 AM
+          - img [ref=e155]
+        - generic [ref=e159]:
+          - generic [ref=e160]:
+            - generic [ref=e161]:
+              - generic [ref=e162]:
+                - text: 🤖 Setting up tagh-test (86s) [████████████░░░░░░░░] 5/8 (62%) ━━━━━━━━━━━━━━━━━━━━━━━ Node.js, Vue, PHP/Laravel, Laravel ✅ Clone repository — updated ✅ Setup environment — .env exists 🔄 Install dependencies — export $(cat .env.ports | grep -v '^#' | ⬜ Build frontend assets ✅ Start Docker containers — 7/7 running ⬜ Run database migrations ✅ Create public URL —
+                - link "https://fibre-scholars-icons-las.trycloudflare.com" [ref=e163] [cursor=pointer]:
+                  - /url: https://fibre-scholars-icons-las.trycloudflare.com
+                - text: ❌ Verify app — app not responding ⚠️ Some steps had issues — check above 🌐
+                - link "https://fibre-scholars-icons-las.trycloudflare.com" [ref=e164] [cursor=pointer]:
+                  - /url: https://fibre-scholars-icons-las.trycloudflare.com
+              - generic "9 April 2026, 08:31:01" [ref=e165] [cursor=pointer]:
+                - generic [ref=e166]: 08:31 AM
+            - img [ref=e167]
+          - generic [ref=e169]:
+            - link " 🌐 Open App" [ref=e171] [cursor=pointer]:
+              - /url: https://fibre-scholars-icons-las.trycloudflare.com/
+              - generic: 
+              - generic: 🌐 Open App
+            - generic [ref=e173]:
+              - button "🚀 New Task" [ref=e174] [cursor=pointer]:
+                - generic: 🚀 New Task
+              - button "💚 Health" [ref=e176] [cursor=pointer]:
+                - generic: 💚 Health
+        - generic [ref=e181]:
+          - generic [ref=e182]:
+            - link "/bootstrap" [ref=e183] [cursor=pointer]:
+              - /url: tg://bot_command?command=bootstrap
+            - text: tagh-test
+            - generic "9 April 2026, 10:03:28" [ref=e184] [cursor=pointer]:
+              - generic: 
+              - generic [ref=e185]: 10:03 AM
+          - img [ref=e186]
+        - generic [ref=e190]:
+          - generic [ref=e191]:
+            - generic [ref=e192]:
+              - generic [ref=e193]:
+                - text: "🤖 Setting up tagh-test (177s) [████████████████████] 8/8 (100%) ━━━━━━━━━━━━━━━━━━━━━━━ Node.js, Vue, PHP/Laravel, Laravel ✅ Clone repository — updated ✅ Setup environment — .env exists ⏭️ Install dependencies — — `vendor/` (79 pkgs) and `node_modules/` (822 pkg ✅ Build frontend assets — — `npm run build` completed; `public/build/` creat ✅ Start Docker containers — 7/7 running ⏭️ Run database migrations — no migration tool found ✅ Verify app — HTTP 200 from openclow-tagh-test-nginx-1 ✅ Create public URL —"
+                - link "https://physical-previously-goat-independent.trycl" [ref=e194] [cursor=pointer]:
+                  - /url: https://physical-previously-goat-independent.trycl
+                - text: 🚀 Ready for tasks! 🌐
+                - link "https://physical-previously-goat-independent.trycloudflare.com" [ref=e195] [cursor=pointer]:
+                  - /url: https://physical-previously-goat-independent.trycloudflare.com
+              - generic "9 April 2026, 10:03:29" [ref=e196] [cursor=pointer]:
+                - generic [ref=e197]: 10:03 AM
+            - img [ref=e198]
+          - generic [ref=e200]:
+            - link " 🌐 Open App" [ref=e202] [cursor=pointer]:
+              - /url: https://physical-previously-goat-independent.trycloudflare.com/
+              - generic: 
+              - generic: 🌐 Open App
+            - generic [ref=e204]:
+              - button "🚀 New Task" [ref=e205] [cursor=pointer]:
+                - generic: 🚀 New Task
+              - button "💚 Health" [ref=e207] [cursor=pointer]:
+                - generic: 💚 Health
+        - generic [ref=e212]:
+          - generic [ref=e213]:
+            - link "/bootstrap" [ref=e214] [cursor=pointer]:
+              - /url: tg://bot_command?command=bootstrap
+            - text: tagh-test
+            - generic "9 April 2026, 10:07:08" [ref=e215] [cursor=pointer]:
+              - generic: 
+              - generic [ref=e216]: 10:07 AM
+          - img [ref=e217]
+        - generic [ref=e221]:
+          - generic [ref=e222]:
+            - generic [ref=e223]:
+              - generic [ref=e224]:
+                - text: 🤖 Setting up tagh-test (17s) [████████████████████] 8/8 (100%) ━━━━━━━━━━━━━━━━━━━━━━━ Node.js, Vue, PHP/Laravel, Laravel ✅ Clone repository — updated ✅ Setup environment — .env exists ⏭️ Install dependencies — vendor + node_modules exist ⏭️ Build frontend assets — public/build/ has 6 files ✅ Start Docker containers — 7/7 running ⏭️ Run database migrations — no migration tool found ✅ Verify app — HTTP 200 from openclow-tagh-test-nginx-1 ✅ Create public URL —
+                - link "https://valley-allocation-thompson-permitted.trycl" [ref=e225] [cursor=pointer]:
+                  - /url: https://valley-allocation-thompson-permitted.trycl
+                - text: 🚀 Ready for tasks! 🌐
+                - link "https://valley-allocation-thompson-permitted.trycloudflare.com" [ref=e226] [cursor=pointer]:
+                  - /url: https://valley-allocation-thompson-permitted.trycloudflare.com
+              - generic "9 April 2026, 10:07:08" [ref=e227] [cursor=pointer]:
+                - generic [ref=e228]: 10:07 AM
+            - img [ref=e229]
+          - generic [ref=e231]:
+            - link " 🌐 Open App" [ref=e233] [cursor=pointer]:
+              - /url: https://valley-allocation-thompson-permitted.trycloudflare.com/
+              - generic: 
+              - generic: 🌐 Open App
+            - generic [ref=e235]:
+              - button "🚀 New Task" [ref=e236] [cursor=pointer]:
+                - generic: 🚀 New Task
+              - button "💚 Health" [ref=e238] [cursor=pointer]:
+                - generic: 💚 Health
+        - generic [ref=e243]:
+          - generic [ref=e244]:
+            - link "/bootstrap" [ref=e245] [cursor=pointer]:
+              - /url: tg://bot_command?command=bootstrap
+            - text: tagh-test
+            - generic "9 April 2026, 10:10:41" [ref=e246] [cursor=pointer]:
+              - generic: 
+              - generic [ref=e247]: 10:10 AM
+          - img [ref=e248]
+        - generic [ref=e252]:
+          - generic [ref=e253]:
+            - generic [ref=e254]:
+              - generic [ref=e255]:
+                - text: 🤖 Setting up tagh-test (18s) [████████████████████] 8/8 (100%) ━━━━━━━━━━━━━━━━━━━━━━━ Node.js, Vue, PHP/Laravel, Laravel ✅ Clone repository — updated ✅ Setup environment — .env exists ⏭️ Install dependencies — vendor + node_modules exist ⏭️ Build frontend assets — public/build/ has 6 files ✅ Start Docker containers — 7/7 running ⏭️ Run database migrations — no migration tool found ✅ Verify app — HTTP 200 from openclow-tagh-test-nginx-1 ✅ Create public URL —
+                - link "https://ending-getting-alabama-dan.trycloudflare" [ref=e256] [cursor=pointer]:
+                  - /url: https://ending-getting-alabama-dan.trycloudflare
+                - text: .c 🚀 Ready for tasks! 🌐
+                - link "https://ending-getting-alabama-dan.trycloudflare.com" [ref=e257] [cursor=pointer]:
+                  - /url: https://ending-getting-alabama-dan.trycloudflare.com
+              - generic "9 April 2026, 10:10:42" [ref=e258] [cursor=pointer]:
+                - generic [ref=e259]: 10:10 AM
+            - img [ref=e260]
+          - generic [ref=e262]:
+            - link " 🌐 Open App" [ref=e264] [cursor=pointer]:
+              - /url: https://ending-getting-alabama-dan.trycloudflare.com/
+              - generic: 
+              - generic: 🌐 Open App
+            - generic [ref=e266]:
+              - button "🚀 New Task" [ref=e267] [cursor=pointer]:
+                - generic: 🚀 New Task
+              - button "💚 Health" [ref=e269] [cursor=pointer]:
+                - generic: 💚 Health
+        - generic [ref=e274]:
+          - generic [ref=e275]:
+            - link "/bootstrap" [ref=e276] [cursor=pointer]:
+              - /url: tg://bot_command?command=bootstrap
+            - text: tagh-test
+            - generic "9 April 2026, 10:19:01" [ref=e277] [cursor=pointer]:
+              - generic: 
+              - generic [ref=e278]: 10:19 AM
+          - img [ref=e279]
+        - generic [ref=e283]:
+          - generic [ref=e284]:
+            - generic [ref=e285]:
+              - generic [ref=e286]:
+                - text: "🤖 Setting up tagh-test (18s) [████████████████████] 8/8 (100%) ━━━━━━━━━━━━━━━━━━━━━━━ Node.js, Vue, PHP/Laravel, Laravel ✅ Clone repository — updated ✅ Setup environment — .env exists ⏭️ Install dependencies — vendor + node_modules exist ⏭️ Build frontend assets — public/build/ has 6 files ✅ Start Docker containers — 7/7 running ❌ Run database migrations — Could not open input file: artisan ✅ Verify app — HTTP 200 from openclow-tagh-test-nginx-1 ✅ Create public URL —"
+                - link "https://revenue-continent-spirits-appearing.tryclo" [ref=e287] [cursor=pointer]:
+                  - /url: https://revenue-continent-spirits-appearing.tryclo
+                - text: ⚠️ Some steps had issues — check above 🌐
+                - link "https://revenue-continent-spirits-appearing.trycloudflare.com" [ref=e288] [cursor=pointer]:
+                  - /url: https://revenue-continent-spirits-appearing.trycloudflare.com
+              - generic "9 April 2026, 10:19:02" [ref=e289] [cursor=pointer]:
+                - generic [ref=e290]: 10:19 AM
+            - img [ref=e291]
+          - generic [ref=e296]:
+            - link " 🌐 Open App" [ref=e298] [cursor=pointer]:
+              - /url: https://revenue-continent-spirits-appearing.trycloudflare.com/
+              - generic: 
+              - generic: 🌐 Open App
+            - generic [ref=e300]:
+              - button "🚀 New Task" [ref=e301] [cursor=pointer]:
+                - generic: 🚀 New Task
+              - button "💚 Health" [ref=e303] [cursor=pointer]:
+                - generic: 💚 Health
+        - generic [ref=e326]:
+          - generic [ref=e327]:
+            - link "/bootstrap" [ref=e328] [cursor=pointer]:
+              - /url: tg://bot_command?command=bootstrap
+            - text: tagh-test
+            - generic "9 April 2026, 10:22:18" [ref=e329] [cursor=pointer]:
+              - generic: 
+              - generic [ref=e330]: 10:22 AM
+          - img [ref=e331]
+        - generic [ref=e345]:
+          - generic [ref=e346]:
+            - generic [ref=e347]:
+              - generic [ref=e348]:
+                - text: "🤖 Setting up tagh-test (18s) [████████████████████] 8/8 (100%) ━━━━━━━━━━━━━━━━━━━━━━━ Node.js, Vue, PHP/Laravel, Laravel ✅ Clone repository — updated ✅ Setup environment — .env exists ⏭️ Install dependencies — vendor + node_modules exist ⏭️ Build frontend assets — public/build/ has 6 files ✅ Start Docker containers — 7/7 running ❌ Run database migrations — Could not open input file: artisan ✅ Verify app — HTTP 200 from openclow-tagh-test-nginx-1 ✅ Create public URL —"
+                - link "https://otherwise-importance-aurora-eternal.tryclo" [ref=e349] [cursor=pointer]:
+                  - /url: https://otherwise-importance-aurora-eternal.tryclo
+                - text: ⚠️ Some steps had issues — check above 🌐
+                - link "https://otherwise-importance-aurora-eternal.trycloudflare.com" [ref=e350] [cursor=pointer]:
+                  - /url: https://otherwise-importance-aurora-eternal.trycloudflare.com
+              - generic "9 April 2026, 10:22:19" [ref=e351] [cursor=pointer]:
+                - generic [ref=e352]: 10:22 AM
+            - img [ref=e353]
+          - generic [ref=e358]:
+            - link " 🌐 Open App" [ref=e360] [cursor=pointer]:
+              - /url: https://otherwise-importance-aurora-eternal.trycloudflare.com/
+              - generic: 
+              - generic: 🌐 Open App
+            - generic [ref=e362]:
+              - button "🚀 New Task" [ref=e363] [cursor=pointer]:
+                - generic: 🚀 New Task
+              - button "💚 Health" [ref=e365] [cursor=pointer]:
+                - generic: 💚 Health
+      - generic [ref=e306]:
+        - generic [ref=e308]:
+          - img [ref=e309]
+          - generic:
+            - button
+            - button "":
+              - generic: 
+          - generic [ref=e311]:
+            - button "" [ref=e312] [cursor=pointer]:
+              - generic: 
+            - generic [ref=e313]:
+              - generic: Message
+            - generic [ref=e315] [cursor=pointer]:
+              - generic: 
+        - generic [ref=e317]:
+          - generic:
+            - generic: 
+            - generic: NaN
+          - button "    " [ref=e318] [cursor=pointer]:
+            - generic: 
+            - generic: 
+            - generic: 
+            - generic: 
+            - generic: 
