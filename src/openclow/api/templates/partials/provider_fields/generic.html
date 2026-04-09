@@ -10,16 +10,42 @@
         {{ field.label }}
         {% if field.get('required') %}<span class="text-red-400">*</span>{% endif %}
     </label>
-    {% if field.type == "password" %}
-        <input
-            type="password"
-            id="{{ field.name }}"
-            name="{{ field.name }}"
-            value="{{ config.get(field.name, '') }}"
-            placeholder="{{ field.get('help', '') }}"
-            class="form-input"
-            {% if field.get('required') %}required{% endif %}
-        >
+    {% set current_val = config.get(field.name, '') %}
+    {% if field.type == "channel_select" %}
+        <!-- Slack channel selector — click Reload to fetch channels from Slack API -->
+        <div id="channel-select-wrapper"
+            hx-get="/api/settings/slack/channels-select"
+            hx-trigger="load"
+            hx-swap="innerHTML">
+            {% if current_val %}
+            <select id="{{ field.name }}" name="{{ field.name }}" class="form-input">
+                <option value="{{ current_val }}" selected>{{ current_val }} (saved)</option>
+            </select>
+            <p class="text-xs text-gray-400 mt-1">{{ field.get('help', '') }}. Click Reload to see all channels.</p>
+            {% else %}
+            <p class="text-xs text-gray-400">Loading channels...</p>
+            {% endif %}
+        </div>
+    {% elif field.type == "password" %}
+        <div class="relative">
+            <input
+                type="password"
+                id="{{ field.name }}"
+                name="{{ field.name }}"
+                value="{{ current_val }}"
+                placeholder="{{ field.get('help', '') }}"
+                class="form-input {% if current_val %}pr-20{% endif %}"
+                {% if field.get('required') %}required{% endif %}
+            >
+            {% if current_val %}
+            <span class="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-green-600 font-medium">Configured</span>
+            {% endif %}
+        </div>
+        {% if current_val %}
+        <p class="text-xs text-gray-400 mt-1">{{ field.get('help', '') }}. Leave unchanged to keep current value.</p>
+        {% elif field.get('help') %}
+        <p class="text-xs text-gray-400 mt-1">{{ field.help }}</p>
+        {% endif %}
     {% elif field.type == "number" %}
         <input
             type="number"
@@ -30,6 +56,9 @@
             max="{{ field.get('max', '') }}"
             class="form-input"
         >
+        {% if field.get('help') %}
+        <p class="text-xs text-gray-400 mt-1">{{ field.help }}</p>
+        {% endif %}
     {% else %}
         <input
             type="text"
@@ -40,9 +69,9 @@
             class="form-input"
             {% if field.get('required') %}required{% endif %}
         >
-    {% endif %}
-    {% if field.get('help') %}
+        {% if field.get('help') %}
         <p class="text-xs text-gray-400 mt-1">{{ field.help }}</p>
+        {% endif %}
     {% endif %}
 </div>
 {% endfor %}

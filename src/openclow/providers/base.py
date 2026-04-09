@@ -3,9 +3,19 @@
 OpenClow is provider-agnostic. The core engine never imports
 aiogram, claude_agent_sdk, or gh CLI directly. It uses these abstractions.
 """
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
+
+if TYPE_CHECKING:
+    from openclow.providers.actions import ActionKeyboard
+
+
+class ProviderMismatchError(Exception):
+    """Raised when a task's provider doesn't match the currently active provider."""
+    pass
 
 
 # ── LLM Provider ──────────────────────────────────────────────
@@ -111,6 +121,29 @@ class ChatProvider(ABC):
 
     @abstractmethod
     async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
+        ...
+
+    @abstractmethod
+    async def send_message_with_actions(
+        self,
+        chat_id: str,
+        text: str,
+        keyboard: ActionKeyboard | None = None,
+        parse_mode: str | None = None,
+    ) -> str:
+        """Send a message with optional action buttons. Returns message_id."""
+        ...
+
+    @abstractmethod
+    async def edit_message_with_actions(
+        self,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        keyboard: ActionKeyboard | None = None,
+        parse_mode: str | None = None,
+    ) -> None:
+        """Edit a message with optional action buttons."""
         ...
 
     @abstractmethod

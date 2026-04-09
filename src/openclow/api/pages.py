@@ -26,10 +26,25 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 # Helpers
 # ---------------------------------------------------------------------------
 
+MASK_SENTINEL = "****"
+
+
 def _mask_token(value: str) -> str:
-    if len(value) <= 10:
-        return "****"
-    return f"{value[:4]}****{value[-4:]}"
+    if not value or len(value) <= 10:
+        return MASK_SENTINEL
+    return f"{value[:4]}{'*' * 8}{value[-4:]}"
+
+
+def _mask_config(config: dict) -> dict:
+    """Return a copy of config with sensitive fields masked for display."""
+    sensitive_keys = {"token", "api_key", "bot_token", "app_token", "signing_secret"}
+    masked = {}
+    for k, v in config.items():
+        if k in sensitive_keys and isinstance(v, str) and v:
+            masked[k] = _mask_token(v)
+        else:
+            masked[k] = v
+    return masked
 
 
 async def _get_status_context() -> dict:
@@ -88,7 +103,7 @@ async def llm_settings(request: Request):
     config = await config_service.get_config("llm", "provider") or {}
     return templates.TemplateResponse(request, "settings/llm.html", {
         "active_page": "llm",
-        "config": config,
+        "config": _mask_config(config),
         "providers": available_providers().get("llm", []),
         "schemas": provider_schema().get("llm", {}),
     })
@@ -99,7 +114,7 @@ async def chat_settings(request: Request):
     config = await config_service.get_config("chat", "provider") or {}
     return templates.TemplateResponse(request, "settings/chat.html", {
         "active_page": "chat",
-        "config": config,
+        "config": _mask_config(config),
         "providers": available_providers().get("chat", []),
         "schemas": provider_schema().get("chat", {}),
     })
@@ -110,7 +125,7 @@ async def git_settings(request: Request):
     config = await config_service.get_config("git", "provider") or {}
     return templates.TemplateResponse(request, "settings/git.html", {
         "active_page": "git",
-        "config": config,
+        "config": _mask_config(config),
         "providers": available_providers().get("git", []),
         "schemas": provider_schema().get("git", {}),
     })
@@ -194,7 +209,9 @@ async def wizard_step(request: Request, step_name: str):
 async def provider_fields_partial(request: Request, category: str, provider_type: str):
     schemas = provider_schema()
     fields = schemas.get(category, {}).get(provider_type, [])
-    config = await config_service.get_config(category, "provider") or {}
+
+    # Load per-type config so switching providers shows saved credentials
+    config = await config_service.get_provider_config_by_type(category, provider_type) or {}
 
     # Determine if this is the "coming soon" type
     registered = available_providers().get(category, [])
@@ -204,6 +221,6 @@ async def provider_fields_partial(request: Request, category: str, provider_type
         "category": category,
         "provider_type": provider_type,
         "fields": fields,
-        "config": config,
+        "config": _mask_config(config),
         "is_available": is_available,
     })

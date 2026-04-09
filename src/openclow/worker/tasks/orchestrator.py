@@ -17,11 +17,32 @@ from sqlalchemy.orm import selectinload
 
 from openclow.models import Task, TaskLog, async_session
 from openclow.providers import factory
+from openclow.providers.base import ProviderMismatchError
 from openclow.services.workspace_service import WorkspaceService
 from openclow.utils.logging import get_logger
 from openclow.worker.tasks import git_ops
 
 log = get_logger()
+
+
+async def _get_chat_for_task(task: Task):
+    """Get the chat provider that matches the task's originating platform.
+
+    Raises ProviderMismatchError if the active provider doesn't match,
+    which means the user switched providers and this task is orphaned.
+    """
+    from openclow.services.config_service import get_provider_config
+    ptype, _ = await get_provider_config("chat")
+    if task.chat_provider_type and task.chat_provider_type != ptype:
+        log.warning("task.provider_mismatch",
+                    task_id=str(task.id),
+                    task_provider=task.chat_provider_type,
+                    active_provider=ptype)
+        raise ProviderMismatchError(
+            f"Task was created on {task.chat_provider_type} but active provider is {ptype}. "
+            f"Switch back to {task.chat_provider_type} to interact with this task."
+        )
+    return await factory.get_chat()
 
 
 # Valid status transitions — used to guard against out-of-order execution
@@ -89,13 +110,16 @@ def _extract_summary(agent_output: str) -> str:
 
 def _main_menu_keyboard():
     """Rich next-action keyboard for terminal states."""
-    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="New Task", callback_data="menu:task"),
-            InlineKeyboardButton(text="Projects", callback_data="menu:projects"),
-        ],
-        [InlineKeyboardButton(text="Main Menu", callback_data="menu:main")],
+    from openclow.providers.actions import terminal_keyboard
+    return terminal_keyboard()
+
+
+def _retry_keyboard():
+    """Retry + main menu keyboard for interrupted tasks."""
+    from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+    return ActionKeyboard(rows=[
+        ActionRow([ActionButton("🔄 Retry", "menu:task")]),
+        ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
     ])
 
 
@@ -106,7 +130,11 @@ async def execute_task(ctx: dict, task_id: str):
     start_time = time.time()
 
     llm = await factory.get_llm()
-    chat = await factory.get_chat()
+    try:
+        chat = await _get_chat_for_task(task)
+    except ProviderMismatchError as e:
+        await _update_task(task_id_str, status="orphaned", error_message=str(e))
+        return
     ws = WorkspaceService()
 
     # ── Acquire project lock (prevent concurrent tasks on same repo) ──
@@ -179,14 +207,7 @@ async def execute_task(ctx: dict, task_id: str):
                            error_message=error_msg,
                            duration_seconds=int(time.time() - start_time))
         try:
-            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-            await reporter.error(
-                f"{error_msg}. You can retry.",
-                keyboard=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Retry", callback_data="menu:task")],
-                    [InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
-                ]),
-            )
+            await reporter.error(f"{error_msg}. You can retry.", keyboard=_retry_keyboard())
         except Exception:
             pass
         try:
@@ -226,7 +247,11 @@ async def execute_plan(ctx: dict, task_id: str):
     start_time = time.time()
 
     llm = await factory.get_llm()
-    chat = await factory.get_chat()
+    try:
+        chat = await _get_chat_for_task(task)
+    except ProviderMismatchError as e:
+        await _update_task(task_id_str, status="orphaned", error_message=str(e))
+        return
     ws = WorkspaceService()
 
     # Re-acquire project lock for coding phase
@@ -399,14 +424,7 @@ async def execute_plan(ctx: dict, task_id: str):
                            error_message=error_msg,
                            duration_seconds=int(time.time() - start_time))
         try:
-            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-            await reporter.error(
-                f"{error_msg}. You can retry.",
-                keyboard=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Retry", callback_data="menu:task")],
-                    [InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
-                ]),
-            )
+            await reporter.error(f"{error_msg}. You can retry.", keyboard=_retry_keyboard())
         except Exception:
             pass
     except Exception as e:
@@ -437,7 +455,11 @@ async def approve_task(ctx: dict, task_id: str):
     task = await _get_task(task_id)
     task_id_str = str(task.id)
 
-    chat = await factory.get_chat()
+    try:
+        chat = await _get_chat_for_task(task)
+    except ProviderMismatchError as e:
+        await _update_task(task_id_str, status="orphaned", error_message=str(e))
+        return
     git = await factory.get_git()
     ws = WorkspaceService()
 
@@ -484,7 +506,11 @@ async def merge_task(ctx: dict, task_id: str):
     """User clicked [Merge]."""
     task = await _get_task(task_id)
     task_id_str = str(task.id)
-    chat = await factory.get_chat()
+    try:
+        chat = await _get_chat_for_task(task)
+    except ProviderMismatchError as e:
+        await _update_task(task_id_str, status="orphaned", error_message=str(e))
+        return
     git = await factory.get_git()
 
     from openclow.services.status_reporter import StatusReporter
@@ -519,7 +545,11 @@ async def reject_task(ctx: dict, task_id: str):
     """User clicked [Reject]."""
     task = await _get_task(task_id)
     task_id_str = str(task.id)
-    chat = await factory.get_chat()
+    try:
+        chat = await _get_chat_for_task(task)
+    except ProviderMismatchError as e:
+        await _update_task(task_id_str, status="orphaned", error_message=str(e))
+        return
     git = await factory.get_git()
 
     from openclow.services.status_reporter import StatusReporter
@@ -556,7 +586,11 @@ async def discard_task(ctx: dict, task_id: str):
     """User clicked [Discard] — clean up workspace and branch."""
     task = await _get_task(task_id)
     task_id_str = str(task.id)
-    chat = await factory.get_chat()
+    try:
+        chat = await _get_chat_for_task(task)
+    except ProviderMismatchError as e:
+        await _update_task(task_id_str, status="orphaned", error_message=str(e))
+        return
     git = await factory.get_git()
     ws = WorkspaceService()
 

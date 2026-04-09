@@ -84,6 +84,7 @@ def provider_schema() -> dict[str, dict[str, list[dict]]]:
                 {"name": "bot_token", "label": "Bot Token", "type": "password", "required": True, "help": "xoxb-... token"},
                 {"name": "app_token", "label": "App Token", "type": "password", "required": True, "help": "xapp-... token"},
                 {"name": "signing_secret", "label": "Signing Secret", "type": "password", "required": True},
+                {"name": "default_channel", "label": "Default Notification Channel", "type": "channel_select", "required": False, "help": "Channel for system notifications and status updates"},
             ],
         },
         "git": {

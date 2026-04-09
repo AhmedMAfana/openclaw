@@ -33,3 +33,5 @@ Thumbs.db
 
 # Alembic
 alembic/versions/__pycache__/
+*.png
+.playwright-mcp/

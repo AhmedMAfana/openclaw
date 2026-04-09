@@ -80,13 +80,82 @@ async def update_config(category: str, body: ProviderConfigUpdate):
         raise HTTPException(400, f"Invalid category: {category}")
 
     config_dict = body.model_dump()
-    await config_service.set_config(category, "provider", config_dict)
+    provider_type = config_dict.pop("type", None)
+    if not provider_type:
+        raise HTTPException(400, "Missing 'type' field")
+
+    # Merge with existing config: skip masked/placeholder token values
+    # so we don't overwrite real secrets with "8606****yI0" strings.
+    sensitive_keys = {"token", "api_key", "bot_token", "app_token", "signing_secret"}
+    existing = await config_service.get_provider_config_by_type(category, provider_type) or {}
+    for key in sensitive_keys:
+        new_val = config_dict.get(key, "")
+        if isinstance(new_val, str) and ("****" in new_val or not new_val):
+            if key in existing:
+                config_dict[key] = existing[key]
+
+    # Read old active type BEFORE writing (for switch warning)
+    old_type = None
+    if category == "chat":
+        try:
+            old_active = await config_service.get_config(category, "provider") or {}
+            old_type = old_active.get("type")
+        except Exception:
+            pass
+
+    # Store per-type (preserves both Telegram and Slack configs)
+    await config_service.set_provider_config(category, provider_type, config_dict)
+    # Also update legacy key for backwards compat
+    await config_service.set_config(category, "provider", {"type": provider_type, **config_dict})
 
     # Reset cached provider instances so next call picks up new config
     from openclow.providers.factory import reset
     await reset()
 
-    return {"status": "ok", "message": f"{category} provider updated to '{body.type}'"}
+    # Auto-restart the bot when chat provider changes
+    warning = None
+    if category == "chat":
+        if old_type and old_type != provider_type:
+            from openclow.models.task import Task
+            terminal_statuses = {"merged", "rejected", "discarded", "failed", "orphaned"}
+            async with async_session() as session:
+                count = (await session.execute(
+                    select(sa_func.count(Task.id))
+                    .where(Task.chat_provider_type == old_type)
+                    .where(~Task.status.in_(terminal_statuses))
+                )).scalar() or 0
+                if count > 0:
+                    warning = f"{count} active task(s) on {old_type} will be marked as orphaned"
+
+        try:
+            from openclow.worker.arq_app import get_arq_pool
+            pool = await get_arq_pool()
+            await pool.enqueue_job("restart_bot_task", "provider_changed")
+        except Exception as e:
+            log.warning("settings.bot_restart_enqueue_failed", error=str(e))
+
+    result = {"status": "ok", "message": f"{category} provider updated to '{body.type}'"}
+    if warning:
+        result["warning"] = warning
+    return result
+
+
+@router.get("/bot-status")
+async def bot_status():
+    """Get bot status by asking the worker (which has Docker socket access)."""
+    try:
+        from openclow.worker.arq_app import get_arq_pool
+        pool = await get_arq_pool()
+        job = await pool.enqueue_job("get_bot_status_task")
+        result = await job.result(timeout=10)
+        return result
+    except Exception as e:
+        # Fallback: just return provider config
+        try:
+            ptype, _ = await config_service.get_provider_config("chat")
+            return {"running": None, "health": "unknown", "provider": ptype}
+        except Exception:
+            return {"running": False, "health": "error", "error": str(e)[:200]}
 
 
 @router.get("/providers")
@@ -100,18 +169,31 @@ async def get_available_providers():
 # ---------------------------------------------------------------------------
 
 @router.post("/test/{category}")
-async def test_connection(request: Request, category: str, body: dict | None = None):
+async def test_connection(request: Request, category: str):
     """Test a provider connection. Returns HTML partial for HTMX, JSON otherwise."""
+    # HTMX sends form-encoded data via hx-include; API callers send JSON.
+    # Accept both gracefully — no FastAPI body param (it rejects form data).
+    config: dict = {}
+    content_type = request.headers.get("content-type", "")
+    try:
+        if "json" in content_type:
+            config = await request.json()
+        else:
+            form = await request.form()
+            config = dict(form)
+    except Exception:
+        config = {}
+
     if category == "database":
         result = await _test_database()
     elif category == "redis":
         result = await _test_redis()
     elif category == "chat":
-        result = await _test_chat(body or {})
+        result = await _test_chat(config)
     elif category == "git":
-        result = await _test_git(body or {})
+        result = await _test_git(config)
     elif category == "llm":
-        result = await _test_llm(body or {})
+        result = await _test_llm(config)
     else:
         raise HTTPException(400, f"Unknown test category: {category}")
 
@@ -154,9 +236,9 @@ async def _test_chat(config: dict) -> TestResult:
 
     if provider_type == "telegram":
         token = config.get("token", "")
-        if not token:
-            # Try loading from DB
-            saved = await config_service.get_config("chat", "provider")
+        if not token or "****" in token:
+            # Masked or empty — load real token from DB (per-type storage)
+            saved = await config_service.get_provider_config_by_type("chat", "telegram")
             if saved:
                 token = saved.get("token", "")
         if not token:
@@ -167,17 +249,171 @@ async def _test_chat(config: dict) -> TestResult:
                 data = resp.json()
                 if data.get("ok"):
                     bot = data["result"]
+                    bot_username = bot["username"]
+
+                    # Send test message if a chat_id target is available
+                    test_chat_id = config.get("test_chat_id", "")
+                    if not test_chat_id:
+                        # Find first allowed Telegram user to send test to
+                        async with async_session() as session:
+                            result = await session.execute(
+                                select(User)
+                                .where(User.chat_provider_type == "telegram", User.is_allowed == True)
+                                .limit(1)
+                            )
+                            user = result.scalar_one_or_none()
+                            if user:
+                                test_chat_id = user.chat_provider_uid
+
+                    if test_chat_id:
+                        try:
+                            msg_resp = await client.post(
+                                f"https://api.telegram.org/bot{token}/sendMessage",
+                                json={
+                                    "chat_id": int(test_chat_id),
+                                    "text": "OpenClow test message — connection verified!",
+                                },
+                            )
+                            msg_data = msg_resp.json()
+                            if msg_data.get("ok"):
+                                return TestResult(
+                                    status="ok",
+                                    message=f"Connected as @{bot_username} — test message sent!",
+                                    details={"bot_id": bot["id"], "username": bot_username},
+                                )
+                            else:
+                                return TestResult(
+                                    status="ok",
+                                    message=f"Connected as @{bot_username} (message send failed: {msg_data.get('description', 'unknown')})",
+                                    details={"bot_id": bot["id"], "username": bot_username},
+                                )
+                        except Exception:
+                            pass  # Fall through to basic success
+
                     return TestResult(
                         status="ok",
-                        message=f"Connected as @{bot['username']}",
-                        details={"bot_id": bot["id"], "username": bot["username"]},
+                        message=f"Connected as @{bot_username} (no users configured — add a user to test messaging)",
+                        details={"bot_id": bot["id"], "username": bot_username},
                     )
                 return TestResult(status="error", message=data.get("description", "Invalid token"))
         except Exception as e:
             return TestResult(status="error", message=str(e))
 
     elif provider_type == "slack":
-        return TestResult(status="error", message="Slack integration coming soon")
+        saved = await config_service.get_provider_config_by_type("chat", "slack") or {}
+
+        def _resolve(key):
+            """Use provided value unless it's masked or empty, then fall back to saved."""
+            val = config.get(key, "")
+            if not val or "****" in val:
+                return saved.get(key, "")
+            return val
+
+        bot_token = _resolve("bot_token")
+        app_token = _resolve("app_token")
+        signing_secret = _resolve("signing_secret")
+
+        errors = []
+        if not bot_token:
+            errors.append("Bot Token (xoxb-...) is required")
+        elif not bot_token.startswith("xoxb-"):
+            errors.append("Bot Token must start with xoxb-")
+        if not app_token:
+            errors.append("App Token (xapp-...) is required for Socket Mode")
+        elif not app_token.startswith("xapp-"):
+            errors.append("App Token must start with xapp-")
+        if not signing_secret:
+            errors.append("Signing Secret is required")
+        if errors:
+            return TestResult(status="error", message="; ".join(errors))
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                # 1. Verify bot token
+                resp = await client.post(
+                    "https://slack.com/api/auth.test",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                )
+                data = resp.json()
+                if not data.get("ok"):
+                    return TestResult(status="error", message=f"Bot Token invalid: {data.get('error', 'unknown')}")
+
+                team = data.get("team", "workspace")
+                bot_id = data.get("bot_id", "bot")
+
+                # 2. Check scopes by trying chat.postMessage (dry-run not possible, so check via conversations.list)
+                resp2 = await client.get(
+                    "https://slack.com/api/auth.test",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                )
+                scopes = resp2.headers.get("x-oauth-scopes", "")
+                required = {"chat:write", "commands", "users:read", "channels:read"}
+                have = {s.strip() for s in scopes.split(",")} if scopes else set()
+                missing = required - have
+                scope_warning = ""
+                if missing:
+                    scope_warning = f" (missing scopes: {', '.join(missing)})"
+
+                # 3. Verify app token (try Socket Mode connection info)
+                resp3 = await client.post(
+                    "https://slack.com/api/apps.connections.open",
+                    headers={"Authorization": f"Bearer {app_token}"},
+                )
+                app_data = resp3.json()
+                if not app_data.get("ok"):
+                    return TestResult(
+                        status="error",
+                        message=f"App Token invalid: {app_data.get('error', 'unknown')}. Enable Socket Mode in your Slack app settings.",
+                    )
+
+                # 4. Send a test message if test_channel is specified
+                test_channel = config.get("test_channel", "")
+                if test_channel:
+                    try:
+                        msg_resp = await client.post(
+                            "https://slack.com/api/chat.postMessage",
+                            headers={"Authorization": f"Bearer {bot_token}"},
+                            json={
+                                "channel": test_channel,
+                                "text": "OpenClow test message — if you see this, the bot is connected! This message will be deleted shortly.",
+                            },
+                        )
+                        msg_data = msg_resp.json()
+                        if msg_data.get("ok"):
+                            # Delete the test message after a short delay
+                            ts = msg_data.get("ts", "")
+                            if ts:
+                                import asyncio
+                                await asyncio.sleep(3)
+                                await client.post(
+                                    "https://slack.com/api/chat.delete",
+                                    headers={"Authorization": f"Bearer {bot_token}"},
+                                    json={"channel": test_channel, "ts": ts},
+                                )
+                            return TestResult(
+                                status="ok",
+                                message=f"Connected to {team} — test message sent to channel{scope_warning}",
+                                details={"bot_id": bot_id, "team": team},
+                            )
+                        else:
+                            ch_error = msg_data.get("error", "unknown")
+                            return TestResult(
+                                status="error",
+                                message=f"Connected to {team} but failed to send test message: {ch_error}. Invite the bot to the channel first.",
+                            )
+                    except Exception as msg_err:
+                        return TestResult(
+                            status="error",
+                            message=f"Connected to {team} but test message failed: {str(msg_err)[:100]}",
+                        )
+
+                return TestResult(
+                    status="ok",
+                    message=f"Connected to {team}{scope_warning}",
+                    details={"bot_id": bot_id, "team": team, "scopes": scopes},
+                )
+        except Exception as e:
+            return TestResult(status="error", message=str(e))
 
     return TestResult(status="error", message=f"Unknown chat provider: {provider_type}")
 
@@ -187,8 +423,8 @@ async def _test_git(config: dict) -> TestResult:
 
     if provider_type == "github":
         token = config.get("token", "")
-        if not token:
-            saved = await config_service.get_config("git", "provider")
+        if not token or "****" in token:
+            saved = await config_service.get_provider_config_by_type("git", "github")
             if saved:
                 token = saved.get("token", "")
         if not token:
@@ -331,8 +567,16 @@ async def list_users():
 
 @router.post("/users", response_model=UserResponse)
 async def create_user(body: UserCreate):
+    # Default provider type to the currently active chat provider
+    data = body.model_dump()
+    if not data.get("chat_provider_type") or data["chat_provider_type"] == "telegram":
+        try:
+            ptype, _ = await config_service.get_provider_config("chat")
+            data["chat_provider_type"] = ptype
+        except Exception:
+            pass  # Keep default
     async with async_session() as session:
-        user = User(**body.model_dump())
+        user = User(**data)
         session.add(user)
         await session.commit()
         await session.refresh(user)
@@ -348,6 +592,159 @@ async def delete_user(user_id: int):
         await session.delete(user)
         await session.commit()
     return {"status": "ok", "message": "User deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Slack workspace discovery (members + channels)
+# ---------------------------------------------------------------------------
+
+@router.get("/slack/members")
+async def list_slack_members():
+    """Fetch workspace members from Slack API. Requires users:read scope."""
+    config = await config_service.get_provider_config_by_type("chat", "slack") or {}
+
+    bot_token = config.get("bot_token", "")
+    if not bot_token:
+        return {"ok": False, "error": "No Slack bot token configured"}
+
+    # Get already-added user IDs so we can mark them
+    existing_uids: set[str] = set()
+    async with async_session() as session:
+        result = await session.execute(
+            select(User.chat_provider_uid).where(User.chat_provider_type == "slack")
+        )
+        existing_uids = {r[0] for r in result.all()}
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                "https://slack.com/api/users.list",
+                headers={"Authorization": f"Bearer {bot_token}"},
+            )
+            data = resp.json()
+            if not data.get("ok"):
+                error = data.get("error", "unknown")
+                if error == "missing_scope":
+                    return {
+                        "ok": False,
+                        "error": "Bot needs users:read scope. Add it in your Slack app's OAuth & Permissions.",
+                    }
+                return {"ok": False, "error": error}
+
+            members = []
+            for m in data.get("members", []):
+                if m.get("deleted") or m.get("is_bot") or m.get("id") == "USLACKBOT":
+                    continue
+                members.append({
+                    "id": m["id"],
+                    "name": m.get("name", ""),
+                    "real_name": m.get("real_name", ""),
+                    "avatar": m.get("profile", {}).get("image_48", ""),
+                    "already_added": m["id"] in existing_uids,
+                })
+            return {"ok": True, "members": members}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
+@router.get("/slack/channels")
+async def list_slack_channels():
+    """Fetch channels the bot is in. Requires channels:read + groups:read scopes."""
+    config = await config_service.get_provider_config_by_type("chat", "slack") or {}
+
+    bot_token = config.get("bot_token", "")
+    if not bot_token:
+        return {"ok": False, "error": "No Slack bot token configured"}
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                "https://slack.com/api/conversations.list",
+                headers={"Authorization": f"Bearer {bot_token}"},
+                params={"types": "public_channel,private_channel", "limit": 200},
+            )
+            data = resp.json()
+            if not data.get("ok"):
+                error = data.get("error", "unknown")
+                if error == "missing_scope":
+                    return {
+                        "ok": False,
+                        "error": "Bot needs channels:read scope. Add it in your Slack app's OAuth & Permissions.",
+                    }
+                return {"ok": False, "error": error}
+
+            channels = []
+            for ch in data.get("channels", []):
+                channels.append({
+                    "id": ch["id"],
+                    "name": ch.get("name", ""),
+                    "is_member": ch.get("is_member", False),
+                    "num_members": ch.get("num_members", 0),
+                })
+            return {"ok": True, "channels": channels}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
+@router.get("/slack/channels-select")
+async def slack_channels_select():
+    """Return an HTML <select> partial with Slack channels for HTMX swap."""
+    # Load Slack config specifically (works even when Slack isn't the active provider)
+    config = await config_service.get_provider_config_by_type("chat", "slack") or {}
+    saved_channel = config.get("default_channel", "")
+
+    bot_token = config.get("bot_token", "")
+    if not bot_token:
+        return HTMLResponse('<p class="text-xs text-gray-400">Save Slack tokens first, then reload channels.</p>')
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                "https://slack.com/api/conversations.list",
+                headers={"Authorization": f"Bearer {bot_token}"},
+                params={"types": "public_channel,private_channel", "limit": 200},
+            )
+            data = resp.json()
+            if not data.get("ok"):
+                error = data.get("error", "unknown")
+                return HTMLResponse(f'<p class="text-xs text-red-500">Failed to load channels: {error}</p>')
+
+            options = ['<option value="">Select a channel...</option>']
+            for ch in sorted(data.get("channels", []), key=lambda c: c.get("name", "")):
+                ch_id = ch["id"]
+                ch_name = ch.get("name", ch_id)
+                is_member = ch.get("is_member", False)
+                is_private = ch.get("is_private", False)
+                prefix = "🔒 " if is_private else "#"
+                badge = " (bot joined)" if is_member else ""
+                selected = " selected" if ch_id == saved_channel else ""
+                options.append(f'<option value="{ch_id}"{selected}>{prefix}{ch_name}{badge}</option>')
+
+            html = (
+                f'<select id="default_channel" name="default_channel" class="form-input">{"".join(options)}</select>'
+                f'<p class="text-xs text-gray-400 mt-1">Channel for system notifications and status updates</p>'
+                f'<button type="button" class="mt-2 text-xs text-brand-600 hover:text-brand-700 font-medium" '
+                f'hx-get="/api/settings/slack/channels-select" hx-target="#channel-select-wrapper" hx-swap="innerHTML">'
+                f'Reload channels</button>'
+            )
+            return HTMLResponse(html)
+    except Exception as e:
+        return HTMLResponse(f'<p class="text-xs text-red-500">Error: {str(e)[:100]}</p>')
+
+
+@router.get("/chat/active-task-count")
+async def active_task_count():
+    """Return count of active (non-terminal) tasks per chat provider type."""
+    from openclow.models.task import Task
+    terminal_statuses = {"merged", "rejected", "discarded", "failed", "orphaned"}
+    async with async_session() as session:
+        result = await session.execute(
+            select(Task.chat_provider_type, sa_func.count(Task.id))
+            .where(~Task.status.in_(terminal_statuses))
+            .group_by(Task.chat_provider_type)
+        )
+        counts = {row[0]: row[1] for row in result.all()}
+    return counts
 
 
 # ---------------------------------------------------------------------------

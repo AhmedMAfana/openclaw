@@ -7,11 +7,28 @@
     <p class="text-gray-500 mt-1">Configure how users interact with OpenClow — Telegram, Slack, or other platforms</p>
 </div>
 
-<!-- Warning banner for provider switching -->
-<div id="switch-warning" class="hidden mb-4 bg-amber-50 border border-amber-200 rounded-lg p-4">
-    <div class="flex items-center gap-2">
-        <svg class="w-5 h-5 text-amber-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
-        <p class="text-sm text-amber-800">Switching chat providers requires restarting the bot service: <code class="bg-amber-100 px-1 rounded">docker compose restart bot</code></p>
+<!-- Live bot status banner -->
+<div id="bot-status-banner" class="mb-4 rounded-lg p-4 border hidden">
+    <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+            <span id="bot-status-dot" class="status-dot"></span>
+            <span id="bot-status-text" class="text-sm font-medium"></span>
+            <span id="bot-status-spinner" class="hidden">
+                <svg class="w-4 h-4 spinner inline" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" opacity="0.25"/><path d="M4 12a8 8 0 018-8" stroke-width="4"/></svg>
+            </span>
+        </div>
+        <span id="bot-status-provider-badge" class="hidden text-xs font-semibold px-2.5 py-0.5 rounded-full bg-green-100 text-green-800 uppercase tracking-wide"></span>
+    </div>
+</div>
+
+<!-- Provider switch warning (hidden by default, shown via JS) -->
+<div id="switch-warning" class="mb-4 rounded-lg p-4 border border-yellow-300 bg-yellow-50 hidden">
+    <div class="flex items-start gap-2">
+        <svg class="w-5 h-5 text-yellow-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.924-.833-2.694 0L4.072 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
+        <div>
+            <p class="text-sm font-medium text-yellow-800">Provider Switch Warning</p>
+            <p id="switch-warning-text" class="text-sm text-yellow-700 mt-1"></p>
+        </div>
     </div>
 </div>
 
@@ -22,26 +39,21 @@
             <label class="block text-sm font-medium text-gray-700 mb-2">Provider</label>
             <div class="flex gap-3">
                 {% for p in providers %}
-                <label class="flex items-center gap-2 px-4 py-3 border rounded-lg cursor-pointer transition-colors
+                <label class="provider-option flex items-center gap-2 px-4 py-3 border rounded-lg cursor-pointer transition-colors
                     {% if config.get('type', 'telegram') == p %}border-brand-500 bg-brand-50{% else %}border-gray-200 hover:border-gray-300{% endif %}">
                     <input type="radio" name="type" value="{{ p }}" class="text-brand-600"
                         {% if config.get('type', 'telegram') == p %}checked{% endif %}
                         hx-get="/settings/partials/provider-fields/chat/{{ p }}"
                         hx-target="#provider-fields"
                         hx-swap="innerHTML"
-                        onchange="document.getElementById('switch-warning').classList.remove('hidden')"
+                        onchange="checkProviderSwitch(this.value)"
                     >
                     <span class="font-medium capitalize">{{ p }}</span>
+                    {% if config.get('type') == p %}
+                    <span class="text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded font-medium">Active</span>
+                    {% endif %}
                 </label>
                 {% endfor %}
-                <!-- Coming soon -->
-                {% if "slack" not in providers %}
-                <label class="flex items-center gap-2 px-4 py-3 border border-gray-200 rounded-lg opacity-50 cursor-not-allowed">
-                    <input type="radio" disabled>
-                    <span class="font-medium">Slack</span>
-                    <span class="provider-badge coming-soon ml-1">Soon</span>
-                </label>
-                {% endif %}
             </div>
         </div>
 
@@ -55,12 +67,32 @@
                     {{ field.label }}
                     {% if field.get('required') %}<span class="text-red-400">*</span>{% endif %}
                 </label>
+                {% set current_val = config.get(field.name, '') %}
+                {% if field.type == 'password' and current_val %}
+                <div class="relative">
+                    <input type="password" id="{{ field.name }}" name="{{ field.name }}"
+                        value="{{ current_val }}"
+                        placeholder="{{ field.get('help', '') }}"
+                        class="form-input pr-20"
+                        {% if field.get('required') %}required{% endif %}>
+                    <span class="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-green-600 font-medium">Configured</span>
+                </div>
+                <p class="text-xs text-gray-400 mt-1">{{ field.get('help', '') }}. Leave unchanged to keep current value.</p>
+                {% elif field.type == 'channel_select' %}
+                <div id="channel-select-wrapper"
+                    hx-get="/api/settings/slack/channels-select"
+                    hx-trigger="load"
+                    hx-swap="innerHTML">
+                    <p class="text-xs text-gray-400">Loading channels...</p>
+                </div>
+                {% else %}
                 <input type="{{ field.type }}" id="{{ field.name }}" name="{{ field.name }}"
-                    value="{{ config.get(field.name, field.get('default', '')) }}"
+                    value="{{ current_val }}"
                     placeholder="{{ field.get('help', '') }}"
                     class="form-input"
                     {% if field.get('required') %}required{% endif %}>
                 {% if field.get('help') %}<p class="text-xs text-gray-400 mt-1">{{ field.help }}</p>{% endif %}
+                {% endif %}
             </div>
             {% endfor %}
         </div>
@@ -68,7 +100,7 @@
         <!-- Test & Save -->
         <div class="flex items-center gap-3 mt-6 pt-6 border-t border-gray-100">
             <button type="submit" class="px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors text-sm font-medium">
-                Save Configuration
+                Save & Restart Bot
             </button>
             <button type="button" id="test-chat-btn"
                 hx-post="/api/settings/test/chat"
@@ -83,6 +115,12 @@
                     Testing...
                 </span>
             </button>
+            <button type="button" id="test-msg-btn"
+                class="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm hidden"
+                onclick="sendTestMessage()"
+            >
+                Send Test Message
+            </button>
         </div>
         <div id="test-result" class="mt-3"></div>
     </form>
@@ -90,15 +128,214 @@
 
 <!-- Info box -->
 <div class="mt-6 bg-blue-50 rounded-xl border border-blue-200 p-5">
-    <h4 class="text-sm font-semibold text-blue-800 mb-1">Switching Chat Platforms</h4>
+    <h4 class="text-sm font-semibold text-blue-800 mb-1">How Provider Switching Works</h4>
     <p class="text-sm text-blue-700">
-        OpenClow supports multiple chat platforms. When you switch from one to another:
+        OpenClow runs <strong>one chat provider at a time</strong>. When you switch providers,
+        the bot restarts on the new platform. Active tasks on the old platform will be marked as orphaned.
+        To use both Telegram and Slack, switch between them as needed — your configuration for each is saved.
     </p>
-    <ul class="text-sm text-blue-700 list-disc ml-5 mt-2 space-y-1">
-        <li>Save the new provider configuration</li>
-        <li>User IDs will need to be updated to match the new platform</li>
-        <li>Restart the bot service: <code class="bg-blue-100 px-1 rounded">docker compose restart bot</code></li>
-        <li>Your projects and tasks are preserved — only the communication channel changes</li>
-    </ul>
 </div>
+
+<script>
+// ── Current active provider (from server) ──
+const activeProvider = '{{ config.get("type", "telegram") }}';
+
+// ── Live bot status ──────────────────────────────────
+const banner = document.getElementById('bot-status-banner');
+const dot = document.getElementById('bot-status-dot');
+const text = document.getElementById('bot-status-text');
+const spinner = document.getElementById('bot-status-spinner');
+const providerBadge = document.getElementById('bot-status-provider-badge');
+
+function setBotStatus(status, message, color, provider) {
+    banner.classList.remove('hidden', 'bg-green-50', 'border-green-200', 'bg-yellow-50', 'border-yellow-200', 'bg-red-50', 'border-red-200');
+    dot.classList.remove('status-ok', 'status-error', 'status-warn');
+    text.classList.remove('text-green-700', 'text-yellow-700', 'text-red-700');
+
+    if (color === 'green') {
+        banner.classList.add('bg-green-50', 'border-green-200');
+        dot.classList.add('status-ok');
+        text.classList.add('text-green-700');
+    } else if (color === 'yellow') {
+        banner.classList.add('bg-yellow-50', 'border-yellow-200');
+        dot.classList.add('status-warn');
+        text.classList.add('text-yellow-700');
+    } else {
+        banner.classList.add('bg-red-50', 'border-red-200');
+        dot.classList.add('status-error');
+        text.classList.add('text-red-700');
+    }
+
+    text.textContent = message;
+    spinner.classList.toggle('hidden', status !== 'restarting');
+
+    if (provider) {
+        providerBadge.textContent = provider;
+        providerBadge.classList.remove('hidden');
+    } else {
+        providerBadge.classList.add('hidden');
+    }
+
+    banner.classList.remove('hidden');
+}
+
+async function checkBotStatus() {
+    try {
+        const resp = await fetch('/api/settings/bot-status');
+        const data = await resp.json();
+        const prov = data.provider || 'unknown';
+        const provLabel = prov.charAt(0).toUpperCase() + prov.slice(1);
+        if (data.health === 'healthy') {
+            setBotStatus('ok', `Bot running on ${provLabel}`, 'green', provLabel);
+        } else if (data.running) {
+            setBotStatus('restarting', 'Bot starting up...', 'yellow', provLabel);
+        } else if (data.health === 'not_found') {
+            setBotStatus('error', 'Bot container not found — click Save & Restart Bot to start it', 'red');
+        } else {
+            setBotStatus('error', `Bot unhealthy (${data.health})`, 'red');
+        }
+    } catch (e) {
+        setBotStatus('error', 'Cannot reach API', 'red');
+    }
+}
+
+// SSE
+let eventSource;
+function connectSSE() {
+    eventSource = new EventSource('/api/activity/stream?type=bot_restart');
+    eventSource.onmessage = (e) => {
+        try {
+            const data = JSON.parse(e.data);
+            if (data.type !== 'bot_restart') return;
+            switch (data.status) {
+                case 'starting':
+                case 'restarting':
+                case 'waiting_healthy':
+                    setBotStatus('restarting', 'Bot restarting...', 'yellow');
+                    break;
+                case 'completed':
+                    const prov = (data.provider || 'unknown');
+                    setBotStatus('ok', `Bot restarted on ${prov.charAt(0).toUpperCase() + prov.slice(1)}`, 'green', prov.charAt(0).toUpperCase() + prov.slice(1));
+                    break;
+                case 'failed':
+                    setBotStatus('error', `Restart failed: ${data.error || 'unknown'}`, 'red');
+                    break;
+            }
+        } catch (err) {}
+    };
+    eventSource.onerror = () => {
+        eventSource.close();
+        setTimeout(connectSSE, 5000);
+    };
+}
+
+// ── Provider switch warning ──────────────────────────
+async function checkProviderSwitch(selectedProvider) {
+    const warningEl = document.getElementById('switch-warning');
+    const warningText = document.getElementById('switch-warning-text');
+    const testMsgBtn = document.getElementById('test-msg-btn');
+
+    // Show/hide test message button for Slack
+    testMsgBtn.classList.toggle('hidden', selectedProvider !== 'slack');
+
+    if (selectedProvider === activeProvider) {
+        warningEl.classList.add('hidden');
+        return;
+    }
+
+    try {
+        const resp = await fetch('/api/settings/chat/active-task-count');
+        const counts = await resp.json();
+        const oldCount = counts[activeProvider] || 0;
+
+        if (oldCount > 0) {
+            warningText.textContent = `Switching from ${activeProvider} to ${selectedProvider} will orphan ${oldCount} active task(s) on ${activeProvider}. Those tasks won't receive further updates until you switch back.`;
+        } else {
+            warningText.textContent = `You are switching from ${activeProvider} to ${selectedProvider}. The bot will restart on the new platform.`;
+        }
+        warningEl.classList.remove('hidden');
+    } catch (e) {
+        warningText.textContent = `Switching to ${selectedProvider}. The bot will restart on the new platform.`;
+        warningEl.classList.remove('hidden');
+    }
+}
+
+// ── Send Test Message (Slack) ──────────────────────────
+async function sendTestMessage() {
+    const channelSelect = document.getElementById('default_channel');
+    const testResult = document.getElementById('test-result');
+
+    if (!channelSelect || !channelSelect.value) {
+        testResult.innerHTML = '<div class="test-result flex items-center gap-2 text-sm mt-1"><span class="status-dot status-error"></span><span class="text-red-700">Select a channel first</span></div>';
+        return;
+    }
+
+    testResult.innerHTML = '<div class="text-sm text-gray-500 mt-1">Sending test message...</div>';
+
+    try {
+        const formData = new FormData(document.getElementById('chat-form'));
+        const data = {};
+        formData.forEach((v, k) => data[k] = v);
+        data.test_channel = channelSelect.value;
+
+        const resp = await fetch('/api/settings/test/chat', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'HX-Request': 'true'},
+            body: JSON.stringify(data),
+        });
+        testResult.innerHTML = await resp.text();
+    } catch (e) {
+        testResult.innerHTML = '<div class="test-result flex items-center gap-2 text-sm mt-1"><span class="status-dot status-error"></span><span class="text-red-700">Request failed</span></div>';
+    }
+}
+
+// ── Init ──
+checkBotStatus();
+connectSSE();
+
+// Show test msg button if Slack is already selected
+const currentType = document.querySelector('input[name="type"]:checked');
+if (currentType && currentType.value === 'slack') {
+    document.getElementById('test-msg-btn').classList.remove('hidden');
+}
+
+// Handle form submit (only PUT requests, not HTMX partial loads)
+document.getElementById('chat-form').addEventListener('htmx:afterRequest', (event) => {
+    const xhr = event.detail.xhr;
+    if (!xhr) return;
+    // Only handle the form PUT, not HTMX GET partial loads
+    const method = (event.detail.requestConfig && event.detail.requestConfig.verb) || '';
+    if (method.toUpperCase() !== 'PUT') return;
+
+    try {
+        const resp = JSON.parse(xhr.responseText);
+        if (xhr.status >= 200 && xhr.status < 300) {
+            if (typeof showToast === 'function') {
+                showToast(resp.message || 'Configuration saved', 'success');
+            }
+            setBotStatus('restarting', 'Saving config and restarting bot...', 'yellow');
+
+            const poll = setInterval(async () => {
+                try {
+                    const r = await fetch('/api/settings/bot-status');
+                    const d = await r.json();
+                    if (d.health === 'healthy') {
+                        clearInterval(poll);
+                        checkBotStatus();
+                    }
+                } catch (e) {}
+            }, 3000);
+            setTimeout(() => clearInterval(poll), 90000);
+        } else {
+            if (typeof showToast === 'function') {
+                showToast(resp.detail || resp.message || 'Save failed', 'error');
+            }
+        }
+    } catch (e) {
+        if (typeof showToast === 'function') {
+            showToast('Save failed — check your configuration', 'error');
+        }
+    }
+});
+</script>
 {% endblock %}
