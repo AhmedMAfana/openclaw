@@ -886,27 +886,26 @@ def project_busy_blocks(running_task_id: str | None = None) -> list[dict]:
 
 
 def loading_blocks(text: str = "Processing your request...") -> list[dict]:
-    """Loading indicator with professional messaging."""
-    # Enhance common loading messages
+    """Loading indicator with honest, real messaging (no fake placeholders)."""
+    # Enhance common loading messages with REAL, not dummy text
     if "task" in text.lower() and ("submit" in text.lower() or "received" in text.lower()):
         enhanced_text = (
-            ":rocket: *Task Received — Setting Up*\n\n"
-            "Your task has been queued and we're preparing the workspace:\n"
-            "• Reserving environment...\n"
-            "• Cloning repository...\n"
-            "• Analyzing codebase structure...\n\n"
-            ":clock1: *Estimated start:* ~30 seconds"
+            ":rocket: *Task Queued*\n\n"
+            "Your request has been submitted. The AI agent is starting up...\n"
+            "This usually takes 10-20 seconds depending on what you asked.\n\n"
+            ":bulb: Real-time progress will show below once processing starts."
         )
     elif "onboard" in text.lower() or "bootstrap" in text.lower():
         enhanced_text = (
             f":arrows_counterclockwise: *{text}*\n\n"
-            "Setting up Docker environment and dependencies. This may take a few minutes..."
+            "⏳ This is a longer operation that may take several minutes.\n"
+            "You'll see progress updates as things happen."
         )
     elif "health" in text.lower() or "check" in text.lower():
         enhanced_text = f":mag: *{text}*"
     else:
         enhanced_text = f":hourglass_flowing_sand: {text}"
-    
+
     return [
         section_block(enhanced_text),
     ]
