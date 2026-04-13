@@ -781,9 +781,10 @@ def agent_thinking_blocks(user_text: str | None = None) -> list[dict]:
 def agent_working_blocks(tool_lines: list[str], elapsed: int = 0) -> list[dict]:
     """Live agent activity — shows what tools are being used in real time."""
     activity = "\n".join(f"• {line}" for line in tool_lines[-4:]) or "_Starting..._"
+    elapsed_msg = f"{elapsed}s" if elapsed else "just started"
     return [
-        section_block(f"🔄 *Working...* `{elapsed}s`\n\n{activity}"),
-        context_block([":zap: _AI agent is actively working — this updates live_"]),
+        section_block(f"🔄 *Processing...* _{elapsed_msg}_\n\n{activity}"),
+        context_block([":hourglass_flowing_sand: _AI is working on your request..._ | If this takes too long, send another message"]),
     ]
 
 
