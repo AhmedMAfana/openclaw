@@ -115,6 +115,30 @@ async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message
     except Exception:
         chat = await factory.get_chat()
 
+    # Auto-cleanup: Cancel old stuck diff_preview tasks when user sends a new message
+    # This prevents the UI from showing multiple unapproved tasks
+    try:
+        from openclow.models import Task, async_session
+        from sqlalchemy import select, update
+        async with async_session() as session:
+            # Find old diff_preview tasks in the same channel
+            old_stuck = await session.execute(
+                select(Task).where(
+                    Task.chat_id == chat_id,
+                    Task.status == "diff_preview"
+                ).order_by(Task.created_at.desc()).offset(0).limit(10)
+            )
+            old_tasks = old_stuck.scalars().all()
+            # Cancel all but the most recent one (which might still be reviewing)
+            if len(old_tasks) > 1:
+                for old_task in old_tasks[1:]:
+                    old_task.status = "cancelled"
+                    await session.flush()
+                await session.commit()
+                log.info("agent_session.cancelled_old_tasks", chat_id=chat_id, count=len(old_tasks)-1)
+    except Exception as e:
+        log.warning("agent_session.cleanup_failed", error=str(e))
+
     try:
         from claude_agent_sdk import query, ClaudeAgentOptions
         from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
