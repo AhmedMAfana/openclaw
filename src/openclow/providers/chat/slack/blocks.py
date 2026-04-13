@@ -863,6 +863,28 @@ def agent_response_blocks(
     return blks
 
 
+def project_busy_blocks(running_task_id: str | None = None) -> list[dict]:
+    """Interactive message when project is busy with another task."""
+    task_ref = f"`{running_task_id[:8]}...`" if running_task_id else "another task"
+
+    return [
+        section_block(
+            f":hourglass_flowing_sand: *Project is Busy*\n\n"
+            f"Task {task_ref} is currently running on this project.\n\n"
+            f"*Options:*\n"
+            f"• Wait for it to finish (usually 5-15 minutes)\n"
+            f"• Retry your request in a moment\n"
+            f"• Cancel the running task (if needed)"
+        ),
+        actions_block([
+            button_element("⏸️ View Task", f"view_task:{running_task_id}", style="primary"),
+            button_element("🔄 Retry", "retry_task"),
+            button_element("❌ Cancel", f"cancel_task:{running_task_id}", style="danger"),
+            button_element("◀️ Menu", "menu:main"),
+        ]),
+    ]
+
+
 def loading_blocks(text: str = "Processing your request...") -> list[dict]:
     """Loading indicator with professional messaging."""
     # Enhance common loading messages
