@@ -138,11 +138,11 @@ def _basic_summary(raw_logs: str) -> str:
     return "\n".join(parts)
 
 
-async def smart_logs(ctx: dict, chat_id: str, message_id: str):
+async def smart_logs(ctx: dict, chat_id: str, message_id: str, chat_provider_type: str = "telegram"):
     """Worker task: fetch Docker logs, AI-summarize, send to Telegram."""
     from openclow.providers import factory
 
-    chat = await factory.get_chat()
+    chat = await factory.get_chat_by_type(chat_provider_type)
     try:
         await chat.edit_message(chat_id, message_id, "📋 Fetching logs from all containers...")
 
@@ -156,21 +156,30 @@ async def smart_logs(ctx: dict, chat_id: str, message_id: str):
             summary = _basic_summary(raw_logs)
 
         # Send result with buttons
-        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-        bot = chat._get_bot()
-        await bot.edit_message_text(
-            text=summary,
-            chat_id=int(chat_id),
-            message_id=int(message_id),
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Refresh", callback_data="menu:logs")],
-                [InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
-            ]),
-        )
+        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+        kb = ActionKeyboard(rows=[
+            ActionRow([ActionButton("🔄 Refresh", "menu:logs")]),
+            ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+        ])
+        await chat.edit_message_with_actions(chat_id, message_id, summary, kb)
         log.info("logs_task.done", summary_length=len(summary))
 
+    except asyncio.CancelledError:
+        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+        cancel_kb = ActionKeyboard(rows=[
+            ActionRow([ActionButton("🔄 Retry", "menu:logs")]),
+            ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+        ])
+        await chat.edit_message_with_actions(chat_id, message_id, "⏹ Log analysis cancelled.", cancel_kb)
+        raise
     except Exception as e:
         log.error("logs_task.failed", error=str(e))
-        await chat.edit_message(chat_id, message_id, f"Failed to fetch logs: {str(e)[:200]}")
-    finally:
-        await chat.close()
+        error_kb = ActionKeyboard(rows=[
+            ActionRow([ActionButton("🔄 Retry", "menu:logs")]),
+            ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+        ])
+        await chat.edit_message_with_actions(
+            chat_id, message_id,
+            f"Failed to fetch logs: {str(e)[:200]}",
+            error_kb,
+        )

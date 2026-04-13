@@ -42,23 +42,34 @@ async def run(workspace_path: str, task: Task) -> AsyncIterator:
         agent_system_prompt=project.agent_system_prompt or "",
     )
 
+    from openclow.providers.llm.claude import _mcp_docker
+
     options = ClaudeAgentOptions(
         cwd=workspace_path,
         system_prompt=system_prompt,
         model="claude-opus-4-6",
         allowed_tools=[
-            "Read", "Write", "Edit", "Bash", "Glob", "Grep",
+            "Read", "Write", "Edit", "Glob", "Grep",
             "mcp__git__git_status",
             "mcp__git__git_diff_staged",
             "mcp__git__git_diff_unstaged",
             "mcp__git__git_add",
             "mcp__git__git_log",
+            # Docker MCP tools — use instead of Bash
+            "mcp__docker__list_containers",
+            "mcp__docker__container_logs",
+            "mcp__docker__docker_exec",
+            "mcp__docker__container_health",
+            "mcp__docker__restart_container",
+            "mcp__docker__compose_up",
+            "mcp__docker__compose_ps",
         ],
         mcp_servers={
             "git": {
                 "command": "uvx",
                 "args": [MCP_GIT_VERSION, "--repository", workspace_path],
             },
+            "docker": _mcp_docker(),
         },
         permission_mode="bypassPermissions",
         max_turns=settings.claude_coder_max_turns,
@@ -77,24 +88,33 @@ async def run_fix(workspace_path: str, task: Task, issues: str) -> AsyncIterator
 
     project = task.project
 
+    from openclow.providers.llm.claude import _mcp_docker
+
     options = ClaudeAgentOptions(
         cwd=workspace_path,
         system_prompt=(
             f'You are fixing code review issues in "{project.name}" ({project.tech_stack}).\n'
-            f"Fix each issue, run tests, stage changes with git add. Do NOT commit."
+            f"Fix each issue, run tests via docker_exec MCP tool, stage changes with git add. Do NOT commit."
         ),
         model="claude-sonnet-4-6",  # Fixes are straightforward
         allowed_tools=[
-            "Read", "Write", "Edit", "Bash", "Glob", "Grep",
+            "Read", "Write", "Edit", "Glob", "Grep",
             "mcp__git__git_status",
             "mcp__git__git_diff_staged",
             "mcp__git__git_add",
+            # Docker MCP tools — use instead of Bash
+            "mcp__docker__list_containers",
+            "mcp__docker__container_logs",
+            "mcp__docker__docker_exec",
+            "mcp__docker__container_health",
+            "mcp__docker__restart_container",
         ],
         mcp_servers={
             "git": {
                 "command": "uvx",
                 "args": [MCP_GIT_VERSION, "--repository", workspace_path],
             },
+            "docker": _mcp_docker(),
         },
         permission_mode="bypassPermissions",
         max_turns=10,

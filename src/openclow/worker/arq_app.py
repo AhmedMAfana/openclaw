@@ -33,6 +33,9 @@ def _load_functions():
     from openclow.worker.tasks.logs_task import smart_logs
     from openclow.worker.tasks.project_lifecycle import docker_up_task, docker_down_task, unlink_project_task, remove_project_task
     from openclow.worker.tasks.qa_task import run_qa_tests
+    from openclow.worker.tasks.bot_lifecycle import restart_bot_task, get_bot_status_task
+    from openclow.worker.tasks.agent_session import agent_session
+    from openclow.worker.tasks.auth_task import claude_auth_task, claude_auth_check, claude_auth_get_url
     return [
         execute_task, execute_plan, approve_task, merge_task, reject_task, discard_task,
         onboard_project, confirm_project,
@@ -45,6 +48,12 @@ def _load_functions():
         smart_logs,
         docker_up_task, docker_down_task, unlink_project_task, remove_project_task,
         run_qa_tests,
+        restart_bot_task,
+        get_bot_status_task,
+        agent_session,
+        claude_auth_task,
+        claude_auth_check,
+        claude_auth_get_url,
     ]
 
 
@@ -90,17 +99,171 @@ async def on_startup(ctx: dict):
             if not tunnel_target:
                 from openclow.services.port_allocator import get_app_port
                 tunnel_target = f"http://localhost:{get_app_port(p.id)}"
+            # Get old URL before starting new tunnel
+            from openclow.services.tunnel_service import get_tunnel_url
+            old_url = await get_tunnel_url(p.name)
+
             proj_url = await start_tunnel(p.name, tunnel_target)
             if proj_url:
                 log.info("worker.project_tunnel_restored", project=p.name, url=proj_url)
+
+                # If URL changed, update .env and rebuild frontend
+                if old_url and old_url != proj_url:
+                    log.info("worker.tunnel_url_changed", project=p.name,
+                             old=old_url, new=proj_url)
+                    asyncio.create_task(
+                        _sync_tunnel_url(p.name, old_url, proj_url, p.app_container_name)
+                    )
     except Exception as e:
         log.warning("worker.project_tunnel_restore_failed", error=str(e))
+
+    # Recover orphaned "bootstrapping" projects — worker died mid-bootstrap
+    try:
+        from sqlalchemy import select as sa_select2, update as sa_update
+        from openclow.models import Project, async_session
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select2(Project).where(Project.status == "bootstrapping")
+            )
+            orphaned = result.scalars().all()
+        if orphaned:
+            for p in orphaned:
+                log.warning("worker.orphaned_bootstrap", project=p.name, project_id=p.id)
+                async with async_session() as session:
+                    await session.execute(
+                        sa_update(Project)
+                        .where(Project.id == p.id)
+                        .values(status="failed")
+                    )
+                    await session.commit()
+                # Release stale project lock
+                try:
+                    from openclow.services.project_lock import force_release
+                    await force_release(p.id)
+                except Exception:
+                    pass
+                # Notify user via chat that bootstrap was interrupted
+                try:
+                    from openclow.providers import factory
+                    chat = await factory.get_chat()
+                    # Find most recent chat_id for this project from tasks or use admin
+                    from openclow.models import Task
+                    async with async_session() as session:
+                        task_result = await session.execute(
+                            sa_select2(Task.chat_id)
+                            .where(Task.project_id == p.id)
+                            .where(Task.chat_id.isnot(None))
+                            .order_by(Task.created_at.desc())
+                            .limit(1)
+                        )
+                        row = task_result.first()
+                    if row and row[0]:
+                        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+                        kb = ActionKeyboard(rows=[
+                            ActionRow([ActionButton("🔄 Retry Bootstrap", f"project_bootstrap:{p.id}")]),
+                            ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+                        ])
+                        await chat.send_message_with_actions(
+                            row[0],
+                            f"⚠️ Bootstrap for **{p.name}** was interrupted (worker restarted).\n"
+                            f"The project is marked as failed. Tap Retry to try again.",
+                            kb,
+                        )
+                except Exception as e:
+                    log.warning("worker.orphan_notify_failed", error=str(e))
+    except Exception as e:
+        log.warning("worker.orphan_recovery_failed", error=str(e))
+
+    # Recover orphaned tasks — stuck in intermediate states
+    try:
+        from openclow.models import Task
+        from datetime import datetime, timedelta
+        stuck_statuses = ["coding", "reviewing", "preparing", "planning", "pushing"]
+        async with async_session() as session:
+            cutoff = datetime.utcnow() - timedelta(minutes=30)
+            result = await session.execute(
+                sa_select2(Task).where(
+                    Task.status.in_(stuck_statuses),
+                    Task.updated_at < cutoff,
+                )
+            )
+            stuck_tasks = result.scalars().all()
+        for t in stuck_tasks:
+            log.warning("worker.orphaned_task", task_id=str(t.id), status=t.status)
+            async with async_session() as session:
+                await session.execute(
+                    sa_update(Task)
+                    .where(Task.id == t.id)
+                    .values(status="failed", error_message="Task interrupted — worker restarted")
+                )
+                await session.commit()
+    except Exception as e:
+        log.warning("worker.orphan_task_recovery_failed", error=str(e))
 
     # Pre-warm whisper model (downloads ~75MB on first use, then cached)
     asyncio.create_task(_prewarm_whisper())
 
     # Start periodic tunnel health monitor
     asyncio.create_task(_tunnel_health_loop())
+
+
+async def _sync_tunnel_url(project_name: str, old_url: str, new_url: str, app_container_name: str | None = None):
+    """Update .env files and rebuild containers when tunnel URL changes."""
+    import os
+    workspace = f"/workspaces/_cache/{project_name}"
+
+    try:
+        # Update .env on host workspace
+        env_path = os.path.join(workspace, ".env")
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                content = f.read()
+            if old_url in content:
+                content = content.replace(old_url, new_url)
+                with open(env_path, "w") as f:
+                    f.write(content)
+                log.info("worker.env_updated", project=project_name)
+
+        # Update .env inside the app container using the project's known container name
+        compose_project = f"openclow-{project_name}"
+        from openclow.services.docker_guard import run_docker
+
+        if app_container_name:
+            container = f"{compose_project}-{app_container_name}-1"
+
+            # Find all .env files in common locations and update them
+            # Use sed on the container — works regardless of framework
+            for env_location in [".env", "/var/www/html/.env", "/app/.env", "/src/.env"]:
+                await run_docker(
+                    "docker", "exec", container, "sh", "-c",
+                    f"[ -f {env_location} ] && sed -i 's|{old_url}|{new_url}|g' {env_location} || true",
+                    actor="tunnel_sync", timeout=10,
+                )
+
+            log.info("worker.container_env_updated", project=project_name, container=container)
+
+        # Rebuild frontend on the host (containers mount this directory)
+        # Don't run docker compose up — it can create port conflicts and duplicates.
+        # The containers are already running; just rebuild static assets.
+        if os.path.exists(os.path.join(workspace, "package.json")):
+            log.info("worker.frontend_rebuilding", project=project_name)
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "npm", "run", "build",
+                    cwd=workspace,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await asyncio.wait_for(proc.communicate(), timeout=120)
+                if proc.returncode == 0:
+                    log.info("worker.frontend_rebuilt", project=project_name)
+                else:
+                    log.warning("worker.frontend_rebuild_failed", project=project_name)
+            except Exception as e:
+                log.warning("worker.frontend_rebuild_error", error=str(e))
+
+    except Exception as e:
+        log.warning("worker.tunnel_sync_failed", project=project_name, error=str(e))
 
 
 async def _prewarm_whisper():

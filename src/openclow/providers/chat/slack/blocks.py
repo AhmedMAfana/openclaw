@@ -448,7 +448,7 @@ def task_card(task: Any) -> list[dict]:
 
 
 def status_blocks(tasks: list) -> list[dict]:
-    """Active tasks — professional dashboard view."""
+    """Active tasks — interactive dashboard with action buttons for each task."""
     if not tasks:
         return [
             header_block("📊 Task Status"),
@@ -462,24 +462,48 @@ def status_blocks(tasks: list) -> list[dict]:
             ]),
         ]
 
-    task_lines = []
+    blks = [header_block(f"📊 Active Tasks ({len(tasks)})")]
+
+    # Show each task with its own action buttons
     for t in tasks[:5]:
         icon = STATUS_ICONS.get(t.status, ":question:")
         status_label = t.status.replace('_', ' ').title()
         desc = t.description[:60] + "..." if len(t.description) > 60 else t.description
-        line = f"{icon} *{status_label}* — {desc}"
-        if getattr(t, "pr_url", None):
-            line += f"  <{t.pr_url}|View PR>"
-        task_lines.append(line)
 
-    return [
-        header_block(f"📊 Active Tasks ({len(tasks)})"),
-        section_block("\n".join(task_lines)),
-        actions_block([
-            button_element("🚀 New Task", "menu:task", value="menu:task"),
-            button_element("📋 Main Menu", "menu:main", value="menu:main"),
-        ]),
-    ]
+        # Calculate elapsed time if available
+        elapsed = ""
+        if t.duration_seconds:
+            elapsed = f" • `{t.duration_seconds}s`"
+
+        # Status details
+        details = f"*{status_label}*{elapsed}"
+        if t.pr_url:
+            details += f" • <{t.pr_url}|PR>"
+
+        # Task info block
+        blks.append(section_block(f"{icon} {details}\n_{desc}_"))
+
+        # Action buttons for this specific task
+        buttons = [
+            button_element("👁️ View", f"task_view:{str(t.id)}", value=f"task_view:{str(t.id)}"),
+            button_element("⏸️ Pause", f"task_pause:{str(t.id)}", value=f"task_pause:{str(t.id)}"),
+        ]
+
+        # Cancel button (danger color) for active tasks
+        if t.status not in ["completed", "failed", "cancelled"]:
+            buttons.append(button_element("❌ Cancel", f"task_cancel:{str(t.id)}",
+                                        value=f"task_cancel:{str(t.id)}", style="danger"))
+
+        blks.append(actions_block(buttons))
+        blks.append(divider())
+
+    # Navigation buttons at bottom
+    blks.append(actions_block([
+        button_element("🚀 New Task", "menu:task", value="menu:task", style="primary"),
+        button_element("📋 Main Menu", "menu:main", value="menu:main"),
+    ]))
+
+    return blks
 
 
 # ── Task Workflow Views ──────────────────────────────────────────────

@@ -1,4 +1,5 @@
 """Project onboarding task — clones repo, analyzes it, saves config."""
+import asyncio
 import os
 import shutil
 import uuid
@@ -15,13 +16,13 @@ from openclow.worker.tasks import git_ops
 log = get_logger()
 
 
-async def onboard_project(ctx: dict, repo_url: str, chat_id: str, message_id: str):
+async def onboard_project(ctx: dict, repo_url: str, chat_id: str, message_id: str, chat_provider_type: str = "telegram"):
     """Clone a repo, analyze it with Claude, send config to user for approval.
 
     Smart cache: if this repo already exists in DB (even unlinked), skip the
     expensive clone+analyze and reuse the saved config instantly.
     """
-    chat = await factory.get_chat()
+    chat = await factory.get_chat_by_type(chat_provider_type)
     git = await factory.get_git()
 
     # Parse repo from URL
@@ -40,23 +41,18 @@ async def onboard_project(ctx: dict, repo_url: str, chat_id: str, message_id: st
     if cached_project:
         # Project exists — reuse config, skip clone+analyze
         if cached_project.status == "active":
-            # Already active — just tell the user
-            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-            bot = chat._get_bot()
-            await bot.edit_message_text(
-                text=f"Project '{cached_project.name}' is already connected and active!",
-                chat_id=int(chat_id), message_id=int(message_id),
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📦 View Project", callback_data=f"project_detail:{cached_project.id}")],
-                    [InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
-                ]),
+            from openclow.providers.actions import ActionButton, project_nav_keyboard
+            kb = project_nav_keyboard(cached_project.id)
+            await chat.edit_message_with_actions(
+                chat_id, message_id,
+                f"Project '{cached_project.name}' is already connected and active!",
+                kb,
             )
             await chat.close()
             return
 
         # Inactive (unlinked) — offer to re-link with cached config
-        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-        bot = chat._get_bot()
+        from openclow.providers.actions import ActionButton, nav_keyboard
         summary = (
             f"Project found (previously unlinked)!\n\n"
             f"Name: {cached_project.name}\n"
@@ -64,13 +60,8 @@ async def onboard_project(ctx: dict, repo_url: str, chat_id: str, message_id: st
             f"Docker: {'Yes' if cached_project.is_dockerized else 'No'}\n"
             f"Description: {cached_project.description or 'N/A'}\n"
         )
-        await bot.edit_message_text(
-            text=summary, chat_id=int(chat_id), message_id=int(message_id),
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔗 Re-link (Bootstrap)", callback_data=f"project_relink:{cached_project.id}")],
-                [InlineKeyboardButton(text="Cancel", callback_data="cancel_project")],
-            ]),
-        )
+        kb = nav_keyboard(ActionButton("Re-link", f"project_relink:{cached_project.id}", style="primary"))
+        await chat.edit_message_with_actions(chat_id, message_id, summary, kb)
         await chat.close()
         return
 
@@ -132,8 +123,7 @@ async def onboard_project(ctx: dict, repo_url: str, chat_id: str, message_id: st
         await r.aclose()
 
         # Send config to user for approval
-        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-        bot = chat._get_bot()
+        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
 
         summary = (
             f"Project analyzed!\n\n"
@@ -151,21 +141,19 @@ async def onboard_project(ctx: dict, repo_url: str, chat_id: str, message_id: st
         if config.setup_commands:
             summary += f"Setup: {config.setup_commands}\n"
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Add Project", callback_data=f"confirm_project:{config.name}"),
-                InlineKeyboardButton(text="Cancel", callback_data="cancel_project"),
-            ],
-        ])
+        kb = ActionKeyboard(rows=[ActionRow([
+            ActionButton("Add Project", f"confirm_project:{config.name}", style="primary"),
+            ActionButton("Cancel", "menu:main"),
+        ])])
 
         await reporter.stop()
-        await bot.edit_message_text(
-            text=summary, chat_id=int(chat_id), message_id=int(message_id),
-            reply_markup=keyboard,
-        )
+        await chat.edit_message_with_actions(chat_id, message_id, summary, kb)
 
         log.info("onboarding.preview_sent", project=config.name)
 
+    except asyncio.CancelledError:
+        await reporter.error("⏹ Onboarding cancelled.")
+        raise
     except Exception as e:
         log.error("onboarding.failed", error=str(e), repo=repo)
         await reporter.error(f"Onboarding failed: {str(e)[:200]}")
@@ -174,7 +162,6 @@ async def onboard_project(ctx: dict, repo_url: str, chat_id: str, message_id: st
         # Cleanup temp clone
         if os.path.exists(temp_path):
             shutil.rmtree(temp_path, ignore_errors=True)
-        await chat.close()
 
 
 async def confirm_project(ctx: dict, project_name: str):
@@ -208,6 +195,7 @@ async def confirm_project(ctx: dict, project_name: str):
             app_container_name=data.get("app_container_name"),
             app_port=data.get("app_port"),
             setup_commands=data.get("setup_commands"),
+            status="bootstrapping",
         )
         session.add(project)
         try:
@@ -216,6 +204,10 @@ async def confirm_project(ctx: dict, project_name: str):
             await session.rollback()
             log.warning("onboarding.duplicate_project", project=project_name)
             return {"error": "duplicate", "message": f"Project '{data['name']}' already exists."}
+        except Exception as e:
+            await session.rollback()
+            log.error("onboarding.db_error", error=str(e))
+            return {"error": str(e)[:200]}
         project_id = project.id
 
     log.info("onboarding.confirmed", project=project_name, project_id=project_id)

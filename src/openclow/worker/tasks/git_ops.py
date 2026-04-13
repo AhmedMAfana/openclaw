@@ -169,6 +169,12 @@ async def diff_stat(workspace: str) -> str:
     return await run_exec("git", "diff", "--stat", "HEAD", cwd=workspace)
 
 
+async def changed_files(workspace: str) -> list[str]:
+    """Get list of changed file paths."""
+    output = await run_exec("git", "diff", "--name-only", "HEAD", cwd=workspace, ignore_errors=True)
+    return [f.strip() for f in output.splitlines() if f.strip()]
+
+
 async def diff_size(workspace: str) -> int:
     """Get the size of the diff in lines."""
     diff = await run_exec("git", "diff", "HEAD", cwd=workspace, ignore_errors=True)

@@ -22,6 +22,7 @@ class ContainerInfo:
     state: str  # running, exited, restarting
     health: str  # healthy, unhealthy, starting, none
     ports: str
+    image: str = ""  # e.g. "postgres:16", "mysql:8.0", "redis:alpine"
 
 
 @dataclass
@@ -95,9 +96,11 @@ async def _run_exec(*args: str, timeout: int = 10) -> tuple[int, str]:
 
 
 async def find_project_containers(project_name: str) -> list[ContainerInfo]:
-    """Find all running Docker containers for a project."""
+    """Find running Docker containers for a project using compose label (not name substring)."""
     rc, output = await _run_exec(
-        "docker", "ps", "-a", "--filter", f"name=openclow-{project_name}", "--format", "json",
+        "docker", "ps",
+        "--filter", f"label=com.docker.compose.project=openclow-{project_name}",
+        "--format", "json",
     )
     if rc != 0 or not output:
         return []
@@ -114,53 +117,66 @@ async def find_project_containers(project_name: str) -> list[ContainerInfo]:
                 state=data.get("State", "unknown"),
                 health=data.get("Status", ""),
                 ports=ports,
+                image=data.get("Image", ""),
             ))
         except (json.JSONDecodeError, KeyError):
             continue
     return containers
 
 
-async def check_http(port: int) -> HealthCheck:
-    """Check HTTP health on a port from the host."""
+async def check_http(port: int, container_ip: str | None = None) -> HealthCheck:
+    """Check HTTP health — uses container IP if available, falls back to localhost."""
+    if container_ip:
+        target = f"http://{container_ip}:{port}"
+    else:
+        target = f"http://localhost:{port}"
+
     rc, output = await _run(
-        f'curl -sf -o /dev/null -w "%{{http_code}}" http://localhost:{port}/ --max-time 5',
+        f'curl -sf -o /dev/null -w "%{{http_code}}" {target}/ --max-time 5',
         timeout=8,
     )
+    label = f":{port}" if not container_ip else f"{container_ip}:{port}"
     if rc == 0 and output.startswith("2"):
-        return HealthCheck("HTTP", "pass", f"{output} OK on :{port}")
+        return HealthCheck("HTTP", "pass", f"HTTP {output} on :{port}")
+    if rc == 0 and output.startswith("3"):
+        return HealthCheck("HTTP", "pass", f"HTTP {output} (redirect) on :{port}")
     if output and output.isdigit():
         return HealthCheck("HTTP", "fail", f"HTTP {output} on :{port}")
     return HealthCheck("HTTP", "fail", f"No response on :{port}")
 
 
 async def check_database(containers: list[ContainerInfo]) -> list[HealthCheck]:
-    """Check database connectivity by detecting DB containers."""
+    """Check database connectivity by detecting DB containers via Docker image name."""
     checks = []
     for c in containers:
-        name_lower = c.name.lower()
+        # Use the Docker image name (e.g. "postgres:16", "mysql:8.0") — more reliable
+        # than matching on container name which is user-defined
+        image_lower = c.image.lower()
+        # Strip registry prefix if present (e.g. "docker.io/library/postgres:16" → "postgres:16")
+        image_base = image_lower.rsplit("/", 1)[-1]
 
-        if "postgres" in name_lower or "pgsql" in name_lower:
+        if image_base.startswith("postgres"):
             rc, _ = await _run_exec("docker", "exec", c.name, "pg_isready", "-q", timeout=5)
             if rc == 0:
                 checks.append(HealthCheck("PostgreSQL", "pass", "connected"))
             else:
                 checks.append(HealthCheck("PostgreSQL", "fail", "not responding"))
 
-        elif "mysql" in name_lower or "mariadb" in name_lower:
+        elif image_base.startswith("mysql") or image_base.startswith("mariadb"):
             rc, _ = await _run_exec("docker", "exec", c.name, "mysqladmin", "ping", "--silent", timeout=5)
             if rc == 0:
                 checks.append(HealthCheck("MySQL", "pass", "connected"))
             else:
                 checks.append(HealthCheck("MySQL", "fail", "not responding"))
 
-        elif "redis" in name_lower:
+        elif image_base.startswith("redis") or image_base.startswith("valkey"):
             rc, output = await _run_exec("docker", "exec", c.name, "redis-cli", "ping", timeout=5)
             if rc == 0 and "PONG" in output:
                 checks.append(HealthCheck("Redis", "pass", "connected"))
             else:
                 checks.append(HealthCheck("Redis", "fail", "not responding"))
 
-        elif "mongo" in name_lower:
+        elif image_base.startswith("mongo"):
             rc, _ = await _run_exec("docker", "exec", c.name, "mongosh", "--eval", "db.runCommand({ping:1})", "--quiet", timeout=5)
             if rc == 0:
                 checks.append(HealthCheck("MongoDB", "pass", "connected"))
@@ -195,6 +211,16 @@ def _extract_published_port(containers: list[ContainerInfo], app_container: str 
     return default_port
 
 
+async def _get_container_ip(container_name: str) -> str | None:
+    """Get the Docker network IP of a container."""
+    rc, output = await _run_exec(
+        "docker", "inspect", container_name,
+        "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+    )
+    ip = output.strip() if rc == 0 else None
+    return ip if ip else None
+
+
 async def run_full_health_check(project, with_tunnel: bool = True) -> HealthReport:
     """Run all health checks for a project. Returns a HealthReport."""
     report = HealthReport(project_name=project.name)
@@ -214,13 +240,30 @@ async def run_full_health_check(project, with_tunnel: bool = True) -> HealthRepo
     total = len(containers)
     report.checks.append(HealthCheck("Docker", "pass", f"{running}/{total} containers running"))
 
-    # 2. HTTP check
-    port = _extract_published_port(containers, project.app_container_name, project.app_port)
-    if port:
-        http_check = await check_http(port)
+    # 2. HTTP check — use container IP directly (worker can't reach host ports)
+    app_container_full = None
+    container_ip = None
+    internal_port = project.app_port or 80
+
+    for c in containers:
+        if project.app_container_name and project.app_container_name in c.name.lower():
+            app_container_full = c.name
+            break
+
+    if app_container_full:
+        container_ip = await _get_container_ip(app_container_full)
+
+    if container_ip:
+        http_check = await check_http(internal_port, container_ip=container_ip)
         report.checks.append(http_check)
     else:
-        report.checks.append(HealthCheck("HTTP", "skip", "no published port found"))
+        # Fallback: try published port from host
+        port = _extract_published_port(containers, project.app_container_name, project.app_port)
+        if port:
+            http_check = await check_http(port)
+            report.checks.append(http_check)
+        else:
+            report.checks.append(HealthCheck("HTTP", "skip", "no app container or port found"))
 
     # 3. Database checks
     db_checks = await check_database(containers)

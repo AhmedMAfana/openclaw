@@ -232,14 +232,14 @@ def _format_telegram(report: dict, duration: int) -> str:
 # Main QA task
 # ---------------------------------------------------------------------------
 
-async def run_qa_tests(ctx: dict, chat_id: str, message_id: str, scope: str = "smoke"):
+async def run_qa_tests(ctx: dict, chat_id: str, message_id: str, scope: str = "smoke", chat_provider_type: str = "telegram"):
     """Run full E2E QA via Playwright on Telegram Web.
 
     Scope:
     - "smoke": tests 1-6 (menu, help, projects, status, dashboard, add project)
     - "full": all 12 tests including project lifecycle
     """
-    chat = await factory.get_chat()
+    chat = await factory.get_chat_by_type(chat_provider_type)
     start_time = time.time()
 
     # Get bot username
@@ -365,19 +365,18 @@ async def run_qa_tests(ctx: dict, chat_id: str, message_id: str, scope: str = "s
         summary = _format_telegram(report, duration)
         checklist._footer = summary.split("\n")[-1]  # last line = summary
 
-        from aiogram.types import InlineKeyboardButton
-        buttons = [
-            [
-                InlineKeyboardButton(text="🔄 Smoke", callback_data="qa:smoke"),
-                InlineKeyboardButton(text="🔄 Full QA", callback_data="qa:full"),
-            ],
-            [InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
-        ]
-        await checklist._force_render(buttons=buttons)
+        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+        kb = ActionKeyboard(rows=[
+            ActionRow([
+                ActionButton("🔄 Smoke", "qa:smoke"),
+                ActionButton("🔄 Full QA", "qa:full"),
+            ]),
+            ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+        ])
+        await checklist._force_render(keyboard=kb)
 
         # Also send the full report as a separate message for readability
-        bot = chat._get_bot()
-        await bot.send_message(chat_id=int(chat_id), text=summary)
+        await chat.send_message(chat_id, summary)
 
         log.info("qa.complete", passed=report["passed"], failed=report["failed"],
                  skipped=report["skipped"], total=report["total"], duration=duration)
@@ -387,27 +386,27 @@ async def run_qa_tests(ctx: dict, chat_id: str, message_id: str, scope: str = "s
         error_msg = "QA timed out" if isinstance(e, TimeoutError) else "QA cancelled"
         await checklist.stop()
         checklist._footer = f"❌ {error_msg}"
-        from aiogram.types import InlineKeyboardButton
-        await checklist._force_render(buttons=[
-            [InlineKeyboardButton(text="🔄 Retry", callback_data="qa:smoke")],
-            [InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
-        ])
+        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+        await checklist._force_render(keyboard=ActionKeyboard(rows=[
+            ActionRow([ActionButton("🔄 Retry", "qa:smoke")]),
+            ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+        ]))
     except ImportError:
         await checklist.stop()
         checklist._footer = "❌ Claude Agent SDK not available"
-        from aiogram.types import InlineKeyboardButton
-        await checklist._force_render(buttons=[
-            [InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
-        ])
+        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+        await checklist._force_render(keyboard=ActionKeyboard(rows=[
+            ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+        ]))
     except Exception as e:
         log.error("qa.failed", error=str(e))
         await checklist.stop()
         checklist._footer = f"❌ {str(e)[:100]}"
-        from aiogram.types import InlineKeyboardButton
-        await checklist._force_render(buttons=[
-            [InlineKeyboardButton(text="🔄 Retry", callback_data="qa:smoke")],
-            [InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
-        ])
+        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+        await checklist._force_render(keyboard=ActionKeyboard(rows=[
+            ActionRow([ActionButton("🔄 Retry", "qa:smoke")]),
+            ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+        ]))
     finally:
         await checklist.stop()
         await chat.close()

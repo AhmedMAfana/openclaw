@@ -6,7 +6,7 @@ keeps the elapsed timer alive even during long-running commands.
 """
 from openclow.services.base_reporter import BaseReporter
 
-ICONS = {"pending": "⬜", "running": "🔄", "done": "✅", "failed": "❌", "skipped": "⏭️"}
+ICONS = {"pending": "⬜", "running": "🔄", "done": "✅", "failed": "❌", "skipped": "✅"}
 
 
 class ChecklistReporter(BaseReporter):
@@ -74,13 +74,9 @@ class ChecklistReporter(BaseReporter):
         # Progress bar
         if total > 0:
             filled = done + failed
-            bar_len = 20
-            bar_filled = int((filled / total) * bar_len)
-            bar = "█" * bar_filled + "░" * (bar_len - bar_filled)
+            bar = "🟩" * filled + "⬜" * (total - filled)
             pct = int((filled / total) * 100)
-            lines.append(f"[{bar}] {filled}/{total} ({pct}%)")
-
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
+            lines.append(f"{bar} {pct}%")
 
         if self.subtitle:
             lines.append(self.subtitle)

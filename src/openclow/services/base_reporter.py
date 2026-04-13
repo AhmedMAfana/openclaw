@@ -1,32 +1,42 @@
-"""Base class for Telegram message reporters with heartbeat and rate-limited editing."""
+"""Base class for message reporters with heartbeat and rate-limited editing.
+
+Platform-agnostic — uses ChatProvider.edit_message_with_actions() instead
+of calling aiogram bot methods directly.
+"""
+from __future__ import annotations
+
 import asyncio
 import time
+from typing import TYPE_CHECKING
 
 from openclow.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from openclow.providers.actions import ActionKeyboard
+    from openclow.providers.base import ChatProvider
 
 log = get_logger()
 
 
-async def edit_message(chat, chat_id: str, message_id: str, text: str, buttons=None):
-    """One-shot Telegram message edit. For progress reporting, use a Reporter."""
+async def edit_message(
+    chat: ChatProvider,
+    chat_id: str,
+    message_id: str,
+    text: str,
+    keyboard: ActionKeyboard | None = None,
+):
+    """One-shot message edit. For progress reporting, use a Reporter."""
     try:
-        from aiogram.types import InlineKeyboardMarkup
-        bot = chat._get_bot()
-        kwargs = dict(
-            text=text[:4000],
-            chat_id=int(chat_id),
-            message_id=int(message_id),
+        await chat.edit_message_with_actions(
+            chat_id, message_id, text[:4000], keyboard,
         )
-        if buttons:
-            kwargs["reply_markup"] = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await bot.edit_message_text(**kwargs)
     except Exception as e:
         if "message is not modified" not in str(e):
             log.warning("reporter.edit_failed", error=str(e))
 
 
 class BaseReporter:
-    """Shared foundation for Telegram message reporters.
+    """Shared foundation for message reporters.
 
     Provides: heartbeat loop, rate-limited editing, elapsed timer.
     Subclasses implement ``_build_text()`` to control message content.
@@ -34,7 +44,7 @@ class BaseReporter:
 
     def __init__(
         self,
-        chat,
+        chat: ChatProvider,
         chat_id: str,
         message_id: str,
         *,
@@ -79,26 +89,19 @@ class BaseReporter:
     def elapsed(self) -> int:
         return int(time.time() - self._start_time)
 
-    async def _render(self, buttons=None):
+    async def _render(self, keyboard: ActionKeyboard | None = None):
         now = time.time()
         if now - self._last_send < self._rate_limit:
             return
-        await self._force_render(buttons)
+        await self._force_render(keyboard)
 
-    async def _force_render(self, buttons=None):
+    async def _force_render(self, keyboard: ActionKeyboard | None = None):
         self._last_send = time.time()
         text = self._build_text()[:4000]
         try:
-            from aiogram.types import InlineKeyboardMarkup
-            bot = self._chat._get_bot()
-            kwargs = dict(
-                text=text,
-                chat_id=int(self._chat_id),
-                message_id=int(self._message_id),
+            await self._chat.edit_message_with_actions(
+                self._chat_id, self._message_id, text, keyboard,
             )
-            if buttons:
-                kwargs["reply_markup"] = InlineKeyboardMarkup(inline_keyboard=buttons)
-            await bot.edit_message_text(**kwargs)
         except Exception as e:
             if "message is not modified" not in str(e):
                 log.warning("reporter.render_failed", error=str(e))

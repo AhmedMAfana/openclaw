@@ -6,8 +6,10 @@ requires-python = ">=3.12"
 dependencies = [
     # AI Agent
     "claude-agent-sdk>=0.1.50",
-    # Telegram Bot
+    # Chat providers
     "aiogram>=3.4",
+    "slack-bolt>=1.18",
+    "slack-sdk>=3.27",
     # Task Queue
     "arq>=0.26",
     # Database

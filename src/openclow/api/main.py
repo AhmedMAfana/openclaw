@@ -2,17 +2,27 @@
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from openclow.api.routes import activity, health, settings, tasks
 
 app = FastAPI(title="OpenClow API", version="0.1.0")
 
+# Trigger provider registration so registry.available_providers() works.
+# Factory imports all concrete providers (telegram, slack, claude, github, etc.)
+import openclow.providers.factory  # noqa: F401, E402
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
     from openclow.models.base import dispose_engine
     await dispose_engine()
+
+@app.get("/")
+async def root():
+    return RedirectResponse(url="/settings")
+
 
 # Mount static files
 static_dir = Path(__file__).parent / "static"

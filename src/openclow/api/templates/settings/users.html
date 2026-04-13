@@ -5,13 +5,28 @@
 <div class="flex items-center justify-between mb-8">
     <div>
         <h2 class="text-2xl font-bold text-gray-900">Users</h2>
-        <p class="text-gray-500 mt-1">Manage who can interact with OpenClow via {{ chat_type | capitalize }}</p>
+        <p class="text-gray-500 mt-1">Manage who can interact with OpenClow{% if configured_chat_types | length > 1 %} via {{ configured_chat_types | map('capitalize') | join(' & ') }}{% else %} via {{ chat_type | capitalize }}{% endif %}</p>
     </div>
     <button onclick="document.getElementById('add-user-modal').classList.remove('hidden')"
         class="px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors text-sm font-medium">
         Add User
     </button>
 </div>
+
+{% if chat_type == 'slack' %}
+<!-- Slack Channel Selector -->
+<div class="bg-white rounded-xl border border-gray-200 p-5 mb-6">
+    <div class="flex items-center justify-between mb-3">
+        <div>
+            <h3 class="text-sm font-semibold text-gray-900">Default Channel</h3>
+            <p class="text-xs text-gray-500 mt-0.5">The channel where OpenClow sends task updates and notifications</p>
+        </div>
+        <button id="refresh-channels-btn" onclick="loadSlackChannels()"
+            class="text-xs text-brand-600 hover:text-brand-700">Refresh</button>
+    </div>
+    <div id="channel-list" class="text-sm text-gray-500">Loading channels...</div>
+</div>
+{% endif %}
 
 <!-- Users Table -->
 <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -72,7 +87,7 @@
 
 <!-- Add User Modal -->
 <div id="add-user-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md mx-4">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg mx-4">
         <div class="p-6 border-b border-gray-100">
             <div class="flex items-center justify-between">
                 <h3 class="text-lg font-semibold text-gray-900">Add User</h3>
@@ -80,42 +95,227 @@
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
                 </button>
             </div>
-        </div>
-        <form hx-post="/api/settings/users" hx-target="#users-table" hx-swap="beforeend" hx-ext="json-enc"
-              hx-on::after-request="if(event.detail.successful) document.getElementById('add-user-modal').classList.add('hidden')">
-            <div class="p-6 space-y-4">
-                <input type="hidden" name="chat_provider_type" value="{{ chat_type }}">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">
-                        {{ chat_type | capitalize }} User ID <span class="text-red-400">*</span>
-                    </label>
-                    <input type="text" name="chat_provider_uid" class="form-input" required
-                        placeholder="{% if chat_type == 'telegram' %}e.g. 123456789{% else %}e.g. U0123456789{% endif %}">
-                    <p class="text-xs text-gray-400 mt-1">
-                        {% if chat_type == 'telegram' %}
-                            Send /start to @userinfobot on Telegram to get your user ID
-                        {% else %}
-                            Find the user ID in the platform's user profile
-                        {% endif %}
-                    </p>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
-                    <input type="text" name="username" class="form-input" placeholder="Optional display name">
-                </div>
-                <label class="flex items-center gap-2">
-                    <input type="checkbox" name="is_allowed" checked class="rounded text-brand-600">
-                    <span class="text-sm text-gray-700">Authorized to use OpenClow</span>
-                </label>
-            </div>
-            <div class="p-6 border-t border-gray-100 flex justify-end gap-3">
-                <button type="button" onclick="document.getElementById('add-user-modal').classList.add('hidden')"
-                    class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
-                <button type="submit" class="px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700 text-sm font-medium">
-                    Add User
+            {% if configured_chat_types | length > 1 %}
+            <!-- Platform tabs -->
+            <div class="flex gap-1 mt-3 bg-gray-100 rounded-lg p-1">
+                {% for ptype in configured_chat_types %}
+                <button onclick="switchPlatformTab('{{ ptype }}')" id="tab-{{ ptype }}"
+                    class="platform-tab flex-1 px-3 py-1.5 text-sm font-medium rounded-md transition-colors
+                    {% if ptype == configured_chat_types[0] %}bg-white text-gray-900 shadow-sm{% else %}text-gray-500 hover:text-gray-700{% endif %}">
+                    {{ ptype | capitalize }}
                 </button>
+                {% endfor %}
             </div>
-        </form>
+            {% endif %}
+        </div>
+
+        {% if 'slack' in configured_chat_types %}
+        <!-- Slack: member picker from workspace -->
+        <div id="panel-slack" class="{% if configured_chat_types[0] != 'slack' %}hidden{% endif %}">
+            <div class="p-6">
+                <div id="slack-members-loading" class="text-center py-8 text-gray-500">
+                    <svg class="w-6 h-6 spinner mx-auto mb-2" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="4" opacity="0.25"/><path d="M4 12a8 8 0 018-8" stroke-width="4"/></svg>
+                    Loading workspace members...
+                </div>
+                <div id="slack-members-error" class="hidden text-center py-8">
+                    <p class="text-red-600 text-sm mb-2" id="slack-members-error-msg"></p>
+                    <button onclick="loadSlackMembers()" class="text-sm text-brand-600 hover:text-brand-700">Retry</button>
+                </div>
+                <div id="slack-members-list" class="hidden">
+                    <input type="text" id="member-search" placeholder="Search members..."
+                        class="form-input mb-3 text-sm" oninput="filterMembers(this.value)">
+                    <div id="members-container" class="max-h-64 overflow-y-auto space-y-1"></div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if 'telegram' in configured_chat_types %}
+        <!-- Telegram: manual ID entry -->
+        <div id="panel-telegram" class="{% if configured_chat_types[0] != 'telegram' %}hidden{% endif %}">
+            <form hx-post="/api/settings/users" hx-target="#users-table" hx-swap="beforeend" hx-ext="json-enc"
+                  hx-on::after-request="if(event.detail.successful) document.getElementById('add-user-modal').classList.add('hidden')">
+                <div class="p-6 space-y-4">
+                    <input type="hidden" name="chat_provider_type" value="telegram">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">
+                            Telegram User ID <span class="text-red-400">*</span>
+                        </label>
+                        <input type="text" name="chat_provider_uid" class="form-input" required placeholder="e.g. 123456789">
+                        <p class="text-xs text-gray-400 mt-1">Send /start to @userinfobot on Telegram to get your user ID</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+                        <input type="text" name="username" class="form-input" placeholder="Optional display name">
+                    </div>
+                    <label class="flex items-center gap-2">
+                        <input type="checkbox" name="is_allowed" checked class="rounded text-brand-600">
+                        <span class="text-sm text-gray-700">Authorized to use OpenClow</span>
+                    </label>
+                </div>
+                <div class="p-6 border-t border-gray-100 flex justify-end gap-3">
+                    <button type="button" onclick="document.getElementById('add-user-modal').classList.add('hidden')"
+                        class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+                    <button type="submit" class="px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700 text-sm font-medium">
+                        Add User
+                    </button>
+                </div>
+            </form>
+        </div>
+        {% endif %}
     </div>
 </div>
+
+<script>
+function switchPlatformTab(platform) {
+    // Hide all panels
+    document.querySelectorAll('[id^="panel-"]').forEach(p => p.classList.add('hidden'));
+    // Show selected panel
+    const panel = document.getElementById('panel-' + platform);
+    if (panel) panel.classList.remove('hidden');
+    // Update tab styles
+    document.querySelectorAll('.platform-tab').forEach(t => {
+        t.classList.remove('bg-white', 'text-gray-900', 'shadow-sm');
+        t.classList.add('text-gray-500');
+    });
+    const tab = document.getElementById('tab-' + platform);
+    if (tab) {
+        tab.classList.add('bg-white', 'text-gray-900', 'shadow-sm');
+        tab.classList.remove('text-gray-500');
+    }
+    // Auto-load Slack members when switching to Slack tab
+    if (platform === 'slack' && typeof loadSlackMembers === 'function' && allMembers.length === 0) {
+        loadSlackMembers();
+    }
+}
+</script>
+
+{% if 'slack' in configured_chat_types %}
+<script>
+let allMembers = [];
+
+async function loadSlackMembers() {
+    document.getElementById('slack-members-loading').classList.remove('hidden');
+    document.getElementById('slack-members-error').classList.add('hidden');
+    document.getElementById('slack-members-list').classList.add('hidden');
+
+    try {
+        const resp = await fetch('/api/settings/slack/members');
+        const data = await resp.json();
+        document.getElementById('slack-members-loading').classList.add('hidden');
+
+        if (!data.ok) {
+            document.getElementById('slack-members-error-msg').textContent = data.error;
+            document.getElementById('slack-members-error').classList.remove('hidden');
+            return;
+        }
+
+        allMembers = data.members;
+        renderMembers(allMembers);
+        document.getElementById('slack-members-list').classList.remove('hidden');
+    } catch (e) {
+        document.getElementById('slack-members-loading').classList.add('hidden');
+        document.getElementById('slack-members-error-msg').textContent = 'Failed to load: ' + e.message;
+        document.getElementById('slack-members-error').classList.remove('hidden');
+    }
+}
+
+function renderMembers(members) {
+    const container = document.getElementById('members-container');
+    container.innerHTML = members.map(m => {
+        const added = m.already_added;
+        return `
+            <div class="flex items-center justify-between px-3 py-2 rounded-lg ${added ? 'bg-green-50' : 'hover:bg-gray-50'} member-row" data-name="${(m.real_name + ' ' + m.name).toLowerCase()}">
+                <div class="flex items-center gap-3">
+                    ${m.avatar ? `<img src="${m.avatar}" class="w-8 h-8 rounded-full">` : '<div class="w-8 h-8 rounded-full bg-gray-200"></div>'}
+                    <div>
+                        <p class="text-sm font-medium text-gray-900">${m.real_name || m.name}</p>
+                        <p class="text-xs text-gray-500">@${m.name} · ${m.id}</p>
+                    </div>
+                </div>
+                ${added
+                    ? '<span class="text-xs text-green-600 font-medium">Added</span>'
+                    : `<button onclick="addSlackUser('${m.id}', '${m.name}')" class="px-3 py-1 text-xs bg-brand-600 text-white rounded-lg hover:bg-brand-700">Add</button>`
+                }
+            </div>
+        `;
+    }).join('');
+}
+
+function filterMembers(query) {
+    const q = query.toLowerCase();
+    document.querySelectorAll('.member-row').forEach(row => {
+        row.style.display = row.dataset.name.includes(q) ? '' : 'none';
+    });
+}
+
+async function addSlackUser(userId, username) {
+    try {
+        const resp = await fetch('/api/settings/users', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                chat_provider_type: 'slack',
+                chat_provider_uid: userId,
+                username: username,
+                is_allowed: true,
+            }),
+        });
+        if (resp.ok) {
+            // Reload page to show updated table
+            window.location.reload();
+        } else {
+            const err = await resp.json();
+            alert('Failed: ' + (err.detail || JSON.stringify(err)));
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+// Auto-load members when modal opens
+const observer = new MutationObserver(() => {
+    const modal = document.getElementById('add-user-modal');
+    if (!modal.classList.contains('hidden') && allMembers.length === 0) {
+        loadSlackMembers();
+    }
+});
+observer.observe(document.getElementById('add-user-modal'), {attributes: true, attributeFilter: ['class']});
+
+async function loadSlackChannels() {
+    const container = document.getElementById('channel-list');
+    container.innerHTML = '<span class="text-gray-400">Loading...</span>';
+    try {
+        const resp = await fetch('/api/settings/slack/channels');
+        const data = await resp.json();
+        if (!data.ok) {
+            container.innerHTML = `<span class="text-red-500">${data.error}</span>`;
+            return;
+        }
+        if (data.channels.length === 0) {
+            container.innerHTML = '<span class="text-gray-400">No channels found. Invite the bot to a channel first.</span>';
+            return;
+        }
+        container.innerHTML = data.channels.map(ch => {
+            const badge = ch.is_member
+                ? '<span class="text-xs text-green-600">Bot is member</span>'
+                : '<span class="text-xs text-gray-400">Bot not in channel</span>';
+            return `<div class="flex items-center justify-between py-1.5">
+                <span class="text-sm font-medium text-gray-900">#${ch.name}</span>
+                <div class="flex items-center gap-3">
+                    ${badge}
+                    <span class="text-xs text-gray-400">${ch.num_members} members</span>
+                    <code class="text-xs text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">${ch.id}</code>
+                </div>
+            </div>`;
+        }).join('');
+    } catch (e) {
+        container.innerHTML = `<span class="text-red-500">Failed: ${e.message}</span>`;
+    }
+}
+
+// Auto-load channels on page load
+loadSlackChannels();
+</script>
+{% endif %}
 {% endblock %}

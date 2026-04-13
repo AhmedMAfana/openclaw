@@ -23,18 +23,19 @@ async def _load_project(project_id: int):
         return result.scalar_one_or_none()
 
 
-async def docker_up_task(ctx: dict, project_id: int, chat_id: str, message_id: str):
+async def docker_up_task(ctx: dict, project_id: int, chat_id: str, message_id: str, chat_provider_type: str = "telegram"):
     """Start Docker containers + health check + tunnel + Playwright verify."""
     from openclow.services.docker_guard import run_docker
     from openclow.services.tunnel_service import start_tunnel
     from openclow.services.status_reporter import LineReporter as StatusReporter
     from openclow.worker.tasks.bootstrap import _step_verify_app
 
-    chat = await factory.get_chat()
+    chat = await factory.get_chat_by_type(chat_provider_type)
     try:
         project = await _load_project(project_id)
         if not project:
-            await _notify(chat, chat_id, message_id, "Project not found.")
+            from openclow.providers.actions import nav_keyboard
+            await _notify(chat, chat_id, message_id, "Project not found.", keyboard=nav_keyboard())
             return
 
         workspace = os.path.join(settings.workspace_base_path, "_cache", project.name)
@@ -44,9 +45,10 @@ async def docker_up_task(ctx: dict, project_id: int, chat_id: str, message_id: s
         port = get_app_port(project_id)
 
         if not os.path.exists(workspace):
+            from openclow.providers.actions import ActionButton, project_nav_keyboard
+            kb = project_nav_keyboard(project_id, ActionButton("Bootstrap", f"project_bootstrap:{project_id}", style="primary"))
             await _notify(chat, chat_id, message_id,
-                          f"Workspace not found for {project.name}.\n"
-                          f"Run /bootstrap {project.name} first.")
+                          f"Workspace not found for {project.name}.\nRun bootstrap first.", keyboard=kb)
             return
 
         status = StatusReporter(chat, chat_id, message_id, f"Starting {project.name}")
@@ -74,17 +76,9 @@ async def docker_up_task(ctx: dict, project_id: int, chat_id: str, message_id: s
             clean_error = "\n".join(clean_lines[:5]) or "Unknown error"
 
             await status.add("❌", f"Docker start failed:\n{clean_error}")
-            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-            bot = chat._get_bot()
-            await bot.edit_message_text(
-                text=status.text()[:4000],
-                chat_id=int(chat_id), message_id=int(message_id),
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Retry", callback_data=f"project_up:{project_id}")],
-                    [InlineKeyboardButton(text="◀️ Back", callback_data=f"project_detail:{project_id}"),
-                     InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
-                ]),
-            )
+            from openclow.providers.actions import ActionButton, project_nav_keyboard
+            kb = project_nav_keyboard(project_id, ActionButton("Retry", f"project_up:{project_id}", style="primary"))
+            await chat.edit_message_with_actions(chat_id, message_id, status.text()[:4000], kb)
             return
 
         await status.add("✅", "Docker containers started", replace_last=True)
@@ -134,9 +128,11 @@ async def docker_up_task(ctx: dict, project_id: int, chat_id: str, message_id: s
                 tunnel_url = url
                 await status.add("✅", f"Public URL: {url}", replace_last=True)
             else:
-                await status.add("⚠️", "Tunnel failed (local access only)", replace_last=True)
+                log.warning("lifecycle.tunnel_failed", project=project.name, reason="start_returned_none")
+                await status.add("⚠️", "Tunnel failed — tap Docker Up to retry", replace_last=True)
         except Exception as e:
-            await status.add("⚠️", f"Tunnel error: {str(e)[:60]}", replace_last=True)
+            log.warning("lifecycle.tunnel_error", project=project.name, error=str(e))
+            await status.add("⚠️", f"Tunnel error: {str(e)[:60]} — tap Docker Up to retry", replace_last=True)
 
         # 4. Playwright verification
         verify_ok, verify_detail = await _step_verify_app(
@@ -155,185 +151,219 @@ async def docker_up_task(ctx: dict, project_id: int, chat_id: str, message_id: s
         else:
             status.lines.append("\n⚠️ Docker started but app may need time")
 
-        # Final buttons
-        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-        bot = chat._get_bot()
-        buttons = [
-            [InlineKeyboardButton(text="💚 Health", callback_data=f"health:{project.id}")],
-        ]
+        # Final buttons — compact single row
+        from openclow.providers.actions import ActionButton, project_nav_keyboard
+        extra = []
         if tunnel_url:
-            buttons.insert(0, [InlineKeyboardButton(text="🌐 Open App", url=tunnel_url)])
-
-        await bot.edit_message_text(
-            text=status.text()[:4000],
-            chat_id=int(chat_id),
-            message_id=int(message_id),
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+            extra.append(ActionButton("Open App", "open_app", url=tunnel_url))
+        extra.append(ActionButton("Health", f"health:{project.id}"))
+        kb = project_nav_keyboard(project.id, *extra)
+        await chat.edit_message_with_actions(
+            chat_id, message_id, status.text()[:4000], kb,
         )
 
         log.info("lifecycle.docker_up", project=project.name, rc=rc,
                  app_ok=app_ok, verified=verify_ok, tunnel=bool(tunnel_url))
+    except asyncio.CancelledError:
+        from openclow.providers.actions import ActionButton, project_nav_keyboard
+        kb = project_nav_keyboard(project_id, ActionButton("Retry", f"project_up:{project_id}"))
+        try:
+            await chat.edit_message_with_actions(chat_id, message_id, "⏹ Docker Up cancelled.", kb)
+        except Exception:
+            pass
+        raise
     except Exception as e:
         log.error("lifecycle.docker_up_failed", error=str(e))
-        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+        from openclow.providers.actions import ActionButton, project_nav_keyboard
         try:
-            bot = chat._get_bot()
-            await bot.edit_message_text(
-                text=f"❌ Error: {str(e)[:200]}",
-                chat_id=int(chat_id), message_id=int(message_id),
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Retry", callback_data=f"project_up:{project_id}")],
-                    [InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
-                ]),
-            )
+            kb = project_nav_keyboard(project_id, ActionButton("Retry", f"project_up:{project_id}"))
+            await chat.edit_message_with_actions(chat_id, message_id, f"❌ Error: {str(e)[:200]}", kb)
         except Exception:
             await _notify(chat, chat_id, message_id, f"❌ Error: {str(e)[:200]}")
-    finally:
-        await chat.close()
 
 
-async def docker_down_task(ctx: dict, project_id: int, chat_id: str, message_id: str):
+async def docker_down_task(ctx: dict, project_id: int, chat_id: str, message_id: str, chat_provider_type: str = "telegram"):
     """Stop Docker containers for a project."""
     from openclow.services.docker_guard import run_docker
     from openclow.services.tunnel_service import stop_tunnel
 
-    chat = await factory.get_chat()
+    chat = await factory.get_chat_by_type(chat_provider_type)
     try:
         project = await _load_project(project_id)
         if not project:
-            await _notify(chat, chat_id, message_id, "Project not found.")
+            from openclow.providers.actions import nav_keyboard
+            await _notify(chat, chat_id, message_id, "Project not found.", keyboard=nav_keyboard())
             return
+
+        from openclow.services.checklist_reporter import ChecklistReporter
+        checklist = ChecklistReporter(chat, chat_id, message_id,
+                                     title=f"Stopping {project.name}")
+        checklist.set_steps(["Stop containers", "Stop tunnel", "Verify stopped"])
+        await checklist.start()
 
         workspace = os.path.join(settings.workspace_base_path, "_cache", project.name)
         compose = project.docker_compose_file or "docker-compose.yml"
         compose_project = f"openclow-{project.name}"
 
-        await _notify(chat, chat_id, message_id, f"⏹ Stopping Docker for {project.name}...")
+        # Step 1: Stop containers
+        await checklist.start_step(0)
+        if os.path.exists(workspace):
+            rc, output = await run_docker(
+                "docker", "compose", "-f", compose, "-p", compose_project,
+                "down", "--remove-orphans",
+                actor="lifecycle", project_id=project_id, cwd=workspace, timeout=120,
+            )
+            await checklist.complete_step(0, "containers stopped" if rc == 0 else f"exit code {rc}")
+        else:
+            await checklist.skip_step(0, "no workspace")
 
-        rc, output = await run_docker(
-            "docker", "compose", "-f", compose, "-p", compose_project,
-            "down", "--remove-orphans",
-            actor="lifecycle", project_id=project_id, cwd=workspace, timeout=120,
-        )
-
-        # Stop tunnel if running
+        # Step 2: Stop tunnel
+        await checklist.start_step(1)
         try:
             await stop_tunnel(project.name)
+            await checklist.complete_step(1, "tunnel stopped")
         except Exception:
-            pass
+            await checklist.complete_step(1, "no tunnel running")
 
-        from aiogram.types import InlineKeyboardButton
-        buttons = [
-            [
-                InlineKeyboardButton(text="▶️ Docker Up", callback_data=f"project_up:{project_id}"),
-                InlineKeyboardButton(text="💚 Health", callback_data=f"health:{project_id}"),
-            ],
-            [InlineKeyboardButton(text="◀️ Projects", callback_data="menu:projects")],
-        ]
-
-        if rc == 0:
-            await _notify(chat, chat_id, message_id,
-                          f"✅ Docker stopped for {project.name}", buttons=buttons)
+        # Step 3: Verify
+        await checklist.start_step(2)
+        from openclow.services.docker_guard import run_docker as _run
+        rc, _ = await _run("docker", "ps", "--filter",
+                           f"label=com.docker.compose.project={compose_project}",
+                           "--format", "{{.Names}}", actor="lifecycle")
+        remaining = [n for n in _.strip().split("\n") if n.strip()] if rc == 0 and _.strip() else []
+        if not remaining:
+            await checklist.complete_step(2, "all stopped")
         else:
-            await _notify(chat, chat_id, message_id,
-                          f"⚠️ Docker stop returned code {rc} for {project.name}\n\n"
-                          f"{output[:500]}", buttons=buttons)
+            await checklist.fail_step(2, f"{len(remaining)} still running")
 
-        log.info("lifecycle.docker_down", project=project.name, rc=rc)
+        await checklist.stop()
+        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+        kb = ActionKeyboard(rows=[
+            ActionRow([
+                ActionButton("▶️ Docker Up", f"project_up:{project_id}"),
+                ActionButton("📦 Project", f"project_detail:{project_id}"),
+            ]),
+            ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+        ])
+        await checklist._force_render(keyboard=kb)
+
+        log.info("lifecycle.docker_down", project=project.name)
+    except asyncio.CancelledError:
+        from openclow.providers.actions import ActionButton, project_nav_keyboard
+        await _notify(chat, chat_id, message_id,
+                      "⚠️ Docker stop was interrupted. Containers may still be running.",
+                      keyboard=project_nav_keyboard(project_id, ActionButton("Retry", f"project_down:{project_id}")))
+        raise
     except Exception as e:
         log.error("lifecycle.docker_down_failed", error=str(e))
-        from aiogram.types import InlineKeyboardButton
-        await _notify(chat, chat_id, message_id, f"❌ Error: {str(e)[:200]}", buttons=[
-            [InlineKeyboardButton(text="🔄 Retry", callback_data=f"project_down:{project_id}")],
-            [InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
-        ])
-    finally:
-        await chat.close()
+        from openclow.providers.actions import ActionButton, project_nav_keyboard
+        await _notify(chat, chat_id, message_id, f"❌ Error: {str(e)[:300]}",
+                      keyboard=project_nav_keyboard(project_id, ActionButton("Retry", f"project_down:{project_id}")))
 
 
-async def unlink_project_task(ctx: dict, project_id: int, chat_id: str, message_id: str):
+async def unlink_project_task(ctx: dict, project_id: int, chat_id: str, message_id: str, chat_provider_type: str = "telegram"):
     """Unlink a project — stop Docker + tunnel, mark inactive. Keeps workspace + DB."""
     from openclow.services.docker_guard import run_docker
     from openclow.services.tunnel_service import stop_tunnel
 
-    chat = await factory.get_chat()
+    chat = await factory.get_chat_by_type(chat_provider_type)
     try:
         project = await _load_project(project_id)
         if not project:
-            await _notify(chat, chat_id, message_id, "Project not found.")
+            from openclow.providers.actions import nav_keyboard
+            await _notify(chat, chat_id, message_id, "Project not found.", keyboard=nav_keyboard())
             return
 
         project_name = project.name
-        lines = [f"🔗 Unlinking {project_name}...\n"]
+        from openclow.services.checklist_reporter import ChecklistReporter
+        checklist = ChecklistReporter(chat, chat_id, message_id,
+                                     title=f"Unlinking {project_name}")
+        checklist.set_steps(["Stop containers", "Stop tunnel", "Mark inactive"])
+        await checklist.start()
 
-        # 1. Stop Docker
         workspace = os.path.join(settings.workspace_base_path, "_cache", project_name)
         compose = project.docker_compose_file or "docker-compose.yml"
         compose_project = f"openclow-{project_name}"
 
+        # Step 1: Stop Docker
+        await checklist.start_step(0)
         if os.path.exists(workspace):
             rc, _ = await run_docker(
                 "docker", "compose", "-f", compose, "-p", compose_project,
                 "down", "--remove-orphans",
                 actor="lifecycle", project_id=project_id, cwd=workspace, timeout=120,
             )
-            lines.append(f"{'✅' if rc == 0 else '⚠️'} Docker containers stopped")
+            await checklist.complete_step(0, "containers stopped" if rc == 0 else f"exit code {rc}")
         else:
-            lines.append("⏭️ No workspace (skipping Docker)")
+            await checklist.complete_step(0, "no containers running")
 
-        # 2. Stop tunnel
+        # Step 2: Stop tunnel
+        await checklist.start_step(1)
         try:
             await stop_tunnel(project_name)
-            lines.append("✅ Tunnel stopped")
+            await checklist.complete_step(1, "tunnel stopped")
         except Exception:
-            lines.append("⏭️ No tunnel to stop")
+            await checklist.complete_step(1, "no tunnel running")
 
-        # 3. Mark inactive in DB
-        async with async_session() as session:
-            result = await session.execute(select(Project).where(Project.id == project_id))
-            proj = result.scalar_one_or_none()
-            if proj:
-                proj.status = "inactive"
-                await session.commit()
-                lines.append("✅ Marked as inactive")
+        # Step 3: Mark inactive
+        await checklist.start_step(2)
+        try:
+            async with async_session() as session:
+                result = await session.execute(select(Project).where(Project.id == project_id))
+                proj = result.scalar_one_or_none()
+                if proj:
+                    proj.status = "inactive"
+                    await session.commit()
+            await checklist.complete_step(2, "marked inactive")
+        except Exception as e:
+            await checklist.fail_step(2, f"DB error: {str(e)[:50]}")
+            log.error("lifecycle.unlink_db_failed", error=str(e))
 
-        lines.append(f"\n🔗 {project_name} unlinked.")
-
-        from aiogram.types import InlineKeyboardButton
-        buttons = [
-            [InlineKeyboardButton(text="🔗 Re-link (Bootstrap)", callback_data=f"project_relink:{project_id}")],
-            [InlineKeyboardButton(text="🗑 Remove Permanently", callback_data=f"project_remove:{project_id}")],
-            [
-                InlineKeyboardButton(text="➕ Add Project", callback_data="menu:addproject"),
-                InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main"),
-            ],
-        ]
-        await _notify(chat, chat_id, message_id, "\n".join(lines), buttons=buttons)
+        checklist._footer = "You can re-link it anytime to restore the project."
+        await checklist.stop()
+        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+        kb = ActionKeyboard(rows=[
+            ActionRow([
+                ActionButton("🔗 Re-link Now", f"project_relink:{project_id}", style="primary"),
+                ActionButton("📂 Projects", "menu:projects"),
+            ]),
+            ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+        ])
+        await checklist._force_render(keyboard=kb)
 
         log.info("lifecycle.unlink_project", project=project_name)
+    except asyncio.CancelledError:
+        from openclow.providers.actions import ActionButton, project_nav_keyboard
+        await _notify(chat, chat_id, message_id,
+                      "⚠️ Unlink was interrupted (worker restarted).\n"
+                      "The project may be partially unlinked. Check its status.",
+                      keyboard=project_nav_keyboard(project_id))
+        raise
     except Exception as e:
         log.error("lifecycle.unlink_failed", error=str(e))
-        await _notify(chat, chat_id, message_id, f"❌ Unlink failed: {str(e)[:200]}")
-    finally:
-        await chat.close()
+        from openclow.providers.actions import ActionButton, project_nav_keyboard
+        await _notify(chat, chat_id, message_id,
+                      f"❌ Unlink failed: {str(e)[:300]}\n\nThe project is unchanged.",
+                      keyboard=project_nav_keyboard(project_id))
 
 
-async def remove_project_task(ctx: dict, project_id: int, chat_id: str, message_id: str):
+async def remove_project_task(ctx: dict, project_id: int, chat_id: str, message_id: str, chat_provider_type: str = "telegram"):
     """Remove a project with full cleanup: Docker, tunnel, workspace, DB."""
     from openclow.services.docker_guard import run_docker
     from openclow.services.tunnel_service import stop_tunnel
 
-    chat = await factory.get_chat()
+    chat = await factory.get_chat_by_type(chat_provider_type)
     try:
         project = await _load_project(project_id)
         if not project:
-            await _notify(chat, chat_id, message_id, "Project not found.")
+            from openclow.providers.actions import nav_keyboard
+            await _notify(chat, chat_id, message_id, "Project not found.", keyboard=nav_keyboard())
             return
 
         project_name = project.name
-        lines = [f"🗑 Removing {project_name}...\n"]
 
-        # Check for active tasks
+        # Check for active tasks first
         async with async_session() as session:
             active_statuses = ["pending", "preparing", "planning", "coding",
                                "reviewing", "diff_preview", "awaiting_approval", "pushing"]
@@ -345,66 +375,89 @@ async def remove_project_task(ctx: dict, project_id: int, chat_id: str, message_
             )
             active_task = result.scalar_one_or_none()
             if active_task:
+                from openclow.providers.actions import ActionButton, project_nav_keyboard
+                kb = project_nav_keyboard(project_id, ActionButton("Cancel Task", "menu:cancel"))
                 await _notify(chat, chat_id, message_id,
                               f"❌ Cannot remove {project_name} — active task running.\n"
-                              f"Cancel it first with /cancel.")
+                              f"Cancel it first.", keyboard=kb)
                 return
 
-        # 1. Stop Docker
+        from openclow.services.checklist_reporter import ChecklistReporter
+        checklist = ChecklistReporter(chat, chat_id, message_id,
+                                     title=f"Removing {project_name}")
+        checklist.set_steps(["Stop containers", "Stop tunnel", "Delete workspace", "Delete from database"])
+        await checklist.start()
+
         workspace = os.path.join(settings.workspace_base_path, "_cache", project_name)
         compose = project.docker_compose_file or "docker-compose.yml"
         compose_project = f"openclow-{project_name}"
 
+        # Step 1: Stop Docker
+        await checklist.start_step(0)
         if os.path.exists(workspace):
             rc, _ = await run_docker(
                 "docker", "compose", "-f", compose, "-p", compose_project,
                 "down", "--remove-orphans",
                 actor="lifecycle", project_id=project_id, cwd=workspace, timeout=120,
             )
-            lines.append(f"{'✅' if rc == 0 else '⚠️'} Docker containers stopped")
+            await checklist.complete_step(0, "containers stopped" if rc == 0 else f"exit code {rc}")
         else:
-            lines.append("⏭️ No workspace found (skipping Docker)")
+            await checklist.complete_step(0, "no containers")
 
-        await _notify(chat, chat_id, message_id, "\n".join(lines))
-
-        # 2. Stop tunnel
+        # Step 2: Stop tunnel
+        await checklist.start_step(1)
         try:
             await stop_tunnel(project_name)
-            lines.append("✅ Tunnel stopped")
+            await checklist.complete_step(1, "tunnel stopped")
         except Exception:
-            lines.append("⏭️ No tunnel to stop")
+            await checklist.complete_step(1, "no tunnel")
 
-        # 3. Clean workspace
+        # Step 3: Delete workspace
+        await checklist.start_step(2)
         if os.path.exists(workspace):
-            shutil.rmtree(workspace, ignore_errors=True)
-            lines.append("✅ Workspace cleaned")
+            try:
+                shutil.rmtree(workspace)
+                await checklist.complete_step(2, "workspace deleted")
+            except Exception as e:
+                log.warning("lifecycle.workspace_cleanup_failed", path=workspace, error=str(e))
+                await checklist.fail_step(2, f"cleanup failed: {str(e)[:50]}")
         else:
-            lines.append("⏭️ No workspace to clean")
+            await checklist.complete_step(2, "no workspace")
 
-        await _notify(chat, chat_id, message_id, "\n".join(lines))
+        # Step 4: Delete from DB (CASCADE handles tasks + task_logs automatically)
+        await checklist.start_step(3)
+        try:
+            async with async_session() as session:
+                result = await session.execute(select(Project).where(Project.id == project_id))
+                proj = result.scalar_one_or_none()
+                if proj:
+                    await session.delete(proj)
+                    await session.commit()
+            await checklist.complete_step(3, "project + tasks + logs removed")
+        except Exception as e:
+            await checklist.fail_step(3, f"DB error: {str(e)[:80]}")
+            log.error("lifecycle.remove_db_failed", error=str(e))
 
-        # 4. Delete from DB
-        async with async_session() as session:
-            result = await session.execute(select(Project).where(Project.id == project_id))
-            proj = result.scalar_one_or_none()
-            if proj:
-                session.delete(proj)  # sync method, no await
-                await session.commit()
-            lines.append("✅ Removed from database")
-
-        lines.append(f"\n🗑 {project_name} fully removed.")
-
-        from aiogram.types import InlineKeyboardButton
-        buttons = [
-            [InlineKeyboardButton(text="➕ Add Project", callback_data="menu:addproject")],
-            [InlineKeyboardButton(text="📂 Projects", callback_data="menu:projects")],
-            [InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
-        ]
-        await _notify(chat, chat_id, message_id, "\n".join(lines), buttons=buttons)
+        checklist._footer = f"🗑 {project_name} permanently removed."
+        await checklist.stop()
+        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+        kb = ActionKeyboard(rows=[
+            ActionRow([
+                ActionButton("➕ Add Project", "menu:addproject"),
+                ActionButton("📂 Projects", "menu:projects"),
+            ]),
+            ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+        ])
+        await checklist._force_render(keyboard=kb)
 
         log.info("lifecycle.remove_project", project=project_name)
+    except asyncio.CancelledError:
+        from openclow.providers.actions import nav_keyboard
+        await _notify(chat, chat_id, message_id,
+                      "⚠️ Remove was interrupted. The project may be partially removed.\nCheck Projects to verify.",
+                      keyboard=nav_keyboard())
+        raise
     except Exception as e:
         log.error("lifecycle.remove_failed", error=str(e))
-        await _notify(chat, chat_id, message_id, f"❌ Remove failed: {str(e)[:200]}")
-    finally:
-        await chat.close()
+        from openclow.providers.actions import nav_keyboard
+        await _notify(chat, chat_id, message_id, f"❌ Remove failed: {str(e)[:200]}", keyboard=nav_keyboard())

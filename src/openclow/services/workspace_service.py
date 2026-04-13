@@ -69,19 +69,34 @@ class WorkspaceService:
         with open(path, "rb") as f:
             return hashlib.md5(f.read()).hexdigest()
 
+    # Lock file → install command mapping (order matters for detection priority)
+    _LOCK_FILE_COMMANDS: list[tuple[str, str]] = [
+        ("composer.lock", "composer install --no-interaction --no-progress"),
+        ("package-lock.json", "npm install"),
+        ("yarn.lock", "yarn install"),
+        ("pnpm-lock.yaml", "pnpm install"),
+        ("bun.lockb", "bun install"),
+        ("Pipfile.lock", "pipenv install"),
+        ("poetry.lock", "poetry install"),
+        ("requirements.txt", "pip install -r requirements.txt"),
+    ]
+
     def _dep_hashes(self, repo_path: str) -> dict:
         """Get hashes of dependency lock files."""
         return {
-            "composer": self._hash_file(os.path.join(repo_path, "composer.lock")),
-            "npm": self._hash_file(os.path.join(repo_path, "package-lock.json")),
+            lock_file: self._hash_file(os.path.join(repo_path, lock_file))
+            for lock_file, _ in self._LOCK_FILE_COMMANDS
         }
 
     async def _install_deps(self, workspace: str):
-        """Install composer and npm dependencies."""
-        if os.path.exists(os.path.join(workspace, "composer.json")):
-            await git_ops.run_cmd("composer install --no-interaction --no-progress", cwd=workspace)
-        if os.path.exists(os.path.join(workspace, "package.json")):
-            await git_ops.run_cmd("npm install", cwd=workspace)
+        """Install dependencies by detecting package managers from lock files.
+
+        Lock files are more reliable than manifest files (e.g. package.json
+        could mean npm, yarn, pnpm, or bun — but only one lock file exists).
+        """
+        for lock_file, install_cmd in self._LOCK_FILE_COMMANDS:
+            if os.path.exists(os.path.join(workspace, lock_file)):
+                await git_ops.run_cmd(install_cmd, cwd=workspace)
 
     async def prepare(self, project: Project, task_id: str) -> Workspace:
         """Prepare a workspace for a task. Uses cache + git worktree for speed."""
@@ -112,7 +127,7 @@ class WorkspaceService:
                     await self._install_deps(work)
                 else:
                     # Symlink deps from cache (fast)
-                    for dep_dir in ["vendor", "node_modules"]:
+                    for dep_dir in ["vendor", "node_modules", ".venv", "venv", "__pypackages__"]:
                         cache_dep = os.path.join(cache, dep_dir)
                         work_dep = os.path.join(work, dep_dir)
                         if os.path.exists(cache_dep) and not os.path.exists(work_dep):
@@ -132,7 +147,7 @@ class WorkspaceService:
                 await git_ops.worktree_add(cache, work)
 
                 # Symlink deps
-                for dep_dir in ["vendor", "node_modules"]:
+                for dep_dir in ["vendor", "node_modules", ".venv", "venv", "__pypackages__"]:
                     cache_dep = os.path.join(cache, dep_dir)
                     work_dep = os.path.join(work, dep_dir)
                     if os.path.exists(cache_dep) and not os.path.exists(work_dep):
@@ -154,10 +169,13 @@ class WorkspaceService:
                 if os.path.exists(compose_path):
                     project_name = f"openclow-{project.name}-{task_id[:8]}"
                     log.info("workspace.docker_up", project=project.name, compose=compose_file)
-                    await git_ops.run_exec(
-                        "docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d",
-                        cwd=work, ignore_errors=True,
-                    )
+                    try:
+                        await git_ops.run_exec(
+                            "docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d",
+                            cwd=work,
+                        )
+                    except RuntimeError as e:
+                        log.warning("workspace.docker_up_failed", project=project.name, error=str(e)[:200])
                     # Wait for containers to be ready
                     await asyncio.sleep(5)
 
@@ -193,7 +211,10 @@ class WorkspaceService:
 
             # Fallback: force remove
             if os.path.exists(work):
-                shutil.rmtree(work, ignore_errors=True)
+                try:
+                    shutil.rmtree(work)
+                except Exception as e:
+                    log.warning("workspace.cleanup_failed", path=work, error=str(e))
 
             log.info("workspace.cleaned", task_id=task_id)
         finally:
@@ -210,5 +231,8 @@ class WorkspaceService:
             path = os.path.join(self.base_path, entry)
             age_hours = (now - os.path.getmtime(path)) / 3600
             if age_hours > max_age_hours:
-                shutil.rmtree(path, ignore_errors=True)
+                try:
+                    shutil.rmtree(path)
+                except Exception as e:
+                    log.warning("workspace.stale_cleanup_failed", path=path, error=str(e))
                 log.info("workspace.stale_cleaned", path=path, age_hours=round(age_hours, 1))

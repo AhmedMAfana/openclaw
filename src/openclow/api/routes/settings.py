@@ -457,15 +457,49 @@ async def _test_llm(config: dict) -> TestResult:
 
     if provider_type == "claude":
         try:
-            import claude_agent_sdk  # noqa: F401
-            return TestResult(status="ok", message="Claude Agent SDK available")
-        except ImportError:
-            return TestResult(status="error", message="claude-agent-sdk is not installed")
+            from openclow.services import bot_actions
+            job = await bot_actions.enqueue_job("claude_auth_check")
+            result = await job.result(timeout=15)
+            if result and result.get("loggedIn"):
+                method = result.get("authMethod", "unknown")
+                return TestResult(status="ok", message=f"Claude authenticated ({method})")
+            else:
+                return TestResult(status="error", message="Claude not authenticated — click Re-authenticate below")
+        except Exception as e:
+            return TestResult(status="error", message=f"Auth check failed: {str(e)[:100]}")
 
     elif provider_type == "openai":
         return TestResult(status="error", message="OpenAI integration coming soon")
 
     return TestResult(status="error", message=f"Unknown LLM provider: {provider_type}")
+
+
+# ---------------------------------------------------------------------------
+# Claude Auth
+# ---------------------------------------------------------------------------
+
+@router.get("/claude-auth-status")
+async def claude_auth_status():
+    """Get Claude authentication status — runs on worker via arq."""
+    try:
+        from openclow.services import bot_actions
+        job = await bot_actions.enqueue_job("claude_auth_check")
+        result = await job.result(timeout=15)
+        return result or {"loggedIn": False, "error": "No response from worker"}
+    except Exception as e:
+        return {"loggedIn": False, "error": str(e)[:200]}
+
+
+@router.post("/claude-auth-login")
+async def claude_auth_login():
+    """Start Claude login on the worker — returns the OAuth URL."""
+    try:
+        from openclow.services import bot_actions
+        job = await bot_actions.enqueue_job("claude_auth_get_url")
+        result = await job.result(timeout=20)
+        return result or {"status": "error", "message": "No response from worker"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)[:200]}
 
 
 # ---------------------------------------------------------------------------
@@ -732,6 +766,57 @@ async def slack_channels_select():
         return HTMLResponse(f'<p class="text-xs text-red-500">Error: {str(e)[:100]}</p>')
 
 
+@router.post("/channels")
+async def link_channel(body: dict):
+    """Link a chat channel to a project."""
+    channel_id = body.get("channel_id", "").strip()
+    project_id = body.get("project_id")
+    provider_type = body.get("provider_type", "slack").strip().lower()
+    if provider_type not in ("slack", "telegram"):
+        raise HTTPException(400, "Invalid provider_type")
+    if not channel_id or not project_id:
+        raise HTTPException(400, "channel_id and project_id are required")
+
+    try:
+        project_id = int(project_id)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Invalid project_id")
+
+    # Look up project name
+    async with async_session() as session:
+        project = await session.get(Project, project_id)
+        if not project or project.status != "active":
+            raise HTTPException(404, "Project not found")
+
+    from openclow.services.channel_service import set_channel_project
+    channel_name = body.get("channel_name", channel_id)
+    await set_channel_project(channel_id, project_id, project.name, provider_type=provider_type, channel_name=channel_name)
+
+    # Return HTML row for HTMX swap
+    display_name = channel_name or channel_id
+    prefix = "#" if provider_type == "slack" else "@"
+    html = (
+        f'<tr id="ch-{provider_type}-{channel_id}" class="border-b border-gray-100">'
+        f'<td class="px-5 py-3"><span class="inline-flex items-center gap-1.5">'
+        f'<span class="text-gray-400">{prefix}</span><span class="font-medium text-gray-900">{display_name}</span>'
+        f'</span><span class="text-xs text-gray-400 ml-2">{channel_id}</span></td>'
+        f'<td class="px-5 py-3 font-medium text-gray-700">{project.name}</td>'
+        f'<td class="px-5 py-3 text-right">'
+        f'<button class="text-red-500 hover:text-red-700 text-xs font-medium" '
+        f'hx-delete="/api/settings/channels/{provider_type}/{channel_id}" '
+        f'hx-confirm="Unlink {prefix}{display_name} from {project.name}?" '
+        f'hx-target="#ch-{provider_type}-{channel_id}" hx-swap="outerHTML">Unlink</button></td></tr>'
+    )
+    return HTMLResponse(html)
+
+
+@router.delete("/channels/{provider_type}/{channel_id}")
+async def unlink_channel(provider_type: str, channel_id: str):
+    from openclow.services.channel_service import unset_channel_project
+    await unset_channel_project(channel_id, provider_type=provider_type)
+    return HTMLResponse("")
+
+
 @router.get("/chat/active-task-count")
 async def active_task_count():
     """Return count of active (non-terminal) tasks per chat provider type."""
@@ -750,6 +835,23 @@ async def active_task_count():
 # ---------------------------------------------------------------------------
 # Auth login (set cookie)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Dev mode password
+# ---------------------------------------------------------------------------
+
+@router.put("/dev-password")
+async def set_dev_password(body: dict):
+    """Set or clear the Slack dev mode password."""
+    password = body.get("password", "").strip()
+    if password:
+        await config_service.set_config("system", "dev_password", {"value": password})
+        return {"status": "ok", "message": "Dev password set"}
+    else:
+        # Clear the password (disable dev mode)
+        await config_service.set_config("system", "dev_password", {"value": ""})
+        return {"status": "ok", "message": "Dev password cleared — dev mode disabled"}
+
 
 @router.post("/login")
 async def settings_login(body: dict):

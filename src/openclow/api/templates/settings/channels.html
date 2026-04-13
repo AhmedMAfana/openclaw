@@ -1,0 +1,254 @@
+{% extends "base.html" %}
+{% block title %}Channels{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-8">
+  <div>
+    <h2 class="text-2xl font-bold text-gray-900">Channel Links</h2>
+    <p class="text-gray-500 mt-1">Link Slack channels or Telegram groups to projects — messages in linked channels auto-scope to the project</p>
+  </div>
+  <button onclick="document.getElementById('link-modal').classList.remove('hidden'); initModal()"
+    class="px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors text-sm font-medium">
+    Link Channel
+  </button>
+</div>
+
+<!-- Bindings Table -->
+<div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+  {% if bindings %}
+  <table class="w-full text-sm">
+    <thead class="bg-gray-50 border-b border-gray-200">
+      <tr>
+        <th class="text-left px-5 py-3 text-gray-500 font-medium">Channel</th>
+        <th class="text-left px-5 py-3 text-gray-500 font-medium">Provider</th>
+        <th class="text-left px-5 py-3 text-gray-500 font-medium">Project</th>
+        <th class="text-right px-5 py-3 text-gray-500 font-medium">Actions</th>
+      </tr>
+    </thead>
+    <tbody id="channels-table" class="divide-y divide-gray-100">
+      {% for b in bindings %}
+      <tr id="ch-{{ b.provider_type }}-{{ b.channel_id }}" class="border-b border-gray-100">
+        <td class="px-5 py-3">
+          <span class="inline-flex items-center gap-1.5">
+            <span class="text-gray-400">{% if b.provider_type == 'slack' %}#{% else %}@{% endif %}</span>
+            <span class="font-medium text-gray-900">{{ b.channel_name or b.channel_id }}</span>
+          </span>
+          <span class="text-xs text-gray-400 ml-2">{{ b.channel_id }}</span>
+        </td>
+        <td class="px-5 py-3 capitalize text-gray-600">{{ b.provider_type }}</td>
+        <td class="px-5 py-3 font-medium text-gray-700">{{ b.project_name }}</td>
+        <td class="px-5 py-3 text-right">
+          <button class="text-red-500 hover:text-red-700 text-xs font-medium"
+            hx-delete="/api/settings/channels/{{ b.provider_type }}/{{ b.channel_id }}"
+            hx-confirm="Unlink {% if b.provider_type == 'slack' %}#{% else %}@{% endif %}{{ b.channel_name or b.channel_id }} from {{ b.project_name }}?"
+            hx-target="#ch-{{ b.provider_type }}-{{ b.channel_id }}"
+            hx-swap="outerHTML"
+          >Unlink</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div id="empty-state" class="p-12 text-center">
+    <svg class="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14"/>
+    </svg>
+    <p class="text-gray-500">No channels linked yet</p>
+    <button onclick="document.getElementById('link-modal').classList.remove('hidden'); initModal()"
+      class="mt-3 text-sm text-brand-600 hover:text-brand-700 font-medium">Link your first channel</button>
+  </div>
+  <!-- Hidden table that appears when first row is added -->
+  <table class="w-full text-sm hidden" id="channels-table-wrapper">
+    <thead class="bg-gray-50 border-b border-gray-200">
+      <tr>
+        <th class="text-left px-5 py-3 text-gray-500 font-medium">Channel</th>
+        <th class="text-left px-5 py-3 text-gray-500 font-medium">Provider</th>
+        <th class="text-left px-5 py-3 text-gray-500 font-medium">Project</th>
+        <th class="text-right px-5 py-3 text-gray-500 font-medium">Actions</th>
+      </tr>
+    </thead>
+    <tbody id="channels-table" class="divide-y divide-gray-100"></tbody>
+  </table>
+  {% endif %}
+</div>
+
+<!-- Link Channel Modal -->
+<div id="link-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+  <div class="bg-white rounded-2xl shadow-xl w-full max-w-md mx-4">
+    <div class="p-6 border-b border-gray-100">
+      <div class="flex items-center justify-between">
+        <h3 class="text-lg font-semibold text-gray-900">Link Channel to Project</h3>
+        <button onclick="document.getElementById('link-modal').classList.add('hidden')" class="text-gray-400 hover:text-gray-600">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+    </div>
+    <form id="link-form" onsubmit="return submitLink(event)">
+      <div class="p-6 space-y-4">
+        <!-- Provider select -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Provider <span class="text-red-400">*</span></label>
+          <select id="link-provider" name="provider_type" class="form-input" onchange="onProviderChange()">
+            <option value="slack">Slack</option>
+            <option value="telegram">Telegram</option>
+          </select>
+        </div>
+        <!-- Channel select / input -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Channel <span class="text-red-400">*</span></label>
+          <div id="channel-select-area">
+            <div class="flex items-center gap-2 text-sm text-gray-400 py-2">
+              <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+              Loading channels...
+            </div>
+          </div>
+        </div>
+        <!-- Project select -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Project <span class="text-red-400">*</span></label>
+          <select id="link-project" name="project_id" class="form-input" required>
+            <option value="">Select a project...</option>
+            {% for p in projects %}
+            <option value="{{ p.id }}">{{ p.name }} — {{ p.github_repo }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <!-- Error area -->
+        <div id="link-error" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
+      </div>
+      <div class="p-6 border-t border-gray-100 flex justify-end gap-3">
+        <button type="button" onclick="document.getElementById('link-modal').classList.add('hidden')"
+          class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+        <button type="submit" id="link-submit"
+          class="px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700 text-sm font-medium">
+          Link Channel
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+let slackChannels = [];
+
+function initModal() {
+  onProviderChange();
+}
+
+function onProviderChange() {
+  const provider = document.getElementById('link-provider').value;
+  const area = document.getElementById('channel-select-area');
+  if (provider === 'slack') {
+    loadSlackChannels();
+  } else {
+    area.innerHTML = `
+      <input id="link-channel" name="channel_id" type="text" class="form-input" placeholder="-1001234567890 or @channelusername" required>
+      <input id="link-channel-name" name="channel_name" type="text" class="form-input mt-2" placeholder="Display name (optional)">
+      <p class="text-xs text-gray-400 mt-1">For groups use the numeric ID (e.g., -1001234567890)</p>
+    `;
+  }
+}
+
+async function loadSlackChannels() {
+  const area = document.getElementById('channel-select-area');
+  area.innerHTML = '<div class="flex items-center gap-2 text-sm text-gray-400 py-2"><svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Loading channels...</div>';
+
+  try {
+    const resp = await fetch('/api/settings/slack/channels');
+    const data = await resp.json();
+    if (!data.ok) {
+      area.innerHTML = '<p class="text-sm text-red-500">' + (data.error || 'Failed to load channels') + '</p>';
+      return;
+    }
+    slackChannels = data.channels || [];
+    if (slackChannels.length === 0) {
+      area.innerHTML = '<p class="text-sm text-gray-500">No channels found. Invite the bot to a channel first.</p>';
+      return;
+    }
+
+    let html = '<select id="link-channel" name="channel_id" class="form-input" required><option value="">Select a channel...</option>';
+    slackChannels
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .forEach(ch => {
+        const badge = ch.is_member ? '' : ' (bot not joined)';
+        html += '<option value="' + ch.id + '" data-name="' + ch.name + '">#' + ch.name + badge + '</option>';
+      });
+    html += '</select>';
+    html += '<input id="link-channel-name" name="channel_name" type="hidden" value="">';
+    html += '<button type="button" onclick="loadSlackChannels()" class="mt-1.5 text-xs text-brand-600 hover:text-brand-700 font-medium">Reload channels</button>';
+    area.innerHTML = html;
+    document.getElementById('link-channel').addEventListener('change', function() {
+      const opt = this.options[this.selectedIndex];
+      document.getElementById('link-channel-name').value = opt.dataset.name || '';
+    });
+  } catch (e) {
+    area.innerHTML = '<p class="text-sm text-red-500">Error loading channels: ' + e.message + '</p>';
+  }
+}
+
+async function submitLink(e) {
+  e.preventDefault();
+  const errEl = document.getElementById('link-error');
+  errEl.classList.add('hidden');
+
+  const providerSelect = document.getElementById('link-provider');
+  const channelInput = document.getElementById('link-channel');
+  const channelNameInput = document.getElementById('link-channel-name');
+  const projectSelect = document.getElementById('link-project');
+
+  if (!channelInput || !channelInput.value || !projectSelect.value) {
+    errEl.textContent = 'Select both a channel and a project.';
+    errEl.classList.remove('hidden');
+    return false;
+  }
+
+  const provider = providerSelect.value;
+  const channelId = channelInput.value.trim();
+  const channelName = channelNameInput ? (channelNameInput.value.trim() || channelId) : channelId;
+  const projectId = projectSelect.value;
+
+  const btn = document.getElementById('link-submit');
+  btn.disabled = true;
+  btn.textContent = 'Linking...';
+
+  try {
+    const resp = await fetch('/api/settings/channels', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({channel_id: channelId, project_id: parseInt(projectId), channel_name: channelName, provider_type: provider}),
+    });
+
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to link channel');
+    }
+
+    const html = await resp.text();
+
+    // Hide empty state, show table
+    const empty = document.getElementById('empty-state');
+    if (empty) empty.remove();
+    const wrapper = document.getElementById('channels-table-wrapper');
+    if (wrapper) wrapper.classList.remove('hidden');
+
+    // Append new row
+    const tbody = document.getElementById('channels-table');
+    tbody.insertAdjacentHTML('beforeend', html);
+    htmx.process(tbody.lastElementChild);
+
+    // Close modal + reset
+    document.getElementById('link-modal').classList.add('hidden');
+    channelInput.value = '';
+    projectSelect.value = '';
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Link Channel';
+  }
+  return false;
+}
+</script>
+{% endblock %}

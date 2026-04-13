@@ -23,6 +23,6 @@ class Project(Base):
     docker_compose_file: Mapped[str | None] = mapped_column(String(255), default="docker-compose.yml")
     app_container_name: Mapped[str | None] = mapped_column(String(255))  # e.g. "app" or "php"
     app_port: Mapped[int | None] = mapped_column(Integer)  # e.g. 8000
-    # Lifecycle: active = linked, inactive = unlinked (kept for history)
+    # Lifecycle: bootstrapping → active (success) or failed (error); inactive = unlinked
     status: Mapped[str] = mapped_column(String(20), default="active", server_default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

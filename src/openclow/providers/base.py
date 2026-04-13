@@ -146,6 +146,12 @@ class ChatProvider(ABC):
         """Edit a message with optional action buttons."""
         ...
 
+    async def edit_message_blocks(
+        self, chat_id: str, message_id: str, blocks: list[dict]
+    ) -> None:
+        """Update a message with pre-built rich blocks. Default: no-op (Telegram ignores)."""
+        pass
+
     @abstractmethod
     async def send_plan_preview(
         self, chat_id: str, message_id: str, task_id: str, plan: str

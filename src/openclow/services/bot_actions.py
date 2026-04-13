@@ -32,16 +32,43 @@ async def enqueue_job(job_name: str, *args: Any, timeout: float = 5.0) -> Any:
 # ── Task queries ─────────────────────────────────────────────────
 
 
-async def get_active_tasks(chat_id: str, limit: int = 5) -> list[Task]:
-    """Get active tasks for a chat."""
+async def get_active_tasks(chat_id: str, limit: int = 5, user_id: str | None = None) -> list[Task]:
+    """Get active tasks for a chat (optionally filtered by user)."""
     active_statuses = [
-        "pending", "preparing", "planning", "coding", "reviewing",
-        "diff_preview", "awaiting_approval", "pushing",
+        "pending", "preparing", "planning", "plan_review", "coding",
+        "reviewing", "diff_preview", "awaiting_approval", "pushing",
+    ]
+    async with async_session() as session:
+        query = (
+            select(Task)
+            .where(Task.chat_id == chat_id)
+            .where(Task.status.in_(active_statuses))
+            .order_by(Task.created_at.desc())
+            .limit(limit)
+        )
+        # Filter by user if provided
+        if user_id:
+            from openclow.models import User
+            user_result = await session.execute(
+                select(User).where(User.chat_provider_uid == user_id)
+            )
+            db_user = user_result.scalar_one_or_none()
+            if db_user:
+                query = query.where(Task.user_id == db_user.id)
+
+        result = await session.execute(query)
+        return list(result.scalars().all())
+
+
+async def get_all_active_tasks(limit: int = 5) -> list[Task]:
+    """Get active tasks across all channels (for Home Tab / dashboard)."""
+    active_statuses = [
+        "pending", "preparing", "planning", "plan_review", "coding",
+        "reviewing", "diff_preview", "awaiting_approval", "pushing",
     ]
     async with async_session() as session:
         result = await session.execute(
             select(Task)
-            .where(Task.chat_id == chat_id)
             .where(Task.status.in_(active_statuses))
             .order_by(Task.created_at.desc())
             .limit(limit)
@@ -62,13 +89,13 @@ async def get_task_status(task_id: str) -> str | None:
         return None
 
 
-# Expected status for each review action
-_EXPECTED_STATUS = {
-    "approve_plan": "plan_review",
-    "approve": "diff_preview",
-    "discard": "diff_preview",
-    "merge": "awaiting_approval",
-    "reject": "awaiting_approval",
+# Expected status(es) for each review action
+_EXPECTED_STATUS: dict[str, set[str]] = {
+    "approve_plan": {"plan_review"},
+    "approve": {"diff_preview"},
+    "discard": {"diff_preview", "plan_review"},  # Can reject from plan OR diff
+    "merge": {"awaiting_approval"},
+    "reject": {"awaiting_approval"},
 }
 
 # Job name for each review action
@@ -81,23 +108,53 @@ _JOB_NAMES = {
 }
 
 
-async def review_guard(action: str, task_id: str) -> tuple[bool, str]:
-    """Validate task status before enqueueing a review action.
+async def review_guard(action: str, task_id: str, user_id: str | None = None, is_admin: bool = False) -> tuple[bool, str]:
+    """Validate task status & ownership before enqueueing a review action.
 
     Returns (ok, error_message). If ok is True, the job has been enqueued.
+    - user_id: optional, for ownership validation. Admins can always act.
     """
-    expected = _EXPECTED_STATUS.get(action)
-    current_status = await get_task_status(task_id)
+    # Load task to check status and ownership
+    async with async_session() as session:
+        result = await session.execute(select(Task).where(Task.id == uuid.UUID(task_id)))
+        task = result.scalar_one_or_none()
 
-    if expected and current_status != expected:
-        return False, f"Task is already being processed ({current_status or 'unknown'})"
+    if not task:
+        return False, "Task not found"
+
+    # Check ownership (if user_id provided and not admin)
+    if user_id and not is_admin:
+        from openclow.models import User
+        async with async_session() as session:
+            user_result = await session.execute(
+                select(User).where(User.chat_provider_uid == user_id)
+            )
+            db_user = user_result.scalar_one_or_none()
+        if db_user and task.user_id != db_user.id:
+            return False, f"This task belongs to another user — ask them to approve it"
+
+    expected = _EXPECTED_STATUS.get(action)
+    if expected and task.status not in expected:
+        return False, f"Task is already being processed ({task.status or 'unknown'})"
 
     job_name = _JOB_NAMES.get(action)
     if not job_name:
         return False, f"Unknown action: {action}"
 
     try:
-        await enqueue_job(job_name, task_id)
+        job = await enqueue_job(job_name, task_id)
+        # Save job ID so cancel works on review-triggered tasks
+        try:
+            from openclow.models import Task, async_session
+            from sqlalchemy import select
+            async with async_session() as session:
+                result = await session.execute(select(Task).where(Task.id == uuid.UUID(task_id)))
+                task = result.scalar_one_or_none()
+                if task:
+                    task.arq_job_id = job.job_id
+                    await session.commit()
+        except Exception:
+            pass
         return True, ""
     except Exception as e:
         return False, str(e)
@@ -142,17 +199,28 @@ async def update_task_message(task_id: uuid.UUID, message_id: str, job_id: str):
         await session.commit()
 
 
-async def cancel_latest_task(chat_id: str) -> Task | None:
-    """Cancel the latest cancellable task. Returns the task or None."""
+async def cancel_latest_task(chat_id: str, user_id: str | None = None) -> Task | None:
+    """Cancel the latest cancellable task for the user. Returns the task or None."""
     cancellable = ["pending", "preparing", "coding", "reviewing"]
     async with async_session() as session:
-        result = await session.execute(
+        query = (
             select(Task)
             .where(Task.chat_id == chat_id)
             .where(Task.status.in_(cancellable))
             .order_by(Task.created_at.desc())
             .limit(1)
         )
+        # Filter by user if provided — only allow cancelling own tasks
+        if user_id:
+            from openclow.models import User
+            user_result = await session.execute(
+                select(User).where(User.chat_provider_uid == user_id)
+            )
+            db_user = user_result.scalar_one_or_none()
+            if db_user:
+                query = query.where(Task.user_id == db_user.id)
+
+        result = await session.execute(query)
         task = result.scalar_one_or_none()
 
     if not task:
@@ -189,6 +257,26 @@ async def get_all_projects() -> list[Project]:
 async def get_project_by_id(project_id: int) -> Project | None:
     """Get a project by ID."""
     return await project_service.get_project_by_id(project_id)
+
+
+async def get_project_by_name(name: str) -> Project | None:
+    """Get a project by name."""
+    return await project_service.get_project_by_name(name)
+
+
+async def get_task_by_id(task_id: str | Any) -> Task | None:
+    """Get a task by ID."""
+    import uuid
+    try:
+        if isinstance(task_id, str):
+            task_id = uuid.UUID(task_id)
+        async with async_session() as session:
+            result = await session.execute(
+                select(Task).where(Task.id == task_id)
+            )
+            return result.scalar_one_or_none()
+    except Exception:
+        return None
 
 
 # ── URL lookups ──────────────────────────────────────────────────
@@ -274,3 +362,38 @@ async def lookup_user(provider_type: str, provider_uid: str) -> User | None:
             )
         )
         return result.scalar_one_or_none()
+
+
+# ── DM project cache (Redis) ─────────────────────────────────────
+
+_DM_KEY = "openclow:dm_project:{provider_type}:{user_id}"
+_DM_TTL = 3600  # 1 hour
+
+
+async def get_dm_project(provider_type: str, user_id: str) -> int | None:
+    """Get cached DM project selection for a user."""
+    try:
+        import redis.asyncio as aioredis
+        from openclow.settings import settings
+        r = aioredis.from_url(settings.redis_url)
+        raw = await r.get(_DM_KEY.format(provider_type=provider_type, user_id=user_id))
+        await r.aclose()
+        return int(raw) if raw else None
+    except Exception:
+        return None
+
+
+async def set_dm_project(provider_type: str, user_id: str, project_id: int) -> None:
+    """Cache DM project selection for a user."""
+    try:
+        import redis.asyncio as aioredis
+        from openclow.settings import settings
+        r = aioredis.from_url(settings.redis_url)
+        await r.setex(
+            _DM_KEY.format(provider_type=provider_type, user_id=user_id),
+            _DM_TTL,
+            str(project_id),
+        )
+        await r.aclose()
+    except Exception:
+        pass

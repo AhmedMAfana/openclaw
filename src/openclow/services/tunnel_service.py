@@ -88,7 +88,10 @@ async def start_tunnel(
             continue
 
     if not url:
-        proc.kill()
+        try:
+            proc.kill()
+        except (OSError, ProcessLookupError):
+            pass
         log.error("tunnel.no_url", service=service_name, target=target_url)
         return None
 

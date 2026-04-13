@@ -58,10 +58,15 @@ async def _get_status_context() -> dict:
     }
 
     for key, val in configs.items():
-        cat = key.split(".")[0]
+        parts = key.split(".")
+        cat = parts[0]
         if cat in categories:
             categories[cat]["configured"] = True
-            categories[cat]["type"] = val.get("type", "unknown")
+            # New format: "chat.provider.telegram" -> type is parts[2]
+            if len(parts) == 3 and parts[1] == "provider":
+                categories[cat]["type"] = parts[2]
+            else:
+                categories[cat]["type"] = val.get("type", "unknown")
             categories[cat]["config"] = val
 
     async with async_session() as session:
@@ -98,9 +103,20 @@ async def dashboard(request: Request):
 # Provider settings pages
 # ---------------------------------------------------------------------------
 
+async def _get_provider_config_safe(category: str) -> dict:
+    """Get provider config — tries new per-type format, falls back to legacy."""
+    try:
+        ptype, config = await config_service.get_provider_config(category)
+        config["type"] = ptype
+        return config
+    except (ValueError, Exception):
+        # Fallback to legacy format
+        return await config_service.get_config(category, "provider") or {}
+
+
 @router.get("/settings/llm", response_class=HTMLResponse)
 async def llm_settings(request: Request):
-    config = await config_service.get_config("llm", "provider") or {}
+    config = await _get_provider_config_safe("llm")
     return templates.TemplateResponse(request, "settings/llm.html", {
         "active_page": "llm",
         "config": _mask_config(config),
@@ -111,7 +127,7 @@ async def llm_settings(request: Request):
 
 @router.get("/settings/chat", response_class=HTMLResponse)
 async def chat_settings(request: Request):
-    config = await config_service.get_config("chat", "provider") or {}
+    config = await _get_provider_config_safe("chat")
     return templates.TemplateResponse(request, "settings/chat.html", {
         "active_page": "chat",
         "config": _mask_config(config),
@@ -122,7 +138,7 @@ async def chat_settings(request: Request):
 
 @router.get("/settings/git", response_class=HTMLResponse)
 async def git_settings(request: Request):
-    config = await config_service.get_config("git", "provider") or {}
+    config = await _get_provider_config_safe("git")
     return templates.TemplateResponse(request, "settings/git.html", {
         "active_page": "git",
         "config": _mask_config(config),
@@ -133,8 +149,13 @@ async def git_settings(request: Request):
 
 @router.get("/settings/system", response_class=HTMLResponse)
 async def system_settings(request: Request):
+    # Check if dev password is set
+    dev_pw = await config_service.get_config("system", "dev_password")
+    dev_password_set = bool(dev_pw and dev_pw.get("value"))
+
     return templates.TemplateResponse(request, "settings/system.html", {
         "active_page": "system",
+        "dev_password_set": dev_password_set,
         "settings": {
             "database_url": settings.database_url,
             "redis_url": settings.redis_url,
@@ -168,14 +189,46 @@ async def users_page(request: Request):
         result = await session.execute(select(User).order_by(User.id))
         users = result.scalars().all()
 
-    # Get current chat provider type for labels
-    chat_config = await config_service.get_config("chat", "provider") or {}
+    # Get current (active) chat provider type
+    chat_config = await _get_provider_config_safe("chat")
     chat_type = chat_config.get("type", "telegram")
+
+    # Detect ALL configured chat providers (even inactive)
+    configured_chat_types = []
+    for ptype in ("telegram", "slack"):
+        cfg = await config_service.get_provider_config_by_type("chat", ptype)
+        if cfg:
+            configured_chat_types.append(ptype)
+    if not configured_chat_types:
+        configured_chat_types = [chat_type]
 
     return templates.TemplateResponse(request, "settings/users.html", {
         "active_page": "users",
         "users": users,
         "chat_type": chat_type,
+        "configured_chat_types": configured_chat_types,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Channels
+# ---------------------------------------------------------------------------
+
+@router.get("/settings/channels", response_class=HTMLResponse)
+async def channels_page(request: Request):
+    from openclow.services.channel_service import get_all_channel_bindings
+    bindings = await get_all_channel_bindings()
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Project).where(Project.status == "active").order_by(Project.name)
+        )
+        projects = result.scalars().all()
+
+    return templates.TemplateResponse(request, "settings/channels.html", {
+        "active_page": "channels",
+        "bindings": bindings,
+        "projects": projects,
     })
 
 

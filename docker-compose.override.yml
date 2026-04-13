@@ -4,7 +4,7 @@ services:
     command: >
       bash -c "
         pip install -e /app --quiet 2>&1 | tail -1;
-        exec watchfiles 'python -m openclow.bot.main' src/
+        exec watchfiles --ignore-paths __pycache__,*.egg-info,.pytest_cache --grace-period 3 'python -m openclow.bot.main' src/
       "
     user: root
     volumes:

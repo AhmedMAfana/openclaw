@@ -294,7 +294,7 @@ async def run_docker(
             env=env,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        output = (stdout.decode() + stderr.decode()).strip()[-4000:]
+        output = (stdout.decode() + stderr.decode()).strip()[-16000:]
         rc = proc.returncode
     except asyncio.TimeoutError:
         try:

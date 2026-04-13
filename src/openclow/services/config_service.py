@@ -22,16 +22,18 @@ async def get_config(category: str, key: str) -> dict | None:
         return config.value if config else None
 
 
+def _select_config_stmt(category: str, key: str):
+    return select(PlatformConfig).where(
+        PlatformConfig.category == category,
+        PlatformConfig.key == key,
+    )
+
+
 async def set_config(category: str, key: str, value: dict) -> None:
     from sqlalchemy.exc import IntegrityError
 
     async with async_session() as session:
-        result = await session.execute(
-            select(PlatformConfig).where(
-                PlatformConfig.category == category,
-                PlatformConfig.key == key,
-            )
-        )
+        result = await session.execute(_select_config_stmt(category, key))
         existing = result.scalar_one_or_none()
 
         if existing:
@@ -46,12 +48,7 @@ async def set_config(category: str, key: str, value: dict) -> None:
         except IntegrityError:
             # Race condition: another worker inserted first — retry as update
             await session.rollback()
-            result = await session.execute(
-                select(PlatformConfig).where(
-                    PlatformConfig.category == category,
-                    PlatformConfig.key == key,
-                )
-            )
+            result = await session.execute(_select_config_stmt(category, key))
             existing = result.scalar_one_or_none()
             if existing:
                 existing.value = value
@@ -154,6 +151,27 @@ async def get_provider_config_by_type(category: str, provider_type: str) -> dict
     if config and config.get("type") == provider_type:
         return {k: v for k, v in config.items() if k != "type"}
     return None
+
+
+async def get_all_chat_configs() -> list[tuple[str, dict]]:
+    """Get all chat provider configs (active or not) that have provider.{type} keys.
+
+    Returns list of (provider_type, config_dict) for every configured chat provider.
+    """
+    async with async_session() as session:
+        result = await session.execute(
+            select(PlatformConfig).where(
+                PlatformConfig.category == "chat",
+                PlatformConfig.key.like("provider.%"),
+            )
+        )
+        rows = result.scalars().all()
+
+    configs = []
+    for row in rows:
+        ptype = row.key.split(".", 1)[1]
+        configs.append((ptype, row.value))
+    return configs
 
 
 async def get_all_config() -> dict[str, dict]:

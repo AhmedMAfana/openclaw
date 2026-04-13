@@ -69,32 +69,23 @@ def format_health_report(report: HealthReport) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Telegram update helpers
+# Message update helpers
 # ---------------------------------------------------------------------------
 
 from openclow.services.base_reporter import edit_message as _notify  # noqa: E402
 
 
 async def _notify_with_buttons(chat, chat_id, message_id, text, project_id, tunnel_url=None):
-    """Update Telegram message with health-check action buttons."""
-    from aiogram.types import InlineKeyboardButton
+    """Update message with health-check action buttons — compact single row."""
+    from openclow.providers.actions import ActionButton, project_nav_keyboard
 
-    buttons = []
+    extra = []
     if tunnel_url:
-        buttons.append([InlineKeyboardButton(text="🌐 Open App", url=tunnel_url)])
-    buttons.append([
-        InlineKeyboardButton(text="🔄 Refresh", callback_data=f"health_ref:{project_id}"),
-    ])
-    if tunnel_url:
-        buttons.append([
-            InlineKeyboardButton(text="⏹ Stop Tunnel", callback_data=f"tunnel_stop:{project_id}"),
-        ])
-    buttons.append([
-        InlineKeyboardButton(text="◀️ Back", callback_data=f"project_detail:{project_id}"),
-        InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main"),
-    ])
+        extra.append(ActionButton("Open App", "open_app", url=tunnel_url))
+    extra.append(ActionButton("Refresh", f"health_ref:{project_id}"))
+    kb = project_nav_keyboard(project_id, *extra)
 
-    await _notify(chat, chat_id, message_id, text, buttons=buttons)
+    await _notify(chat, chat_id, message_id, text, keyboard=kb)
 
 
 # ---------------------------------------------------------------------------
@@ -211,13 +202,13 @@ async def _run_repair_loop(
 
             await _notify(chat, chat_id, message_id, "\n".join(status_lines))
 
-    # ── If we repaired containers, re-run health checks ──
-    if repaired_any:
+    # ── Always re-check health after repair attempts ──
+    if container_problems:
         status_lines.append("")
         status_lines.append("🔄 Re-checking health after repairs...")
         await _notify(chat, chat_id, message_id, "\n".join(status_lines))
 
-        await asyncio.sleep(5)
+        await asyncio.sleep(5 if repaired_any else 3)
         report = await asyncio.wait_for(
             run_full_health_check(project, with_tunnel=True),
             timeout=30,
@@ -254,13 +245,13 @@ async def _run_repair_loop(
 # Main worker tasks
 # ---------------------------------------------------------------------------
 
-async def check_project_health(ctx: dict, project_id: int, chat_id: str, message_id: str):
-    """Worker task: run health check → auto-repair if broken → report to Telegram."""
+async def check_project_health(ctx: dict, project_id: int, chat_id: str, message_id: str, chat_provider_type: str = "telegram"):
+    """Worker task: run health check → auto-repair if broken → report."""
     from openclow.models import Project, async_session
     from openclow.providers import factory
     from sqlalchemy import select
 
-    chat = await factory.get_chat()
+    chat = await factory.get_chat_by_type(chat_provider_type)
 
     try:
         # Load project (expunge so it's usable after session closes)
@@ -299,8 +290,15 @@ async def check_project_health(ctx: dict, project_id: int, chat_id: str, message
                 project, report, problems, chat, chat_id, message_id, status_lines,
             )
 
-            # Rebuild the display with updated report (single report, no duplication)
+            # Rebuild with fresh report + repair context
             final_text = format_health_report(report)
+            # Append repair summary so user sees what was attempted
+            repair_lines = [
+                line for line in status_lines
+                if line.startswith(("🔧", "  ✅", "  ❌", "⚠️", "  •", "  →", "✅ All"))
+            ]
+            if repair_lines:
+                final_text += f"\n\n{'─' * 20}\n" + "\n".join(repair_lines)
         else:
             final_text = "\n".join(status_lines)
             final_text += "\n\n✅ Everything looks healthy!"
@@ -316,29 +314,28 @@ async def check_project_health(ctx: dict, project_id: int, chat_id: str, message
                  problems=len(problems), tunnel=report.tunnel_url is not None)
 
     except asyncio.TimeoutError:
-        from aiogram.types import InlineKeyboardButton
-        await _notify(chat, chat_id, message_id, "Health check timed out.", buttons=[
-            [InlineKeyboardButton(text="🔄 Retry", callback_data=f"health:{project_id}")],
-            [InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
-        ])
+        from openclow.providers.actions import ActionButton, project_nav_keyboard
+        await _notify(chat, chat_id, message_id, "Health check timed out.",
+                      keyboard=project_nav_keyboard(project_id, ActionButton("Retry", f"health:{project_id}")))
+    except asyncio.CancelledError:
+        from openclow.providers.actions import ActionButton, project_nav_keyboard
+        await _notify(chat, chat_id, message_id, "⏹ Health check cancelled.",
+                      keyboard=project_nav_keyboard(project_id, ActionButton("Retry", f"health:{project_id}")))
+        raise
     except Exception as e:
         log.error("health.check_failed", error=str(e))
-        from aiogram.types import InlineKeyboardButton
-        await _notify(chat, chat_id, message_id, f"Health check failed: {str(e)[:150]}", buttons=[
-            [InlineKeyboardButton(text="🔄 Retry", callback_data=f"health:{project_id}")],
-            [InlineKeyboardButton(text="◀️ Main Menu", callback_data="menu:main")],
-        ])
-    finally:
-        await chat.close()
+        from openclow.providers.actions import ActionButton, project_nav_keyboard
+        await _notify(chat, chat_id, message_id, f"Health check failed: {str(e)[:150]}",
+                      keyboard=project_nav_keyboard(project_id, ActionButton("Retry", f"health:{project_id}")))
 
 
-async def stop_tunnel_task(ctx: dict, project_id: int, chat_id: str, message_id: str):
+async def stop_tunnel_task(ctx: dict, project_id: int, chat_id: str, message_id: str, chat_provider_type: str = "telegram"):
     """Worker task: stop a running tunnel for a project."""
     from openclow.models import Project, async_session
     from openclow.providers import factory
     from sqlalchemy import select
 
-    chat = await factory.get_chat()
+    chat = await factory.get_chat_by_type(chat_provider_type)
 
     try:
         async with async_session() as session:
@@ -347,12 +344,21 @@ async def stop_tunnel_task(ctx: dict, project_id: int, chat_id: str, message_id:
             if project:
                 session.expunge(project)
 
+        from openclow.providers.actions import ActionButton, project_nav_keyboard, nav_keyboard
+
         if project:
             await _stop_tunnel(project.name)
-            await _notify(chat, chat_id, message_id, f"Tunnel stopped for {project.name}.")
+            kb = project_nav_keyboard(project_id, ActionButton("Docker Up", f"project_up:{project_id}"))
+            await _notify(chat, chat_id, message_id, f"✅ Tunnel stopped for {project.name}.", keyboard=kb)
         else:
-            await _notify(chat, chat_id, message_id, "Project not found.")
+            await _notify(chat, chat_id, message_id, "Project not found.", keyboard=nav_keyboard())
+    except asyncio.CancelledError:
+        from openclow.providers.actions import project_nav_keyboard
+        await _notify(chat, chat_id, message_id, "⏹ Tunnel stop cancelled.",
+                      keyboard=project_nav_keyboard(project_id))
+        raise
     except Exception as e:
         log.error("health.stop_tunnel_failed", error=str(e))
-    finally:
-        await chat.close()
+        from openclow.providers.actions import project_nav_keyboard
+        await _notify(chat, chat_id, message_id, f"❌ Failed to stop tunnel: {str(e)[:200]}",
+                      keyboard=project_nav_keyboard(project_id))

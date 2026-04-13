@@ -159,9 +159,8 @@ Compose file: {compose_file}
 ## Your task:
 1. Diagnose the ROOT CAUSE from the logs
 2. Fix it by editing files in the workspace (Dockerfile, requirements.txt, .env, config files, etc.)
-3. After fixing, rebuild and restart:
-   docker compose -f {compose_file} -p {compose_project} up -d --build {service_name}
-4. Check if it's now healthy
+3. After fixing, rebuild and restart using the compose_up MCP tool with project={compose_project}, compose_file={compose_file}, service={service_name}, build=true
+4. Check if it's now healthy using container_health MCP tool
 
 ## Rules:
 - Be specific. Don't guess — read the error carefully.
@@ -211,15 +210,30 @@ async def _run_claude_diagnosis(
         from claude_agent_sdk import query, ClaudeAgentOptions
         from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock, ResultBlock
 
+        from openclow.providers.llm.claude import _mcp_docker
+
         options = ClaudeAgentOptions(
             cwd=workspace,
             system_prompt=(
                 "You are a DevOps repair agent. Fix Docker container issues. "
-                "You have full access to Bash, file editing, and Docker. "
+                "Use the docker MCP tools (docker_exec, container_logs, etc.) instead of Bash. "
                 "Be precise and surgical — fix only what's broken."
             ),
             model="claude-sonnet-4-6",  # Error diagnosis is procedural — Sonnet is faster
-            allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+            allowed_tools=[
+                "Read", "Write", "Edit", "Glob", "Grep",
+                # Docker MCP tools — use instead of Bash
+                "mcp__docker__list_containers",
+                "mcp__docker__container_logs",
+                "mcp__docker__container_health",
+                "mcp__docker__docker_exec",
+                "mcp__docker__restart_container",
+                "mcp__docker__compose_up",
+                "mcp__docker__compose_ps",
+            ],
+            mcp_servers={
+                "docker": _mcp_docker(),
+            },
             permission_mode="bypassPermissions",
             max_turns=max_turns,
         )
@@ -264,7 +278,7 @@ async def _run_claude_cli(prompt: str, workspace: str, max_turns: int = 12) -> s
         "claude", "-p", prompt,
         "--output-format", "json",
         "--max-turns", str(max_turns),
-        "--allowedTools", "Bash,Read,Write,Edit,Glob,Grep",
+        "--allowedTools", "Read,Write,Edit,Glob,Grep,mcp__docker__list_containers,mcp__docker__container_logs,mcp__docker__container_health,mcp__docker__docker_exec,mcp__docker__restart_container,mcp__docker__compose_up,mcp__docker__compose_ps",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=workspace,

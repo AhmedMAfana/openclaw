@@ -1,15 +1,21 @@
-"""Reusable real-time status reporters for Telegram messages.
+"""Reusable real-time status reporters for chat messages.
 
 StatusReporter — animated spinner with stages, progress bar, and live logs.
 LineReporter   — simple line-accumulator (drop-in for bootstrap's old StatusReporter).
 
 Both extend BaseReporter for heartbeat, rate-limited editing, and elapsed timer.
+Platform-agnostic — uses ActionKeyboard instead of aiogram InlineKeyboardMarkup.
 """
-import time
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from openclow.services.base_reporter import BaseReporter
 
-SPINNERS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+if TYPE_CHECKING:
+    from openclow.providers.actions import ActionKeyboard
+
+SPINNERS = ["🔄", "⏳", "🔄", "⏳"]
 
 
 class StatusReporter(BaseReporter):
@@ -41,48 +47,34 @@ class StatusReporter(BaseReporter):
             self._logs = self._logs[-self._max_logs:]
         await self._render()
 
-    async def complete(self, message: str, keyboard=None):
+    async def complete(self, message: str, keyboard: ActionKeyboard | None = None):
         """Mark operation as complete with final message."""
         await self.stop()
 
-        text = f"✅ {self._title} — Done ({self.elapsed}s)\n\n{message}"
-
         if keyboard is None:
-            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Main Menu", callback_data="menu:main")],
-            ])
+            from openclow.providers.actions import back_keyboard
+            keyboard = back_keyboard()
 
-        bot = self._chat._get_bot()
+        text = f"✅ {self._title} — Done ({self.elapsed}s)\n\n{message}"
         try:
-            await bot.edit_message_text(
-                text=text,
-                chat_id=int(self._chat_id),
-                message_id=int(self._message_id),
-                reply_markup=keyboard,
+            await self._chat.edit_message_with_actions(
+                self._chat_id, self._message_id, text, keyboard,
             )
         except Exception:
             await self._force_render()
 
-    async def error(self, message: str, keyboard=None):
+    async def error(self, message: str, keyboard: ActionKeyboard | None = None):
         """Mark operation as failed."""
         await self.stop()
 
-        text = f"❌ {self._title} — Failed ({self.elapsed}s)\n\n{message}"
-
         if keyboard is None:
-            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Main Menu", callback_data="menu:main")],
-            ])
+            from openclow.providers.actions import back_keyboard
+            keyboard = back_keyboard()
 
-        bot = self._chat._get_bot()
+        text = f"❌ {self._title} — Failed ({self.elapsed}s)\n\n{message}"
         try:
-            await bot.edit_message_text(
-                text=text,
-                chat_id=int(self._chat_id),
-                message_id=int(self._message_id),
-                reply_markup=keyboard,
+            await self._chat.edit_message_with_actions(
+                self._chat_id, self._message_id, text, keyboard,
             )
         except Exception:
             await self._force_render()
@@ -98,23 +90,24 @@ class StatusReporter(BaseReporter):
         # Progress bar
         if self._total_steps > 0:
             filled = min(self._current_step, self._total_steps)
-            bar = "█" * filled + "░" * (self._total_steps - filled)
-            parts.append(f"[{filled}/{self._total_steps}] {bar}")
+            bar = "🟩" * filled + "⬜" * (self._total_steps - filled)
+            pct = int(filled / self._total_steps * 100) if self._total_steps else 0
+            parts.append(f"{bar} {pct}%")
 
         # Current stage
         if self._current_stage:
             parts.append(f"\n{self._current_stage}")
 
-        # Live logs
+        # Live logs — show last N with truncation
         if self._logs:
             parts.append("")
             for line in self._logs:
-                parts.append(f"  ▸ {line[:60]}")
+                parts.append(f"  ▸ {line[:80]}")
 
         return "\n".join(parts)
 
     async def _render(self):
-        """Render current state to Telegram (skip if text unchanged)."""
+        """Render current state (skip if text unchanged)."""
         text = self._build_text()
         if text != self._last_text:
             self._last_text = text
@@ -137,7 +130,7 @@ class LineReporter(BaseReporter):
         return "\n".join(self.lines)
 
     async def add(self, icon: str, text: str, replace_last: bool = False):
-        """Add a status line and update Telegram."""
+        """Add a status line and update."""
         line = f"{icon} {text}"
         if replace_last and len(self.lines) > 1:
             self.lines[-1] = line
