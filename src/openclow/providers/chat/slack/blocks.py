@@ -773,18 +773,42 @@ def agent_thinking_blocks(user_text: str | None = None) -> list[dict]:
     """Professional thinking indicator for agent chat sessions."""
     preview = f"\n> _{user_text[:100]}..._" if user_text else ""
     return [
-        section_block(f"⏳ *Processing your request...*{preview}\n\n_Loading Claude AI, preparing workspace..._"),
+        section_block(
+            f"⏳ *Starting...*{preview}\n\n"
+            ":hourglass_flowing_sand: Initializing Claude AI\n"
+            ":file_folder: Preparing workspace\n"
+            ":gear: Loading tools...\n\n"
+            "_This usually takes 3-5 seconds_"
+        ),
         actions_block([button_element("Cancel", "cancel_session", style="danger")]),
     ]
 
 
 def agent_working_blocks(tool_lines: list[str], elapsed: int = 0) -> list[dict]:
     """Live agent activity — shows what tools are being used in real time."""
-    activity = "\n".join(f"• {line}" for line in tool_lines[-4:]) or "_Starting..._"
-    elapsed_msg = f"{elapsed}s" if elapsed else "just started"
+    activity = "\n".join(f"✓ {line}" for line in tool_lines[-5:]) or ":thinking_face: Analyzing..."
+
+    # Progress bar visualization
+    if elapsed < 5:
+        progress = ":black_circle: :white_circle: :white_circle: :white_circle: :white_circle:"
+    elif elapsed < 10:
+        progress = ":white_circle: :black_circle: :white_circle: :white_circle: :white_circle:"
+    elif elapsed < 20:
+        progress = ":white_circle: :white_circle: :black_circle: :white_circle: :white_circle:"
+    elif elapsed < 30:
+        progress = ":white_circle: :white_circle: :white_circle: :black_circle: :white_circle:"
+    else:
+        progress = ":white_circle: :white_circle: :white_circle: :white_circle: :black_circle:"
+
+    elapsed_msg = f"{elapsed}s elapsed" if elapsed else "just started"
     return [
-        section_block(f"🔄 *Processing...* _{elapsed_msg}_\n\n{activity}"),
-        context_block([":hourglass_flowing_sand: _AI is working on your request..._ | If this takes too long, send another message"]),
+        section_block(
+            f"🤖 *Working on your request...*\n\n"
+            f"{activity}\n\n"
+            f"{progress}\n"
+            f"_{elapsed_msg}_"
+        ),
+        context_block([":bulb: _Steps: Analyze → Plan → Execute → Review_"]),
     ]
 
 
