@@ -378,15 +378,17 @@ RULES:
             "mcp__docker__tunnel_list",
         ])
 
+    # Build MCP servers dict based on user role
+    mcp_servers = {"playwright": _mcp_playwright()}
+    if is_admin:
+        mcp_servers["docker"] = _mcp_docker()
+
     options = ClaudeAgentOptions(
         cwd=workspace,
         system_prompt=system_prompt,
         model="claude-sonnet-4-6",
         allowed_tools=base_tools,
-        mcp_servers={
-            "docker": _mcp_docker() if is_admin else None,
-            "playwright": _mcp_playwright(),
-        },
+        mcp_servers=mcp_servers,
         permission_mode="bypassPermissions",
         max_turns=20,
     )
