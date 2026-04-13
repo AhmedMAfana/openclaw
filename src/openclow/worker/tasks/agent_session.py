@@ -335,13 +335,35 @@ RULES:
 
     from openclow.providers.llm.claude import _mcp_playwright
 
-    options = ClaudeAgentOptions(
-        cwd=workspace,
-        system_prompt=system_prompt,
-        model="claude-sonnet-4-6",
-        allowed_tools=[
-            "Read", "Write", "Edit", "Glob", "Grep",
-            # Docker MCP — containers, commands, tunnels
+    # Determine tools based on user role
+    # Admins get full access, normal users get limited tools
+    base_tools = [
+        "Read", "Write", "Edit", "Glob", "Grep",
+        # Playwright MCP — browse apps, screenshots (safe for all users)
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_take_screenshot",
+        "mcp__playwright__browser_click",
+        "mcp__playwright__browser_fill_form",
+        "mcp__playwright__browser_type",
+    ]
+
+    # Check if user is admin (has is_admin flag set)
+    is_admin = False
+    if user_id:
+        from openclow.models import User, async_session
+        from sqlalchemy import select
+        async with async_session() as session:
+            user_result = await session.execute(
+                select(User).where(User.chat_provider_uid == user_id)
+            )
+            db_user = user_result.scalar_one_or_none()
+            is_admin = db_user and db_user.is_admin
+
+    # Only add docker/infrastructure tools for admins
+    if is_admin:
+        base_tools.extend([
+            # Docker MCP — containers, commands, tunnels (admin only)
             "mcp__docker__list_containers",
             "mcp__docker__container_logs",
             "mcp__docker__container_health",
@@ -349,21 +371,20 @@ RULES:
             "mcp__docker__restart_container",
             "mcp__docker__compose_up",
             "mcp__docker__compose_ps",
-            # Tunnel MCP
+            # Tunnel MCP (admin only)
             "mcp__docker__tunnel_start",
             "mcp__docker__tunnel_stop",
             "mcp__docker__tunnel_get_url",
             "mcp__docker__tunnel_list",
-            # Playwright MCP — browse apps, screenshots
-            "mcp__playwright__browser_navigate",
-            "mcp__playwright__browser_snapshot",
-            "mcp__playwright__browser_take_screenshot",
-            "mcp__playwright__browser_click",
-            "mcp__playwright__browser_fill_form",
-            "mcp__playwright__browser_type",
-        ],
+        ])
+
+    options = ClaudeAgentOptions(
+        cwd=workspace,
+        system_prompt=system_prompt,
+        model="claude-sonnet-4-6",
+        allowed_tools=base_tools,
         mcp_servers={
-            "docker": _mcp_docker(),
+            "docker": _mcp_docker() if is_admin else None,
             "playwright": _mcp_playwright(),
         },
         permission_mode="bypassPermissions",
