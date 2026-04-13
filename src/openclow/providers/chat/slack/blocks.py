@@ -769,46 +769,68 @@ def terminal_blocks(text: str) -> list[dict]:
     ]
 
 
-def agent_thinking_blocks(user_text: str | None = None) -> list[dict]:
-    """Professional thinking indicator for agent chat sessions."""
+def agent_thinking_blocks(user_text: str | None = None, frame: int = 0) -> list[dict]:
+    """Professional thinking indicator with animated progress.
+
+    Args:
+        frame: Animation frame (0-2) for spinning animation
+    """
     preview = f"\n> _{user_text[:100]}..._" if user_text else ""
+
+    # Animated spinner frames
+    spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    spinner = spinners[frame % len(spinners)]
+
+    # Animated dots for loading indicators
+    dots_frames = ["  ·", " · ·", "· · ·", " · · ", "  · ", ""]
+    dots = dots_frames[frame % len(dots_frames)]
+
     return [
         section_block(
-            f"⏳ *Starting...*{preview}\n\n"
-            ":hourglass_flowing_sand: Initializing Claude AI\n"
-            ":file_folder: Preparing workspace\n"
-            ":gear: Loading tools...\n\n"
-            "_This usually takes 3-5 seconds_"
+            f"{spinner} *Starting...*{preview}\n\n"
+            f":hourglass_flowing_sand: Initializing Claude AI {dots}\n"
+            f":file_folder: Preparing workspace\n"
+            f":gear: Loading tools...\n\n"
+            f"_Step 1/3: Initialization_{dots}"
         ),
         actions_block([button_element("Cancel", "cancel_session", style="danger")]),
     ]
 
 
 def agent_working_blocks(tool_lines: list[str], elapsed: int = 0) -> list[dict]:
-    """Live agent activity — shows what tools are being used in real time."""
-    activity = "\n".join(f"✓ {line}" for line in tool_lines[-5:]) or ":thinking_face: Analyzing..."
+    """Live agent activity with animated progress indicators."""
+    # Animated spinner for main activity
+    spinners = ["⠋ ", "⠙ ", "⠹ ", "⠸ ", "⠼ ", "⠴ ", "⠦ ", "⠧ ", "⠇ ", "⠏ "]
+    spinner = spinners[(elapsed // 1) % len(spinners)]  # Change every second
 
-    # Progress bar visualization
-    if elapsed < 5:
-        progress = ":black_circle: :white_circle: :white_circle: :white_circle: :white_circle:"
-    elif elapsed < 10:
-        progress = ":white_circle: :black_circle: :white_circle: :white_circle: :white_circle:"
-    elif elapsed < 20:
-        progress = ":white_circle: :white_circle: :black_circle: :white_circle: :white_circle:"
-    elif elapsed < 30:
-        progress = ":white_circle: :white_circle: :white_circle: :black_circle: :white_circle:"
+    # Show last 4 activities with checkmarks
+    activity = "\n".join(f":white_check_mark: {line}" for line in tool_lines[-4:]) or ":thinking_face: _Analyzing..._"
+
+    # Animated progress bar (smoothly fills as time passes)
+    bar_length = 10
+    filled = min(bar_length, max(1, elapsed // 3))  # Fills over 30 seconds
+    empty = bar_length - filled
+    progress_bar = "".join([":green_square:"] * filled) + "".join([":white_square:"] * empty)
+
+    # Determine current stage
+    if elapsed < 3:
+        stage = ":one: Planning"
+    elif elapsed < 8:
+        stage = ":two: Executing"
+    elif elapsed < 15:
+        stage = ":three: Reviewing"
     else:
-        progress = ":white_circle: :white_circle: :white_circle: :white_circle: :black_circle:"
+        stage = ":four: Finalizing"
 
-    elapsed_msg = f"{elapsed}s elapsed" if elapsed else "just started"
+    elapsed_msg = f"{elapsed}s elapsed"
     return [
         section_block(
-            f"🤖 *Working on your request...*\n\n"
-            f"{activity}\n\n"
-            f"{progress}\n"
-            f"_{elapsed_msg}_"
+            f"{spinner}*AI Agent Working*\n\n"
+            f"*Current Activity:*\n{activity}\n\n"
+            f"*Progress:*\n{progress_bar}\n"
+            f"{stage} • _{elapsed_msg}_"
         ),
-        context_block([":bulb: _Steps: Analyze → Plan → Execute → Review_"]),
+        context_block([":rocket: _Request is being processed. This usually takes 10-20 seconds._"]),
     ]
 
 
