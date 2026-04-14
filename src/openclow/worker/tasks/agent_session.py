@@ -310,34 +310,36 @@ async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message
     # Save user message to per-user conversation history
     await _save_message(chat_id, "user", user_message, user_id)
 
-    system_prompt = f"""You are OpenClow — an AI Dev Orchestrator. This is a persistent chat conversation with the user.
+    system_prompt = f"""You are OpenClow — an AI Dev Orchestrator. You're chatting with the user in real time.
 
 {context_str}
 
 CONVERSATION HISTORY:
 {conv_str if conv_str else "(first message)"}
 
-IMPORTANT: This is an ongoing conversation. The user may send casual messages, questions,
-or action requests. Respond naturally:
-- Casual messages ("hi", "thanks", "ok") → reply briefly, no tools needed
-- Questions about the project → answer from context or investigate with tools
-- Action requests ("fix the login page", "show me the logs") → use tools and do it
+HOW TO RESPOND — THIS IS CRITICAL:
+1. ALWAYS start with a short natural message BEFORE using any tools.
+   Examples: "Let me check that for you..." / "On it, checking the containers now..." / "Sure, looking into it..."
+2. Between tool calls, write short status updates so the user sees progress.
+   Examples: "Containers look good, now checking the app..." / "Found the issue — fixing it now..."
+3. End with a clear summary of what you found/did.
+
+For casual messages ("hi", "thanks", "what's up") — just reply naturally, no tools.
 
 YOU CAN:
 - Read, edit, write files in /workspaces/_cache/<project_name>/
 - docker_exec — run commands in containers
-- container_logs — check what's happening
-- Restart containers, start/stop tunnels
+- container_logs, container_health — check what's happening
+- restart_container, compose_up/compose_ps — manage Docker
+- tunnel_start, tunnel_get_url — manage public URLs
 - Browse the app with Playwright (navigate, screenshot, click, fill)
 - Search code with Grep/Glob
 
 RULES:
-- Be concise. Chat messages should be short.
-- For casual messages, just reply — don't use tools unnecessarily
-- When the user asks for action, DO IT — don't explain how, just do it
-- If something fails, investigate and fix — try 2-3 approaches
-- Verify changes work (curl, logs, Playwright screenshot)
-- If you need user input (API key, credentials), ask clearly
+- Talk like a human. Short messages. No walls of text.
+- DO things, don't explain how you'll do them. Just do it and report back.
+- If something fails, say what went wrong briefly, then try to fix it.
+- Be persistent — try 2-3 approaches before giving up.
 """
 
     from openclow.providers.llm.claude import _mcp_playwright
@@ -414,9 +416,12 @@ RULES:
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         response_text = block.text
+                        # Text is the star — show it prominently
+                        # Tool context underneath (subtle, not dominant)
                         display = response_text[:3800]
-                        if tool_lines:
-                            display = "\n".join(tool_lines[-3:]) + "\n\n" + display
+                        if tool_lines and _using_tools:
+                            tool_ctx = "  " + " → ".join(t.split(" ", 1)[-1][:30] for t in tool_lines[-3:])
+                            display = f"{display}\n\n`{tool_ctx}`"
                         if display != last_update:
                             last_update = display
                             try:
@@ -431,13 +436,17 @@ RULES:
                         if len(tool_lines) > 5:
                             tool_lines = tool_lines[-5:]
 
+                        # Show tool activity — but keep last text visible above it
                         try:
-                            if _is_slack:
-                                from openclow.providers.chat.slack.blocks import agent_working_blocks
-                                blks = agent_working_blocks(tool_lines, elapsed=int(_time.time() - _start))
-                                await chat.edit_message_blocks(chat_id, message_id, blks)
+                            tool_summary = " → ".join(t.split(" ", 1)[-1][:30] for t in tool_lines[-3:])
+                            if response_text:
+                                # Agent said something before using tools — keep it visible
+                                display = f"{response_text[:3000]}\n\n⚡ `{tool_summary}`"
                             else:
-                                display = "\n".join(tool_lines) + "\n\nWorking..."
+                                # No text yet — show tool progress
+                                display = f"⚡ `{tool_summary}`"
+                            if display != last_update:
+                                last_update = display
                                 await chat.edit_message(chat_id, message_id, display)
                         except Exception:
                             pass
