@@ -146,20 +146,19 @@ async def cleanup_stale_workspaces(max_age_hours: int = 12):
 
 async def _is_task_active(task_id_prefix: str) -> bool:
     """Check if any task matching this ID prefix is still active."""
-    import uuid
-    from sqlalchemy import select as sa_select
-    from openclow.models import Task, async_session
+    from sqlalchemy import text
+    from openclow.models import async_session
 
-    active_statuses = {"pending", "approved", "coding", "reviewing", "merging",
-                       "planning", "preparing", "pushing", "diff_preview"}
+    active_statuses = ("pending", "approved", "coding", "reviewing", "merging",
+                       "planning", "preparing", "pushing", "diff_preview")
     try:
         # task-{hash} uses first 8 chars of UUID
         async with async_session() as session:
-            result = await session.execute(sa_select(Task.id, Task.status))
-            for row in result.all():
-                if str(row[0])[:8] == task_id_prefix and row[1] in active_statuses:
-                    return True
-            return False
+            result = await session.execute(
+                text("SELECT 1 FROM tasks WHERE CAST(id AS TEXT) LIKE :prefix AND status = ANY(:statuses) LIMIT 1"),
+                {"prefix": f"{task_id_prefix}%", "statuses": list(active_statuses)},
+            )
+            return result.first() is not None
     except Exception:
         return True  # If we can't check, assume active (don't delete)
 
@@ -230,30 +229,36 @@ async def recover_stuck_tasks(max_stuck_minutes: int = 30):
 
     try:
         cutoff = datetime.utcnow() - timedelta(minutes=max_stuck_minutes)
+
+        # Step 1: Find stuck task IDs (lightweight query)
         async with async_session() as session:
             result = await session.execute(
-                sa_select(Task).where(
+                sa_select(Task.id, Task.status, Task.updated_at).where(
                     Task.status.in_(stuck_statuses),
                     Task.updated_at < cutoff,
                 )
             )
-            stuck = result.scalars().all()
+            stuck = result.all()
 
-            if not stuck:
-                return
+        if not stuck:
+            return
 
-            for t in stuck:
-                await session.execute(
-                    sa_update(Task)
-                    .where(Task.id == t.id)
-                    .values(status="failed", error_message="Task stuck — auto-recovered by maintenance")
-                )
-                log.warning("maintenance.stuck_task_recovered",
-                            task_id=str(t.id), old_status=t.status,
-                            age_minutes=round((datetime.utcnow() - t.updated_at).total_seconds() / 60))
-
+        # Step 2: Bulk update in a separate session (avoids greenlet issue)
+        stuck_ids = [row[0] for row in stuck]
+        async with async_session() as session:
+            await session.execute(
+                sa_update(Task)
+                .where(Task.id.in_(stuck_ids))
+                .values(status="failed", error_message="Task stuck — auto-recovered by maintenance")
+            )
             await session.commit()
-            log.info("maintenance.stuck_tasks_recovered", count=len(stuck))
+
+        for row in stuck:
+            age = round((datetime.utcnow() - row[2]).total_seconds() / 60)
+            log.warning("maintenance.stuck_task_recovered",
+                        task_id=str(row[0]), old_status=row[1], age_minutes=age)
+
+        log.info("maintenance.stuck_tasks_recovered", count=len(stuck))
     except Exception as e:
         log.warning("maintenance.stuck_recovery_failed", error=str(e))
 
