@@ -67,29 +67,36 @@ class ChecklistReporter(BaseReporter):
         total = len(self.steps)
         done = sum(1 for s in self.steps if s["status"] in ("done", "skipped"))
         failed = sum(1 for s in self.steps if s["status"] == "failed")
+        running = sum(1 for s in self.steps if s["status"] == "running")
 
-        # Header with title
-        lines = [f"🤖 {self.title} ({self.elapsed}s)"]
-
-        # Progress bar
+        # Progress: completed steps fill fully, running step fills based on elapsed time
+        # This gives smooth visual progress instead of jumping 0→33→66→100
+        bar_len = 10
         if total > 0:
-            filled = done + failed
-            bar = "🟩" * filled + "⬜" * (total - filled)
-            pct = int((filled / total) * 100)
-            lines.append(f"{bar} {pct}%")
+            base_progress = (done + failed) / total
+            # Running step fills gradually over 30s
+            if running > 0:
+                step_progress = min(0.9, self.elapsed / 30) / total
+                progress = base_progress + step_progress
+            else:
+                progress = base_progress
+            filled = max(1 if running or done else 0, min(bar_len, int(progress * bar_len)))
+            bar = "🟩" * filled + "⬜" * (bar_len - filled)
+        else:
+            bar = "⬜" * bar_len
 
-        if self.subtitle:
-            lines.append(self.subtitle)
-
+        # Header — compact
+        lines = [f"🤖 *{self.title}* `{self.elapsed}s`"]
+        lines.append(bar)
         lines.append("")
 
-        # Steps
+        # Steps — compact
         for step in self.steps:
             icon = ICONS.get(step["status"], "⬜")
             line = f"{icon} {step['name']}"
             if step["detail"]:
                 line += f" — {step['detail'][:50]}"
-            if step["status"] == "running" and not step["detail"]:
+            elif step["status"] == "running":
                 line += "..."
             lines.append(line)
 

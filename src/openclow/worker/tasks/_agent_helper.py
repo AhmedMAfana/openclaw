@@ -15,9 +15,12 @@ _SYSTEM_PROMPT = """\
 Senior DevOps engineer. You have FULL CONTROL over Docker infrastructure via MCP tools.
 
 AVAILABLE TOOLS:
-- compose_up/compose_down/compose_ps — manage Docker Compose stacks
+- compose_build — build images only (no start). Use when you need to rebuild after Dockerfile changes.
+- compose_up — start a stack. Set build=True to build images first then start.
+  compose_up(build=True) handles Docker-in-Docker path translation automatically.
+- compose_down/compose_ps — stop stack / list containers in stack
 - container_logs/container_health — inspect containers
-- docker_exec — run ANY command inside a container
+- docker_exec — run ANY command inside a running container
 - restart_container — restart specific containers
 - list_containers — see all containers
 - tunnel_start/tunnel_stop/tunnel_get_url — manage Cloudflare tunnels
@@ -29,6 +32,9 @@ CRITICAL ARCHITECTURE:
 - NEVER run "which cloudflared" or "cloudflared" inside containers — it does not exist there.
 - Use tunnel_start/tunnel_get_url/tunnel_stop MCP tools for tunnel management.
 - Always read container_logs BEFORE attempting fixes — understand the error first.
+- Docker-in-Docker: the worker runs in a container but uses the host Docker socket.
+  Build contexts use container paths; volume mounts use host paths. The MCP tools handle
+  this automatically — just call compose_up(build=True) or compose_build().
 
 RULES:
 - No Bash. Use ONLY the MCP tools above.
@@ -37,6 +43,10 @@ RULES:
 - Fix the root cause, not the symptom.
 - NEVER repeat a failed approach. Always try something new.
 - NEVER say you can't fix it. You have all the tools.
+- NEVER modify docker-compose.yml image names or build contexts — they are set by the project.
+- NEVER use sed to change docker-compose.yml — use Edit tool if you must change a file.
+- If an image doesn't exist, use compose_up with build=True or compose_build.
+- If "port already allocated", find and stop the conflicting container first.
 
 OUTPUT FORMAT:
 - STATUS: <what you're doing now>
@@ -83,7 +93,10 @@ class RepairCard:
         attempt_str = f" (attempt {self._attempt})" if self._attempt > 1 else ""
         status_line = f"{phase_icon} {self.status}{attempt_str}"
         recent = self.activities[-3:]
-        activity_lines = "\n".join(f"  ✅ {a}" for a in recent)
+        activity_lines = "\n".join(
+            f"  {a}" if a.startswith("❌") or a.startswith("⚠") else f"  ✅ {a}"
+            for a in recent
+        )
         url_line = f"\n🔗 {self.result_url}" if self.result_url else ""
 
         return f"{header} `{elapsed}s`\n{bar}\n\n{status_line}\n{activity_lines}{url_line}".strip()
@@ -92,7 +105,18 @@ class RepairCard:
         if not self.chat:
             return
         try:
-            await self.chat.edit_message(self.chat_id, self.message_id, self._render())
+            if self.phase == "done":
+                # Final state — no cancel button
+                await self.chat.edit_message(self.chat_id, self.message_id, self._render())
+            else:
+                # Working state — show cancel button
+                from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+                kb = ActionKeyboard(rows=[
+                    ActionRow([ActionButton("⏹ Cancel", f"cancel_repair:{self.chat_id}:{self.message_id}", style="danger")]),
+                ])
+                await self.chat.edit_message_with_actions(
+                    self.chat_id, self.message_id, self._render(), kb,
+                )
         except Exception:
             pass
 
@@ -111,21 +135,50 @@ class RepairCard:
         await self.render()
 
 
-async def _run_single_agent_with_timeout(prompt, options, card, notify_fn, timeout_seconds=120):
-    """Run one agent session with timeout + heartbeat. Returns True if FIXED."""
+class _Cancelled(Exception):
+    pass
+
+
+async def _is_cancelled(chat_id: str, message_id: str) -> bool:
+    """Check if user cancelled this repair via Redis flag."""
+    try:
+        from openclow.models import get_redis
+        r = await get_redis()
+        return bool(await r.get(f"cancel_repair:{chat_id}:{message_id}"))
+    except Exception:
+        return False
+
+
+async def set_cancel_flag(chat_id: str, message_id: str):
+    """Set cancellation flag in Redis (called by Slack handler)."""
+    try:
+        from openclow.models import get_redis
+        r = await get_redis()
+        await r.set(f"cancel_repair:{chat_id}:{message_id}", "1", ex=600)
+    except Exception:
+        pass
+
+
+async def _run_single_agent_with_timeout(prompt, options, card, notify_fn, timeout_seconds=300):
+    """Run one agent session with timeout + heartbeat + cancellation. Returns True if FIXED."""
     from claude_agent_sdk import query
     from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
 
     fixed = False
     last_update = time.time()
+    chat_id = card.chat_id if card else ""
+    message_id = card.message_id if card else ""
 
     async def _heartbeat():
-        """Update card every 5s even if agent is silent."""
+        """Update card every 5s. Check for cancellation."""
         nonlocal last_update
         while True:
             await asyncio.sleep(5)
+            # Check cancellation
+            if chat_id and message_id and await _is_cancelled(chat_id, message_id):
+                raise _Cancelled()
             if card and (time.time() - last_update) > 5:
-                await card.render()  # Re-renders with updated elapsed time
+                await card.render()
 
     heartbeat_task = asyncio.create_task(_heartbeat())
 
@@ -168,11 +221,16 @@ async def _run_single_agent_with_timeout(prompt, options, card, notify_fn, timeo
         log.warning("repair_agent.timeout", timeout=timeout_seconds)
         if card:
             await card.complete_activity(f"Timed out at {timeout_seconds}s")
+    except _Cancelled:
+        log.info("repair_agent.cancelled_by_user")
+        if card:
+            await card.set_phase("done", "Cancelled by user")
+        raise asyncio.CancelledError()  # Propagate up to stop all retries
     finally:
         heartbeat_task.cancel()
         try:
             await heartbeat_task
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, _Cancelled):
             pass
 
     return fixed
@@ -207,6 +265,7 @@ async def run_repair_agent(
         model="claude-sonnet-4-6",
         allowed_tools=[
             "Read", "Glob", "Grep",
+            "mcp__docker__compose_build",
             "mcp__docker__compose_up",
             "mcp__docker__compose_ps",
             "mcp__docker__compose_down",

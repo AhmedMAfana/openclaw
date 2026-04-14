@@ -255,29 +255,6 @@ async def run_docker(
     env = {**os.environ}
     final_args = list(args)
 
-    # Docker-in-Docker fix: inject --project-directory for compose commands
-    # so relative volume mounts resolve on the HOST filesystem, not in the worker container.
-    # Also inject --env-file so compose finds the .env from the container path.
-    if cwd and "compose" in cmd_str:
-        from openclow.settings import settings
-        host_path = await _detect_host_workspace_path()
-        if host_path and cwd.startswith(settings.workspace_base_path):
-            host_cwd = cwd.replace(settings.workspace_base_path, host_path, 1)
-            try:
-                compose_idx = final_args.index("compose")
-                insert_at = compose_idx + 1
-                # --project-directory: resolve relative volume paths from host
-                final_args.insert(insert_at, "--project-directory")
-                final_args.insert(insert_at + 1, host_cwd)
-                # --env-file: .env is inside the container at cwd, compose can read it
-                env_file = os.path.join(cwd, ".env")
-                if os.path.exists(env_file):
-                    final_args.insert(insert_at + 2, "--env-file")
-                    final_args.insert(insert_at + 3, env_file)
-                log.debug("docker_guard.host_path_injected", host_cwd=host_cwd)
-            except ValueError:
-                pass
-
     # Port isolation: inject unique port env vars so projects don't conflict
     if project_id and "compose" in cmd_str:
         from openclow.services.port_allocator import get_port_env_vars
@@ -285,6 +262,45 @@ async def run_docker(
         env.update(port_vars)
         log.debug("docker_guard.ports_injected", project_id=project_id,
                   app=port_vars.get("APP_PORT"), db=port_vars.get("FORWARD_DB_PORT"))
+
+    # Docker-in-Docker fix: inject --project-directory for compose commands
+    # so relative volume mounts resolve on the HOST filesystem, not in the worker container.
+    #
+    # IMPORTANT: SKIP --project-directory when the command involves building images.
+    # Docker CLI (inside the worker container) needs to read build context dirs from the
+    # CONTAINER filesystem to tar and send to the daemon. --project-directory would redirect
+    # those paths to the HOST filesystem which the CLI can't access.
+    #
+    # The MCP tools (compose_up, compose_build) handle the build-then-up orchestration.
+    # docker_guard just enforces the rule: builds use container paths, everything else uses host paths.
+    if cwd and "compose" in cmd_str:
+        from openclow.settings import settings
+        host_path = await _detect_host_workspace_path()
+        if host_path and cwd.startswith(settings.workspace_base_path):
+            host_cwd = cwd.replace(settings.workspace_base_path, host_path, 1)
+            subcmd = _extract_docker_subcommand(cmd_str)
+            involves_build = (
+                subcmd == "compose build"
+                or (subcmd == "compose up" and "--build" in final_args)
+            )
+            try:
+                compose_idx = final_args.index("compose")
+                insert_at = compose_idx + 1
+                if not involves_build:
+                    # Non-build: inject --project-directory for host volume resolution
+                    final_args.insert(insert_at, "--project-directory")
+                    final_args.insert(insert_at + 1, host_cwd)
+                    insert_at += 2
+                    log.debug("docker_guard.host_path_injected", host_cwd=host_cwd)
+                else:
+                    log.debug("docker_guard.skip_project_dir_for_build", subcmd=subcmd)
+                # Always inject --env-file if present
+                env_file = os.path.join(cwd, ".env")
+                if os.path.exists(env_file):
+                    final_args.insert(insert_at, "--env-file")
+                    final_args.insert(insert_at + 1, env_file)
+            except ValueError:
+                pass
 
     try:
         proc = await asyncio.create_subprocess_exec(

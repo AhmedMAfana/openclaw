@@ -99,7 +99,7 @@ def register(app):
         blks = blocks.help_blocks()
         await client.chat_postMessage(
             channel=body["channel_id"],
-            text="OpenClow Commands",
+            text="THAG GROUP Commands",
             blocks=blks,
         )
 

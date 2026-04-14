@@ -50,7 +50,7 @@ def back_to_menu_keyboard() -> InlineKeyboardMarkup:
 
 from openclow.utils.messaging import WELCOME_MESSAGE, HELP_MESSAGE
 
-WELCOME_TEXT = WELCOME_MESSAGE.replace("OpenClow", "<b>OpenClow</b>").replace("/help", "/help 👇")
+WELCOME_TEXT = WELCOME_MESSAGE.replace("THAG GROUP", "<b>THAG GROUP</b>").replace("/help", "/help 👇")
 
 HELP_TEXT = HELP_MESSAGE
 
@@ -262,9 +262,6 @@ async def project_detail(callback: CallbackQuery, db_user):
         if tunnel_url:
             buttons.append([InlineKeyboardButton(text="🌐 Open App", url=tunnel_url)])
         buttons.append([
-            InlineKeyboardButton(text="🤖 Chat with Agent", callback_data=f"agent_diagnose:{project_id}"),
-        ])
-        buttons.append([
             InlineKeyboardButton(text="🚀 New Task", callback_data=f"task_for:{project_id}"),
             InlineKeyboardButton(text="💚 Health", callback_data=f"health:{project_id}"),
         ])
@@ -285,14 +282,11 @@ async def project_detail(callback: CallbackQuery, db_user):
         buttons.append([InlineKeyboardButton(text="◀️ Back", callback_data="menu:projects")])
     elif status == "bootstrapping":
         buttons = [
-            [InlineKeyboardButton(text="🤖 Chat with Agent", callback_data=f"agent_diagnose:{project_id}")],
             [InlineKeyboardButton(text="🔄 Bootstrap is running...", callback_data="noop")],
             [InlineKeyboardButton(text="◀️ Back", callback_data="menu:projects")],
         ]
     elif status == "failed":
-        buttons = [
-            [InlineKeyboardButton(text="🤖 Chat with Agent", callback_data=f"agent_diagnose:{project_id}")],
-        ]
+        buttons = []
         if is_admin:
             buttons.append([InlineKeyboardButton(text="🔄 Retry Bootstrap", callback_data=f"project_bootstrap:{project_id}")])
             buttons.append([
@@ -301,9 +295,7 @@ async def project_detail(callback: CallbackQuery, db_user):
             ])
         buttons.append([InlineKeyboardButton(text="◀️ Back", callback_data="menu:projects")])
     else:  # inactive
-        buttons = [
-            [InlineKeyboardButton(text="🤖 Chat with Agent", callback_data=f"agent_diagnose:{project_id}")],
-        ]
+        buttons = []
         if is_admin:
             buttons.append([InlineKeyboardButton(text="🔗 Re-link (Bootstrap)", callback_data=f"project_relink:{project_id}")])
             buttons.append([InlineKeyboardButton(text="🗑 Remove Permanently", callback_data=f"project_remove:{project_id}")])

@@ -21,9 +21,11 @@ SPINNERS = ["🔄", "⏳", "🔄", "⏳"]
 class StatusReporter(BaseReporter):
     """Live status reporter with animated spinner and progress bar."""
 
-    def __init__(self, chat, chat_id: str, message_id: str, title: str = "Processing"):
+    def __init__(self, chat, chat_id: str, message_id: str, title: str = "Processing",
+                 task_id: str = ""):
         super().__init__(chat, chat_id, message_id, heartbeat_interval=2.0, rate_limit=1.5)
         self._title = title
+        self._task_id = task_id
         self._current_stage = ""
         self._current_step = 0
         self._total_steps = 0
@@ -106,12 +108,21 @@ class StatusReporter(BaseReporter):
 
         return "\n".join(parts)
 
+    def _cancel_keyboard(self) -> ActionKeyboard | None:
+        """Build a cancel keyboard if task_id is set."""
+        if not self._task_id:
+            return None
+        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+        return ActionKeyboard(rows=[
+            ActionRow([ActionButton("❌ Cancel", f"task_cancel:{self._task_id}")]),
+        ])
+
     async def _render(self):
         """Render current state (skip if text unchanged)."""
         text = self._build_text()
         if text != self._last_text:
             self._last_text = text
-            await super()._render()
+            await super()._render(self._cancel_keyboard())
 
 
 class LineReporter(BaseReporter):

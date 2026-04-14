@@ -66,6 +66,12 @@ def format_health_report(report: HealthReport) -> str:
 from openclow.services.base_reporter import edit_message as _notify  # noqa: E402
 
 
+async def _sync_app_url(workspace: str, tunnel_url: str, compose_project: str, project):
+    """Sync container after tunnel URL change. Delegates to tunnel_service."""
+    from openclow.services.tunnel_service import sync_project_tunnel
+    await sync_project_tunnel(project.name, tunnel_url)
+
+
 async def _notify_with_buttons(chat, chat_id, message_id, text, project_id, tunnel_url=None):
     """Update message with health-check action buttons — compact single row."""
     from openclow.providers.actions import ActionButton, project_nav_keyboard
@@ -123,14 +129,15 @@ def _find_problems(report: HealthReport) -> list[dict]:
 # The agentic repair loop
 # ---------------------------------------------------------------------------
 
-REPAIR_AGENT_PROMPT = """You are fixing a running project's Docker issues. You have FULL CONTROL.
+REPAIR_PROMPT = """You are fixing a running project. App already exists — focus on Docker + Verify + Tunnel.
 
 PROJECT: {project_name}
+TECH STACK: {tech_stack}
 WORKSPACE: {workspace}
-COMPOSE FILE: {compose_file}
+COMPOSE FILE: {compose}
 COMPOSE PROJECT: {compose_project}
 HOST ARCHITECTURE: {arch}
-PORT: {port}
+ALLOCATED PORT: {port}
 
 DOCKER-COMPOSE CONTENTS:
 ```yaml
@@ -148,55 +155,62 @@ CONTAINER STATUS:
 PROBLEMS FOUND:
 {problems_text}
 
-YOUR GOAL: Get ALL containers running + tunnel URL working.
+YOUR MISSION — execute these steps IN ORDER:
 
-ARCHITECTURE — READ CAREFULLY:
-- The project runs inside Docker containers (managed by docker-compose)
-- Cloudflare tunnels run on the WORKER HOST, NOT inside containers
-- You manage tunnels via tunnel_start/tunnel_get_url MCP tools
-- NEVER run "which cloudflared" or "cloudflared" inside containers — it does not exist there
-- The app listens on port {port} INSIDE the container
+STEP 0 — CHECK CONTAINERS:
+- compose_ps("{compose_project}") to see current state
+- Output: STEP_DONE: 0 <X/Y containers running>
 
-STEPS:
-1. compose_ps("{compose_project}") — see current state
-2. container_logs("<container_name>", 50) — read logs for EVERY non-running container
-3. If containers down/exited:
-   - Read the logs FIRST to understand why
-   - DIAGNOSIS: <what the logs say>
-   - If config issue: Edit the file in workspace ({workspace})
-   - compose_up("{compose_file}", "{compose_project}", "{workspace}")
-4. If containers running but app not responding:
-   - docker_exec("<app_container>", "curl -sf http://localhost:{port}/ -o /dev/null -w %{{http_code}}")
-   - If 000/error: check logs, fix app config, restart container
-5. tunnel_get_url("{project_name}") — check if tunnel exists
-6. If no tunnel: tunnel_start("{project_name}", "http://<app_container_ip>:{port}")
+STEP 1 — START DOCKER CONTAINERS:
+- compose_up("{compose}", "{compose_project}", "{workspace}")
+- If it FAILS:
+  * Read the error output carefully
+  * DIAGNOSIS: <your analysis>
+  * If "port already allocated": list_containers() → find orphans → compose_down
+  * If image missing: compose_up with build=True
+  * ACTION: <what you're fixing>
+  * Retry compose_up
+  * You get up to 3 fix attempts
+- After containers start, verify ALL are running via compose_ps
+- Output: STEP_DONE: 1 <X/Y containers running>
 
-TOOL CALLS — USE EXACT NAMES:
-- compose_ps(compose_project="{compose_project}")
-- compose_up(compose_file="{compose_file}", compose_project="{compose_project}", workspace="{workspace}")
-- container_logs(container_name="<name>", tail=50)
-- docker_exec(container_name="<name>", command="<cmd>")
-- restart_container(container_name="<name>")
-- tunnel_get_url(service_name="{project_name}")
-- tunnel_start(service_name="{project_name}", target_url="http://<container>:{port}")
-- Read/Edit/Glob for workspace files at {workspace}
+STEP 2 — FIX ISSUES:
+- container_logs for any unhealthy/crashed containers
+- docker_exec to investigate (pwd, ls, cat errors)
+- Fix root cause, restart container
+- If all healthy: STEP_SKIP: 2 all healthy
+- Output: STEP_DONE: 2 <what was fixed>
 
-DO NOT USE:
-- No Bash tool. No shell commands on the host.
-- No "which cloudflared" — tunnels are NOT inside containers.
-- No "apt-get install" for cloudflared — it's a host service.
+STEP 3 — VERIFY APP:
+- Find the app container (usually laravel.test, app, web, etc.)
+- docker_exec("<app_container>", "curl -sf http://localhost:{port}/ -o /dev/null -w %{{http_code}}")
+- If fails: read logs, fix, retry
+- Output: STEP_DONE: 3 <HTTP status>
 
-OUTPUT FORMAT:
-- STATUS: <what you're doing>
-- DIAGNOSIS: <what's wrong>
-- ACTION: <what you're fixing>
-- FIXED: <tunnel_url> — when everything works
+STEP 4 — CREATE PUBLIC URL:
+- tunnel_get_url("{project_name}") — check if tunnel exists
+- If no tunnel: tunnel_start("{project_name}", "http://<app_container_ip>:{port}")
+- Output: STEP_DONE: 4 <tunnel_url>
 
-SELF-HEALING:
-- Read error messages carefully before acting
-- Fix the root cause, not symptoms
-- NEVER give up after first failure
-- Try at least 2 different approaches per issue
+RULES:
+- Output STATUS: <message> BEFORE every action
+- Output DIAGNOSIS: <analysis> when something fails
+- Output ACTION: <what you're fixing> when fixing
+- Output REPAIR_COMPLETE when all steps done
+- Be FAST — act decisively
+- NEVER modify docker-compose.yml image names or build contexts
+- Use compose_up(build=True) if image is missing
+
+CRITICAL — TOOL USAGE:
+- No Bash. Use ONLY Docker MCP tools for container operations.
+- docker_exec(container_name, "command") for container commands
+- Read/Edit/Glob for host workspace files
+- Tunnels run on HOST, NOT in containers — use tunnel_start/tunnel_get_url
+
+CRITICAL — SELF-HEALING:
+- When ANY command fails, investigate before giving up
+- Fix the root cause, retry with the fix
+- NEVER give up after one failure — try at least 2 approaches
 """
 
 
@@ -210,50 +224,71 @@ async def _run_repair_loop(
     status_lines: list[str],
     card=None,
 ):
-    """Agentic repair loop — uses shared run_repair_agent + RepairCard."""
+    """Agentic repair — same power as bootstrap's _run_master_agent with ChecklistReporter."""
     from openclow.settings import settings
-    from openclow.worker.tasks._agent_helper import run_repair_agent
+    from openclow.services.checklist_reporter import ChecklistReporter
+    from openclow.worker.tasks.bootstrap import _run_master_agent
+    from openclow.services.port_allocator import get_app_port
+    import platform
 
     workspace = os.path.join(settings.workspace_base_path, "_cache", project.name)
     compose = project.docker_compose_file or "docker-compose.yml"
     compose_project = f"openclow-{project.name}"
 
     if not os.path.exists(workspace):
-        if card:
-            await card.set_status("⚠️ Workspace not found — run bootstrap first")
+        await _notify(chat, chat_id, message_id, "⚠️ Workspace not found — run bootstrap first")
         return report
 
-    # Read compose file contents — same as bootstrap
+    # Preflight: same cleanup as bootstrap (kill orphans, free ports, verify Docker)
+    from openclow.worker.tasks.bootstrap import _preflight
+    try:
+        await _preflight(project, workspace, compose, compose_project)
+    except RuntimeError as e:
+        await _notify(chat, chat_id, message_id, f"❌ Preflight failed: {e}")
+        return report
+
+    # ChecklistReporter — same beautiful UI as bootstrap
+    checklist = ChecklistReporter(
+        chat, chat_id, message_id,
+        title=f"Fixing {project.name}",
+        subtitle=project.tech_stack or "",
+    )
+    checklist.set_steps([
+        "Check containers",
+        "Start Docker",
+        "Fix issues",
+        "Verify app",
+        "Create public URL",
+    ])
+    await checklist._force_render()
+    await checklist.start()
+
+    # Read compose + env for rich context (same as bootstrap)
+    arch = platform.machine()
+    port = get_app_port(project.id)
+
     compose_path = os.path.join(workspace, compose)
     compose_contents = ""
     if os.path.exists(compose_path):
         with open(compose_path) as f:
             compose_contents = f.read()[:4000]
 
-    # Read .env
     env_path = os.path.join(workspace, ".env")
     env_contents = ""
     if os.path.exists(env_path):
         with open(env_path) as f:
             env_contents = f.read()[:2000]
 
-    # Container names from report
     container_status = "\n".join(
         f"- {c.name}: {c.state} {c.health}" for c in report.containers
     ) or "No containers found"
-
-    # Architecture + port
-    import platform
-    arch = platform.machine()
-    from openclow.services.port_allocator import get_app_port
-    port = get_app_port(project.id)
-
     problems_text = "\n".join(f"- {p['detail']}" for p in problems)
 
-    prompt = REPAIR_AGENT_PROMPT.format(
+    prompt = REPAIR_PROMPT.format(
         project_name=project.name,
+        tech_stack=project.tech_stack or "Unknown",
         workspace=workspace,
-        compose_file=compose,
+        compose=compose,
         compose_project=compose_project,
         arch=arch,
         port=port,
@@ -263,16 +298,56 @@ async def _run_repair_loop(
         problems_text=problems_text,
     )
 
-    await run_repair_agent(prompt, workspace, chat, chat_id, message_id, status_lines, card=card)
+    # Run bootstrap's master agent with repair prompt — same streaming, same power
+    await checklist.start_step(0)
+    max_attempts = 2
+    success = False
+    for attempt in range(1, max_attempts + 1):
+        try:
+            success = await _run_master_agent(
+                checklist, project, workspace, compose, compose_project, port,
+                prompt_override=prompt,
+                start_step=0,
+                max_step=4,
+                complete_keyword="REPAIR_COMPLETE",
+                failed_keyword="REPAIR_FAILED",
+            )
+            break
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("repair.agent_failed", attempt=attempt, error=str(e)[:200])
+            if attempt < max_attempts:
+                resume = 0
+                for i in range(5):
+                    if checklist.steps[i]["status"] in ("pending", "running"):
+                        resume = i
+                        break
+                await checklist.update_step(resume, f"retrying (attempt {attempt + 1})...")
 
-    # Re-check health
-    if card:
-        await card.set_status("Re-checking health...")
-    await asyncio.sleep(3)
+    await checklist.stop()
+
+    # Re-check health after agent
     report = await asyncio.wait_for(
         run_full_health_check(project, with_tunnel=True),
         timeout=30,
     )
+
+    # Show final buttons — no Open App (prevents loop)
+    from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+    tunnel_url = report.tunnel_url
+    if tunnel_url:
+        kb = ActionKeyboard(rows=[
+            ActionRow([ActionButton("🌐 Open in Browser", "open_browser", url=tunnel_url, style="primary")]),
+            ActionRow([ActionButton("🔄 Refresh", f"health_ref:{project.id}"), ActionButton("◀️ Menu", "menu:main")]),
+        ])
+    else:
+        kb = ActionKeyboard(rows=[
+            ActionRow([ActionButton("🔄 Retry", f"health_ref:{project.id}", style="primary")]),
+            ActionRow([ActionButton("◀️ Menu", "menu:main")]),
+        ])
+    await checklist._force_render(keyboard=kb)
+
     return report
 
 
@@ -281,10 +356,9 @@ async def _run_repair_loop(
 # ---------------------------------------------------------------------------
 
 async def check_project_health(ctx: dict, project_id: int, chat_id: str, message_id: str, chat_provider_type: str = "telegram"):
-    """Worker task: ONE smooth card from start to finish — check → repair → done."""
+    """Worker task: health check → agentic repair with ChecklistReporter (same as bootstrap)."""
     from openclow.models import Project, async_session
     from openclow.providers import factory
-    from openclow.worker.tasks._agent_helper import RepairCard
     from sqlalchemy import select
 
     chat = await factory.get_chat_by_type(chat_provider_type)
@@ -300,77 +374,121 @@ async def check_project_health(ctx: dict, project_id: int, chat_id: str, message
             await chat.edit_message(chat_id, message_id, "Project not found.")
             return
 
-        # ONE card for the entire flow
-        card = RepairCard(project.name, chat, chat_id, message_id)
-        await card.set_phase("checking", "Running health check...")
+        from openclow.settings import settings
+        from openclow.services.checklist_reporter import ChecklistReporter
+        from openclow.services.tunnel_service import get_tunnel_url, check_tunnel_health, ensure_tunnel
+        from openclow.worker.tasks.bootstrap import _get_tunnel_target
+        from openclow.services.port_allocator import get_app_port
+        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow, project_nav_keyboard, open_app_btn
+        import aiohttp
 
-        # ── Phase 1: Health check ──
+        compose_project = f"openclow-{project.name}"
+        workspace = os.path.join(settings.workspace_base_path, "_cache", project.name)
+
+        # ── ChecklistReporter for smooth UI (same as bootstrap) ──
+        checklist = ChecklistReporter(
+            chat, chat_id, message_id,
+            title=f"Opening {project.name}",
+        )
+        checklist._heartbeat_interval = 1.0
+        checklist._rate_limit = 0.8
+        checklist.set_steps(["Check containers", "Verify app", "Connect tunnel"])
+        await checklist.start_step(0)  # Start immediately — progress bar shows activity
+        await checklist._force_render()
+        await checklist.start()
+
+        # Step 0: Check containers
         report = await asyncio.wait_for(
             run_full_health_check(project, with_tunnel=True),
             timeout=30,
         )
-
         problems = _find_problems(report)
 
         if not problems:
-            # All good — show final card
-            card.result_url = report.tunnel_url
-            await card.set_phase("done", "Everything healthy!")
-            await card.complete_activity(f"{len(report.containers)} containers running")
-            if report.tunnel_url:
-                await card.complete_activity("Tunnel active")
+            await checklist.complete_step(0, f"{len(report.containers)} running")
+
+            # Step 1: Verify app responds
+            await checklist.start_step(1)
+            app_ok = any(c.status == "pass" for c in report.checks if c.name == "HTTP")
+            if app_ok:
+                await checklist.complete_step(1, "HTTP OK")
+            else:
+                await checklist.complete_step(1, "⚠️ may need time")
+
+            # Step 2: Tunnel
+            await checklist.start_step(2)
+            tunnel_url = await get_tunnel_url(project.name)
+
+            # Verify tunnel actually works (not stale/dead)
+            if tunnel_url:
+                try:
+                    async with aiohttp.ClientSession() as session_http:
+                        async with session_http.get(tunnel_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                            if resp.status >= 500:
+                                tunnel_url = None  # Dead tunnel
+                except Exception:
+                    tunnel_url = None
+
+            if not tunnel_url:
+                await checklist.update_step(2, "Starting tunnel...")
+                try:
+                    target = await _get_tunnel_target(compose_project, workspace, project_id)
+                    if not target:
+                        target = f"http://localhost:{get_app_port(project_id)}"
+                    tunnel_url = await asyncio.wait_for(
+                        ensure_tunnel(project.name, target), timeout=30,
+                    )
+                    if tunnel_url:
+                        await _sync_app_url(workspace, tunnel_url, compose_project, project)
+                except Exception as e:
+                    log.warning("health.tunnel_failed", error=str(e))
+                    tunnel_url = None
+
+            if tunnel_url:
+                await checklist.complete_step(2, tunnel_url)
+            else:
+                await checklist.fail_step(2, "Rate limited — retry in 1-2 min")
+
+            await checklist.stop()
+
+            # Final buttons — no Open App btn (prevents endless loop)
+            if tunnel_url:
+                kb = ActionKeyboard(rows=[
+                    ActionRow([ActionButton("🌐 Open in Browser", "open_browser", url=tunnel_url, style="primary")]),
+                    ActionRow([
+                        ActionButton("🔄 Refresh", f"health_ref:{project_id}"),
+                        ActionButton("◀️ Menu", "menu:main"),
+                    ]),
+                ])
+            else:
+                kb = ActionKeyboard(rows=[
+                    ActionRow([ActionButton("🔄 Retry", f"health_ref:{project_id}", style="primary")]),
+                    ActionRow([ActionButton("◀️ Menu", "menu:main")]),
+                ])
+            await checklist._force_render(keyboard=kb)
         else:
-            # Show what's wrong, then repair — retry up to 3 times
-            max_repair_attempts = 3
-            for repair_attempt in range(1, max_repair_attempts + 1):
-                for p in problems[:3]:
-                    await card.complete_activity(f"❌ {p['detail'][:50]}")
-
-                attempt_label = f" (attempt {repair_attempt}/{max_repair_attempts})" if repair_attempt > 1 else ""
-                await card.set_phase("repairing", f"Fixing {len(problems)} issue(s){attempt_label}...")
-
-                status_lines = []
-                report = await _run_repair_loop(
-                    project, report, problems, chat, chat_id, message_id, status_lines,
-                    card=card,
-                )
-
-                card.result_url = report.tunnel_url
-                new_problems = _find_problems(report)
-                if not new_problems:
-                    await card.set_phase("done", "All issues fixed!")
-                    break
-
-                if repair_attempt < max_repair_attempts:
-                    problems = new_problems
-                    await card.set_status(f"{len(new_problems)} issue(s) remain — retrying...")
-                else:
-                    await card.set_phase("done", f"{len(new_problems)} issue(s) remain after {max_repair_attempts} attempts")
-
-        # ── Always: final buttons ──
-        await _notify_with_buttons(chat, chat_id, message_id,
-                                   card._render(), project_id, tunnel_url=report.tunnel_url)
+            # Problems found — full agentic repair
+            report = await _run_repair_loop(
+                project, report, problems, chat, chat_id, message_id, [],
+            )
 
         log.info("health.check_done", project=project.name, running=report.is_running,
                  problems=len(problems), tunnel=report.tunnel_url is not None)
 
     except asyncio.TimeoutError:
         from openclow.providers.actions import ActionButton, project_nav_keyboard
-        kb = project_nav_keyboard(project_id,
-            ActionButton("🔄 Retry", f"health:{project_id}", style="primary"))
-        await _notify(chat, chat_id, message_id, f"🔧 *{project.name}*\n\n⏱ Timed out — tap Retry or ask Agent", keyboard=kb)
+        kb = project_nav_keyboard(project_id, ActionButton("🔄 Retry", f"health_ref:{project_id}", style="primary"))
+        await _notify(chat, chat_id, message_id, f"⏱ Health check timed out", keyboard=kb)
     except asyncio.CancelledError:
         from openclow.providers.actions import ActionButton, project_nav_keyboard
-        kb = project_nav_keyboard(project_id,
-            ActionButton("🔄 Retry", f"health:{project_id}", style="primary"))
-        await _notify(chat, chat_id, message_id, f"🔧 *{project.name}*\n\n⏹ Cancelled", keyboard=kb)
+        kb = project_nav_keyboard(project_id, ActionButton("🔄 Retry", f"health_ref:{project_id}", style="primary"))
+        await _notify(chat, chat_id, message_id, f"⏹ Cancelled", keyboard=kb)
         raise
     except Exception as e:
         log.error("health.check_failed", error=str(e))
         from openclow.providers.actions import ActionButton, project_nav_keyboard
-        kb = project_nav_keyboard(project_id,
-            ActionButton("🔄 Retry", f"health:{project_id}", style="primary"))
-        await _notify(chat, chat_id, message_id, f"🔧 *{project.name}*\n\n❌ {str(e)[:100]}", keyboard=kb)
+        kb = project_nav_keyboard(project_id, ActionButton("🔄 Retry", f"health_ref:{project_id}", style="primary"))
+        await _notify(chat, chat_id, message_id, f"❌ {str(e)[:100]}", keyboard=kb)
 
 
 async def stop_tunnel_task(ctx: dict, project_id: int, chat_id: str, message_id: str, chat_provider_type: str = "telegram"):

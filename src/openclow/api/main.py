@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from openclow.api.routes import activity, health, settings, tasks
 
-app = FastAPI(title="OpenClow API", version="0.1.0")
+app = FastAPI(title="THAG GROUP API", version="0.1.0")
 
 # Trigger provider registration so registry.available_providers() works.
 # Factory imports all concrete providers (telegram, slack, claude, github, etc.)

@@ -94,6 +94,16 @@ class WorkspaceService:
         Lock files are more reliable than manifest files (e.g. package.json
         could mean npm, yarn, pnpm, or bun — but only one lock file exists).
         """
+        # Copy auth.json for Composer (GitLab deploy tokens, etc.)
+        # Mounted at /app/auth.json via docker-compose volume
+        if os.path.exists(os.path.join(workspace, "composer.lock")):
+            src_auth = "/app/auth.json"
+            dest_auth = os.path.join(workspace, "auth.json")
+            if os.path.exists(src_auth) and not os.path.exists(dest_auth):
+                import shutil
+                shutil.copy2(src_auth, dest_auth)
+                log.info("workspace.auth_json_copied", workspace=workspace)
+
         for lock_file, install_cmd in self._LOCK_FILE_COMMANDS:
             if os.path.exists(os.path.join(workspace, lock_file)):
                 await git_ops.run_cmd(install_cmd, cwd=workspace)
@@ -121,8 +131,12 @@ class WorkspaceService:
                 # Create worktree (instant — hardlinks .git objects)
                 await git_ops.worktree_add(cache, work)
 
-                # Handle dependencies
-                if deps_changed or project.force_fresh_install:
+                # Handle dependencies — SKIP for Dockerized projects
+                # Docker containers have their own deps (installed during build)
+                # Running composer/npm on the host fails and wastes time
+                if project.is_dockerized:
+                    log.info("workspace.skip_deps_dockerized", project=project.name)
+                elif deps_changed or project.force_fresh_install:
                     log.info("workspace.deps_changed", project=project.name)
                     await self._install_deps(work)
                 else:
@@ -141,7 +155,9 @@ class WorkspaceService:
                 from openclow.providers import factory
                 git = await factory.get_git()
                 await git.clone_repo(project.github_repo, cache)
-                await self._install_deps(cache)
+                # Skip deps for Dockerized projects — containers have their own
+                if not project.is_dockerized:
+                    await self._install_deps(cache)
 
                 # Create worktree from cache
                 await git_ops.worktree_add(cache, work)
@@ -162,22 +178,10 @@ class WorkspaceService:
                     if cmd:
                         await git_ops.run_cmd(cmd, cwd=work, ignore_errors=True)
 
-            # Start the project's Docker stack if it's dockerized
-            if project.is_dockerized:
-                compose_file = project.docker_compose_file or "docker-compose.yml"
-                compose_path = os.path.join(work, compose_file)
-                if os.path.exists(compose_path):
-                    project_name = f"openclow-{project.name}-{task_id[:8]}"
-                    log.info("workspace.docker_up", project=project.name, compose=compose_file)
-                    try:
-                        await git_ops.run_exec(
-                            "docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d",
-                            cwd=work,
-                        )
-                    except RuntimeError as e:
-                        log.warning("workspace.docker_up_failed", project=project.name, error=str(e)[:200])
-                    # Wait for containers to be ready
-                    await asyncio.sleep(5)
+            # Docker: DON'T start containers per-task.
+            # Containers are already running from bootstrap/Open App.
+            # Starting them here wastes time and can cause port conflicts.
+            # The agent can start them via MCP tools if needed.
 
             log.info("workspace.ready", path=work, from_cache=from_cache, deps_changed=deps_changed)
             return Workspace(path=work, from_cache=from_cache, deps_changed=deps_changed)
@@ -197,7 +201,7 @@ class WorkspaceService:
         await self._get_lock(project_name or "unknown")
         try:
             # Stop project Docker containers if running
-            docker_project = f"openclow-{project_name or 'unknown'}-{task_id[:8]}"
+            docker_project = f"openclow-{project_name or 'unknown'}"
             await git_ops.run_exec(
                 "docker", "compose", "-p", docker_project, "down", "-v", "--remove-orphans",
                 cwd=work, ignore_errors=True,

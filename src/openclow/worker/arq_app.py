@@ -61,61 +61,9 @@ async def on_startup(ctx: dict):
     """Called once when arq worker starts. Auto-start dashboard tunnel."""
     from openclow.services.tunnel_service import start_tunnel
 
-    log.info("worker.startup", action="auto_start_dashboard_tunnel")
-    url = await start_tunnel("dozzle", "http://dozzle:8080")
-    if url:
-        log.info("worker.dashboard_ready", url=url)
-    else:
-        log.warning("worker.dashboard_tunnel_failed")
-
-    # Auto-start settings dashboard tunnel (API service)
-    log.info("worker.startup", action="auto_start_settings_tunnel")
-    settings_url = await start_tunnel("settings", "http://api:8000")
-    if settings_url:
-        log.info("worker.settings_ready", url=settings_url)
-    else:
-        log.warning("worker.settings_tunnel_failed")
-
-    # Restore project tunnels from DB (they die when worker restarts)
-    try:
-        from sqlalchemy import select as sa_select
-        from openclow.models import Project, async_session
-        async with async_session() as session:
-            result = await session.execute(
-                sa_select(Project).where(
-                    Project.status == "active",
-                    Project.app_port.isnot(None),
-                )
-            )
-            projects = result.scalars().all()
-        for p in projects:
-            # Find container IP for tunnel target (not host port)
-            compose_project = f"openclow-{p.name}"
-            try:
-                from openclow.worker.tasks.bootstrap import _get_tunnel_target
-                tunnel_target = await _get_tunnel_target(compose_project, f"/workspaces/_cache/{p.name}", p.id)
-            except Exception:
-                tunnel_target = None
-            if not tunnel_target:
-                from openclow.services.port_allocator import get_app_port
-                tunnel_target = f"http://localhost:{get_app_port(p.id)}"
-            # Get old URL before starting new tunnel
-            from openclow.services.tunnel_service import get_tunnel_url
-            old_url = await get_tunnel_url(p.name)
-
-            proj_url = await start_tunnel(p.name, tunnel_target)
-            if proj_url:
-                log.info("worker.project_tunnel_restored", project=p.name, url=proj_url)
-
-                # If URL changed, update .env and rebuild frontend
-                if old_url and old_url != proj_url:
-                    log.info("worker.tunnel_url_changed", project=p.name,
-                             old=old_url, new=proj_url)
-                    asyncio.create_task(
-                        _sync_tunnel_url(p.name, old_url, proj_url, p.app_container_name)
-                    )
-    except Exception as e:
-        log.warning("worker.project_tunnel_restore_failed", error=str(e))
+    # Start infra tunnels in BACKGROUND — never block worker startup.
+    # Worker must be ready to process jobs immediately.
+    asyncio.create_task(_start_infra_tunnels())
 
     # Clean up orphaned Docker stacks from failed bootstraps
     # Two patterns to catch:
@@ -258,6 +206,32 @@ async def on_startup(ctx: dict):
     # Start periodic self-maintenance (cleanup orphans, stale workspaces, prune Docker)
     from openclow.worker.tasks.maintenance import maintenance_loop
     asyncio.create_task(maintenance_loop())
+
+
+async def _start_infra_tunnels():
+    """Start dozzle + settings tunnels in background. Never blocks worker startup."""
+    # Increase UDP buffer for cloudflared QUIC stability.
+    # Without this, tunnels get a URL but the QUIC connection drops immediately.
+    try:
+        _buf = await asyncio.create_subprocess_exec(
+            "sysctl", "-w", "net.core.rmem_max=7500000", "net.core.wmem_max=7500000",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await _buf.communicate()
+    except Exception:
+        pass  # Non-fatal — tunnels work without it, just less stable
+
+    from openclow.services.tunnel_service import start_tunnel
+    try:
+        url = await start_tunnel("dozzle", "http://dozzle:8080")
+        if url:
+            log.info("worker.dashboard_ready", url=url)
+        await asyncio.sleep(5)
+        settings_url = await start_tunnel("settings", "http://api:8000")
+        if settings_url:
+            log.info("worker.settings_ready", url=settings_url)
+    except Exception as e:
+        log.warning("worker.infra_tunnels_failed", error=str(e))
 
 
 async def _sync_tunnel_url(project_name: str, old_url: str, new_url: str, app_container_name: str | None = None):

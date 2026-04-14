@@ -80,8 +80,17 @@ def button_element(
     return btn
 
 
-def open_app_button(project_id: int) -> dict:
-    """Open App button — always action button to trigger health check + auto-fix."""
+def open_app_button(project_id: int, tunnel_url: str | None = None) -> dict:
+    """Open App button. If tunnel_url is known, opens in new tab directly (SPA-style).
+    Otherwise falls back to action button that runs health check."""
+    if tunnel_url:
+        return button_element(
+            "🚀 Open App",
+            f"open_app_link:{project_id}",
+            value=f"open_app_link:{project_id}",
+            style="primary",
+            url=tunnel_url,
+        )
     return button_element(
         "🚀 Open App",
         f"open_app:{project_id}",
@@ -350,13 +359,13 @@ def welcome_blocks(
     """Welcome / main menu — employee mode by default, full admin if dev_mode."""
     if project_name:
         text = (
-            f":wave: *Welcome to OpenClow*\n"
+            f":wave: *Welcome to THAG GROUP*\n"
             f"This channel is linked to *{project_name}*. "
             "I can help you build features, fix bugs, and deploy code."
         )
     else:
         text = (
-            ":wave: *Welcome to OpenClow*\n"
+            ":wave: *Welcome to THAG GROUP*\n"
             "Your AI-powered development assistant is ready. "
             "I can help you build features, fix bugs, and deploy code."
         )
@@ -496,12 +505,11 @@ def project_detail_blocks(project: Any, tunnel_url: str | None = None) -> list[d
     if desc:
         blks.append(context_block([desc[:150]]))
 
-    # Primary buttons — row 1: Open App + Chat with Agent
+    # Primary buttons — row 1: Open App
     if status == "active":
         row1 = []
         # Always show Open App button as action (triggers health check + auto-fix)
         row1.append(button_element("Open App", f"open_app:{pid}", value=f"open_app:{pid}", style="primary"))
-        row1.append(button_element("Chat with Agent", f"agent_diagnose:{pid}", value=f"agent_diagnose:{pid}"))
         blks.append(actions_block(row1))
 
         # Row 2: Task + Health
@@ -512,8 +520,7 @@ def project_detail_blocks(project: Any, tunnel_url: str | None = None) -> list[d
         ]))
     elif status == "failed":
         blks.append(actions_block([
-            button_element("Chat with Agent", f"agent_diagnose:{pid}", value=f"agent_diagnose:{pid}", style="primary"),
-            button_element("Retry", f"project_bootstrap:{pid}", value=f"project_bootstrap:{pid}"),
+            button_element("Retry", f"project_bootstrap:{pid}", value=f"project_bootstrap:{pid}", style="primary"),
             button_element("Back", "menu:projects", value="menu:projects"),
         ]))
     elif status == "inactive":
@@ -524,7 +531,6 @@ def project_detail_blocks(project: Any, tunnel_url: str | None = None) -> list[d
     elif status == "bootstrapping":
         blks.append(context_block([":hourglass_flowing_sand: Bootstrap is running..."]))
         blks.append(actions_block([
-            button_element("Chat with Agent", f"agent_diagnose:{pid}", value=f"agent_diagnose:{pid}"),
             button_element("Back", "menu:projects", value="menu:projects"),
         ]))
 
@@ -604,6 +610,7 @@ def progress_blocks(
     total: int,
     elapsed: int | None = None,
     log_lines: list[str] | None = None,
+    task_id: str = "",
 ) -> list[dict]:
     """Live progress view during task execution."""
     filled = "█" * current
@@ -618,6 +625,12 @@ def progress_blocks(
 
     if log_lines:
         blks.append(context_block([f":small_blue_diamond: {l}" for l in log_lines[-4:]]))
+
+    if task_id:
+        blks.append(actions_block([
+            button_element("❌ Cancel", f"task_cancel:{task_id}",
+                          value=f"task_cancel:{task_id}", style="danger"),
+        ]))
 
     return blks
 
@@ -775,10 +788,10 @@ def agent_thinking_blocks(user_text: str | None = None, frame: int = 0) -> list[
 
 
 def agent_working_blocks(tool_lines: list[str], elapsed: int = 0) -> list[dict]:
-    """Live agent activity — same layout as thinking blocks for smooth transition."""
-    # Progress bar fills over 30s
+    """Live agent activity — progress bar fills over 120s, always has cancel button."""
+    # Progress bar fills over 120s (realistic for heavy tasks)
     bar_len = 10
-    filled = min(bar_len, max(1, elapsed // 3))
+    filled = min(bar_len - 1, max(1, elapsed // 12))  # Never fully fills until done
     bar = "🟩" * filled + "⬜" * (bar_len - filled)
 
     # Last 3 completed + current activity
@@ -792,7 +805,9 @@ def agent_working_blocks(tool_lines: list[str], elapsed: int = 0) -> list[dict]:
             f"{bar}\n\n"
             f"{done}\n{current}".strip()
         ),
-        context_block([f"_Processing your request..._"]),
+        actions_block([
+            button_element("⏹ Cancel", "cancel_session", value="cancel_session", style="danger"),
+        ]),
     ]
 
 
@@ -968,7 +983,7 @@ def home_tab_blocks(
 ) -> list[dict]:
     """App Home Tab — employee mode, clean and simple."""
     blks: list[dict] = [
-        section_block(":zap: *OpenClow*\nAI Dev Orchestrator"),
+        section_block(":zap: *THAG GROUP*\nAI Dev Orchestrator"),
         actions_block([
             button_element("New Task", "home:task", value="home:task", style="primary"),
             button_element("Status", "home:status", value="home:status"),

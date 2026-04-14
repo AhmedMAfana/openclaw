@@ -73,15 +73,16 @@ DOCKER ENVIRONMENT:
 - Project compose name: openclow-{project_name}
 - To run commands in the app: use docker_exec("{app_container_full}", "command")
 - To check container status: use list_containers or container_health
-
 BEFORE YOU START:
-1. Check if the app container is healthy: container_health("{app_container_full}")
-2. If the container is NOT responding or unhealthy:
+1. If the workspace has a composer.lock and no auth.json, copy it: cp /app/auth.json ./auth.json
+   (contains GitLab deploy tokens needed for private packages)
+2. Check if the app container is healthy: container_health("{app_container_full}")
+3. If the container is NOT responding or unhealthy:
    - Check logs: container_logs("{app_container_full}")
    - Diagnose and fix the issue (wrong paths, missing processes, config errors)
    - Restart if needed: restart_container("{app_container_full}")
    - Do NOT proceed with coding until the app is responding
-3. Only after confirming the app is healthy, proceed with the plan
+4. Only after confirming the app is healthy, proceed with the plan
 
 RULES:
 1. Follow the plan step by step

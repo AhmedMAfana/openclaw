@@ -295,7 +295,7 @@ async def _test_chat(config: dict) -> TestResult:
                                 f"https://api.telegram.org/bot{token}/sendMessage",
                                 json={
                                     "chat_id": int(test_chat_id),
-                                    "text": "OpenClow test message — connection verified!",
+                                    "text": "THAG GROUP test message — connection verified!",
                                 },
                             )
                             msg_data = msg_resp.json()
@@ -399,7 +399,7 @@ async def _test_chat(config: dict) -> TestResult:
                             headers={"Authorization": f"Bearer {bot_token}"},
                             json={
                                 "channel": test_channel,
-                                "text": "OpenClow test message — if you see this, the bot is connected! This message will be deleted shortly.",
+                                "text": "THAG GROUP test message — if you see this, the bot is connected! This message will be deleted shortly.",
                             },
                         )
                         msg_data = msg_resp.json()

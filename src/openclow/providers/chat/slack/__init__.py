@@ -87,7 +87,7 @@ class SlackProvider(ChatProvider):
         try:
             await client.chat_update(
                 channel=chat_id, ts=message_id,
-                text="OpenClow", blocks=blocks,
+                text="THAG GROUP", blocks=blocks,
             )
         except Exception as e:
             if "message_not_found" not in str(e):

@@ -315,7 +315,6 @@ class TelegramProvider(ChatProvider):
         bot = self._get_bot()
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📋 Main Menu", callback_data="menu:main")],
-            [InlineKeyboardButton(text="💬 Chat with Agent", callback_data="menu:help")],
         ])
         
         # Use improved error messages for common errors

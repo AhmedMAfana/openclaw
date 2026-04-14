@@ -34,7 +34,28 @@ async def claude_auth_callback(callback: CallbackQuery):
     await callback.answer()
 
 
-# ── "Talk to Agent" callback — starts agent session with error context ──
+# ── Session cancel callback ──
+
+@router.callback_query(F.data.startswith("session_cancel:"))
+async def session_cancel_callback(callback: CallbackQuery):
+    """Stop a running agent session."""
+    parts = callback.data.split(":", 2)
+    if len(parts) < 3:
+        await callback.answer("Invalid cancel data")
+        return
+    cancel_chat_id = parts[1]
+    cancel_message_id = parts[2]
+
+    from openclow.worker.tasks.agent_session import set_session_cancelled
+    await set_session_cancelled(cancel_chat_id, cancel_message_id)
+    await callback.answer("Stopping agent...")
+    try:
+        await callback.message.edit_text("⏹️ Stopping agent...")
+    except Exception:
+        pass
+
+
+# ── Agent diagnose callback — starts agent session scoped to project ──
 
 @router.callback_query(F.data.startswith("agent_diagnose:"))
 async def agent_diagnose_callback(callback: CallbackQuery):

@@ -23,7 +23,7 @@ def register(app):
                 view={
                     "type": "home",
                     "blocks": [
-                        header_block(":zap: OpenClow"),
+                        header_block(":zap: THAG GROUP"),
                         section_block(
                             "You are not authorized to use this app.\n\n"
                             f"Your Slack ID: `{user_id}`\n"

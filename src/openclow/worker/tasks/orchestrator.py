@@ -216,18 +216,15 @@ def _main_menu_keyboard():
 
 
 def _retry_keyboard(project_id: int | None = None):
-    """Retry + agent + main menu keyboard for interrupted tasks."""
+    """Retry + main menu keyboard for interrupted tasks."""
     from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
-    rows = []
-    if project_id:
-        rows.append(ActionRow([ActionButton("🤖 Talk to Agent", f"agent_diagnose:{project_id}")]))
-    rows.extend([
+    rows = [
         ActionRow([ActionButton("🔄 Retry", "menu:task")]),
         ActionRow([
             ActionButton("📋 View Logs", "menu:logs"),
             ActionButton("◀️ Main Menu", "menu:main"),
         ]),
-    ])
+    ]
     return ActionKeyboard(rows=rows)
 
 
@@ -427,7 +424,8 @@ async def execute_task(ctx: dict, task_id: str, skip_planning: bool = False):
 
     from openclow.services.status_reporter import StatusReporter
     reporter = StatusReporter(chat, task.chat_id, task.chat_message_id,
-                              title=f"Planning: {task.description[:40]}")
+                              title=f"Planning: {task.description[:40]}",
+                              task_id=task_id_str)
     await reporter.start()
 
     try:
@@ -602,20 +600,21 @@ async def execute_plan(ctx: dict, task_id: str):
 
     from openclow.services.status_reporter import StatusReporter
     reporter = StatusReporter(chat, task.chat_id, task.chat_message_id,
-                              title=f"Coding: {task.description[:40]}")
+                              title=f"Coding: {task.description[:40]}",
+                              task_id=task_id_str)
     await reporter.start()
 
     try:
         # ── Pre-flight: smart health check + repair + tunnel ──
         await _update_task(task_id_str, status="coding")
-        await reporter.stage("Checking project health", step=0, total=total_steps)
+        await reporter.stage("Checking project health", step=1, total=total_steps)
 
         _healthy, tunnel_url_for_display = await _ensure_project_healthy(
             task, reporter, task_id_str,
         )
 
         # ── Step 1: Run Coder Agent with plan ──
-        await reporter.stage("Implementing plan", step=0, total=total_steps)
+        await reporter.stage("Implementing plan", step=1, total=total_steps)
 
         turn_count = 0
         current_step = 0
@@ -672,9 +671,10 @@ async def execute_plan(ctx: dict, task_id: str):
                 await reporter.log(tool_desc)
 
             # Stall detection — tracks tool activity, not just git diff
-            if turn_count % 15 == 0 and turn_count > 35:
+            # Check every 10 turns starting at turn 20 (catch stalls earlier)
+            if turn_count % 10 == 0 and turn_count > 20:
                 diff_size = await git_ops.diff_size(workspace_path)
-                tools_active = (turn_count - last_tool_turn) < 15
+                tools_active = (turn_count - last_tool_turn) < 10
 
                 if diff_size != last_diff_size or write_tool_seen:
                     # Agent is producing file changes — productive
@@ -686,12 +686,12 @@ async def execute_plan(ctx: dict, task_id: str):
                     write_tool_seen = False
                 elif tools_active:
                     # No file changes but agent is using tools (reading/exploring)
-                    stall_count += 0.5
+                    stall_count += 1
                     log.info("orchestrator.exploring", task_id=task_id_str,
                              turn=turn_count, stall_score=stall_count)
                 else:
                     # No file changes AND no tool activity — real stall
-                    stall_count += 1
+                    stall_count += 2
                     log.warning("orchestrator.stall_warning", task_id=task_id_str,
                                 turn=turn_count, stall_count=stall_count)
 
@@ -699,7 +699,7 @@ async def execute_plan(ctx: dict, task_id: str):
                     log.error("orchestrator.agent_stalled", task_id=task_id_str,
                               turns=turn_count, last_diff_size=last_diff_size)
                     raise RuntimeError(
-                        f"Agent stalled — no meaningful activity for ~{int(stall_count * 15)} turns. "
+                        f"Agent stalled — no meaningful activity for ~{turn_count} turns. "
                         f"The task may need clarification."
                     )
 
@@ -816,15 +816,13 @@ async def execute_plan(ctx: dict, task_id: str):
 
             from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
             kb = ActionKeyboard(rows=[
-                ActionRow([ActionButton("🤖 Talk to Agent", f"agent_diagnose:{task.project_id}")]),
                 ActionRow([ActionButton("🔄 Retry Task", "menu:task")]),
                 ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
             ])
             await reporter.error(
                 "⚠️ No Changes Detected\n\n"
                 "The agent completed two attempts but didn't modify any files.\n"
-                "• Try rephrasing the task with more specific details\n"
-                "• Use 'Talk to Agent' to discuss what went wrong",
+                "Try rephrasing the task with more specific details.",
                 keyboard=kb
             )
             return
@@ -914,17 +912,12 @@ async def execute_plan(ctx: dict, task_id: str):
         elif "stalled" in error_str or "no progress" in error_str:
             from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
             kb = ActionKeyboard(rows=[
-                ActionRow([ActionButton("🤖 Talk to Agent", f"agent_diagnose:{task.project_id}")]),
                 ActionRow([ActionButton("🔄 Retry Task", "menu:task")]),
                 ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
             ])
             await reporter.error(
                 "⏱️ Agent Stalled\n\n"
-                "The agent stopped making progress. This can happen when:\n"
-                "• The task needs more specific details\n"
-                "• The agent is stuck exploring the codebase\n"
-                "• The file structure is complex\n\n"
-                "💡 *Tip:* Use 'Talk to Agent' to discuss the issue, then retry with clearer instructions.",
+                "The agent stopped making progress. Try rephrasing the task with more specific details.",
                 keyboard=kb
             )
             await _update_task(task_id_str, status="failed",
@@ -1013,7 +1006,7 @@ async def approve_task(ctx: dict, task_id: str):
             repo=task.project.github_repo,
             branch=task.branch_name,
             base=task.project.default_branch,
-            title=f"[OpenClow] {task.description[:60]}",
+            title=f"[THAG GROUP] {task.description[:60]}",
             body=git.generate_pr_body(task),
         )
         await checklist.complete_step(2, f"PR #{pr_number}")

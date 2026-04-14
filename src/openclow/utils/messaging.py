@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 # Welcome & Onboarding
 # ═══════════════════════════════════════════════════════════════════════════════
 
-WELCOME_MESSAGE = """Welcome to OpenClow 👋
+WELCOME_MESSAGE = """Welcome to THAG GROUP 👋
 
 Your AI-powered development assistant is ready. I can help you:
 • Build features and fix bugs
@@ -253,7 +253,6 @@ The agent completed the task but didn't modify any files. This can happen when:
 <b>What you can do:</b>
 • Rephrase your request with more specific requirements
 • Check if the feature is already implemented
-• Use "Chat with Agent" to discuss the implementation
 
 <i>Would you like to try again with a different approach?</i>"""
     
@@ -291,7 +290,7 @@ I couldn't find that task. It may have been completed, cancelled, or the ID may 
     
     UNAUTHORIZED = """🔒 Access Denied
 
-Your account doesn't have permission to use OpenClow yet.
+Your account doesn't have permission to use THAG GROUP yet.
 
 <b>To get access:</b>
 Contact your workspace administrator to authorize your account.
@@ -338,7 +337,7 @@ Your task took longer than expected and was automatically cancelled to prevent r
 <b>What you can do:</b>
 • Try breaking the task into smaller pieces
 • Submit again (it may complete faster on retry)
-• Use "Chat with Agent" to discuss a different approach"""
+• Submit again (it may complete faster on retry)"""
     
     GENERIC_ERROR = """❌ Something Went Wrong
 

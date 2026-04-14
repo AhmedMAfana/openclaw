@@ -93,26 +93,8 @@ async def check_tunnel_health_task(ctx: dict) -> dict:
                                     host_header = parsed.hostname
                             break
 
+            # start_tunnel auto-syncs the container (.env, trustedproxy, caches)
             url = await tunnel_service.start_tunnel(p.name, target, host_header=host_header)
-            if url:
-                # Update APP_URL in .env to match new tunnel
-                if os.path.exists(env_path):
-                    try:
-                        with open(env_path) as f:
-                            content = f.read()
-                        import re
-                        content = re.sub(r'APP_URL=.*', f'APP_URL={url}', content)
-                        with open(env_path, 'w') as f:
-                            f.write(content)
-                        # Clear Laravel config cache if applicable
-                        from openclow.services.docker_guard import run_docker
-                        container = f"{compose_project}-{p.app_container_name or 'laravel.test'}-1"
-                        await run_docker(
-                            "docker", "exec", container, "php", "artisan", "config:clear",
-                            actor="tunnel_health", timeout=10,
-                        )
-                    except Exception:
-                        pass
             results[p.name] = {"url": url, "healthy": url is not None}
     except Exception as e:
         log.warning("tunnel.project_health_check_failed", error=str(e))

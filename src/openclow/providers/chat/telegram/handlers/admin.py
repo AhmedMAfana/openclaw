@@ -853,7 +853,7 @@ async def bind_channel_callback(callback: CallbackQuery, db_user):
                 await client.post(
                     "https://slack.com/api/conversations.setTopic",
                     headers={"Authorization": f"Bearer {bot_token}"},
-                    json={"channel": channel_id, "topic": f"🤖 OpenClow: {project_name}"},
+                    json={"channel": channel_id, "topic": f"🤖 THAG GROUP: {project_name}"},
                 )
     except Exception:
         pass

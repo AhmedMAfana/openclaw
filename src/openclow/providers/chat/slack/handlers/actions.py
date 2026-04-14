@@ -1052,13 +1052,31 @@ def register(app):
 
         try:
             from openclow.models import Task, async_session
-            from sqlalchemy import update
+            from sqlalchemy import select, update
             import uuid
+
+            # Fetch task to get arq_job_id, then abort the worker job
+            async with async_session() as session:
+                result = await session.execute(
+                    select(Task).where(Task.id == uuid.UUID(task_id))
+                )
+                task = result.scalar_one_or_none()
+                arq_job_id = task.arq_job_id if task else None
+
+            # Abort the arq worker job so it actually stops
+            if arq_job_id:
+                try:
+                    from openclow.worker.arq_app import get_arq_pool
+                    pool = await get_arq_pool()
+                    await pool.abort_job(arq_job_id)
+                except Exception as abort_err:
+                    log.warning("task_cancel.abort_failed", task_id=task_id, error=str(abort_err))
+
             async with async_session() as session:
                 await session.execute(
                     update(Task)
                     .where(Task.id == uuid.UUID(task_id))
-                    .values(status="cancelled")
+                    .values(status="cancelled", error_message="Cancelled by user")
                 )
                 await session.commit()
 
@@ -1081,6 +1099,36 @@ def register(app):
                 channel=channel, ts=ts,
                 text="Error", blocks=blocks.error_blocks(f"Could not cancel task: {str(e)[:100]}")
             )
+
+    # ── Agent Session Cancel ─────────────────────────────────
+
+    @app.action(re.compile(r"^session_cancel:"))
+    async def handle_session_cancel(ack, body, client):
+        """Stop a running agent session via Redis cancel flag."""
+        await ack()
+        action_value = body["actions"][0]["value"]
+        # Format: session_cancel:{chat_id}:{message_id}
+        parts = action_value.split(":", 2)
+        if len(parts) < 3:
+            return
+        cancel_chat_id = parts[1]
+        cancel_message_id = parts[2]
+        channel = body["channel"]["id"]
+        ts = body["message"]["ts"]
+
+        try:
+            from openclow.worker.tasks.agent_session import set_session_cancelled
+            await set_session_cancelled(cancel_chat_id, cancel_message_id)
+            await client.chat_update(
+                channel=channel, ts=ts,
+                text="⏹️ Stopping...",
+                blocks=[
+                    blocks.section_block(":stop_button: *Stopping agent...*\n\nThe agent will stop after its current action."),
+                ]
+            )
+            log.info("session.cancel_requested", chat_id=cancel_chat_id)
+        except Exception as e:
+            log.error("session_cancel_failed", error=str(e))
 
     # ── Overflow Menus ────────────────────────────────────────
 
@@ -1362,138 +1410,30 @@ def register(app):
     # Open App — the SMART entry point. Fixes everything needed to get a working URL.
     @app.action(re.compile(r"^open_app:"))
     async def handle_open_app(ack, body, client):
+        """Open App — enqueues check_project_health (same as Telegram)."""
         await ack()
         try:
-            action_value = body["actions"][0]["value"]
+            action = body["actions"][0]
+            action_value = action.get("value") or action.get("action_id", "")
             project_id = int(action_value.split(":", 1)[1])
             channel = body["channel"]["id"]
             ts = body["message"]["ts"]
 
-            from openclow.models import Project, async_session
-            from sqlalchemy import select as sa_select
-            async with async_session() as session:
-                result = await session.execute(sa_select(Project).where(Project.id == project_id))
-                project = result.scalar_one_or_none()
-                if project:
-                    session.expunge(project)
-
-            if not project:
-                await client.chat_update(channel=channel, ts=ts, text="Project not found",
-                                         blocks=blocks.error_blocks("Project not found"))
-                return
-
-            await client.chat_update(channel=channel, ts=ts, text="Opening app...",
-                                     blocks=[blocks.section_block(f"🔍 Checking *{project.name}*...")])
-
-            # Step 1: Check if tunnel URL exists and app responds
-            from openclow.services.tunnel_service import get_tunnel_url, check_tunnel_health, start_tunnel, stop_tunnel
-            import httpx
-
-            url = await get_tunnel_url(project.name)
-            app_alive = False
-
-            if url:
-                # Probe the URL
-                try:
-                    async with httpx.AsyncClient(timeout=5, follow_redirects=True, verify=False) as http:
-                        resp = await http.get(url)
-                        app_alive = resp.status_code < 502
-                except Exception:
-                    pass
-
-            if app_alive:
-                # Everything works — show URL immediately
-                _show_url = url
-            else:
-                # Something's broken — fix it inline
-                await client.chat_update(channel=channel, ts=ts, text="Fixing...",
-                                         blocks=[blocks.section_block(f"🔧 Fixing tunnel for *{project.name}*...")])
-
-                # Kill old zombie tunnel
-                await stop_tunnel(project.name)
-
-                # Find the container IP
-                compose_project = f"openclow-{project.name}"
-                target = None
-                try:
-                    from openclow.worker.tasks.bootstrap import _get_tunnel_target
-                    target = await _get_tunnel_target(
-                        compose_project, f"/workspaces/_cache/{project.name}", project.id)
-                except Exception:
-                    pass
-
-                if not target:
-                    from openclow.services.port_allocator import get_app_port
-                    target = f"http://localhost:{get_app_port(project.id)}"
-
-                # Detect host_header from .env (for Laravel virtual hosts)
-                import os
-                host_header = None
-                env_path = f"/workspaces/_cache/{project.name}/.env"
-                if os.path.exists(env_path):
-                    try:
-                        with open(env_path) as f:
-                            for line in f:
-                                if line.strip().startswith("APP_URL="):
-                                    from urllib.parse import urlparse
-                                    app_url = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
-                                    parsed = urlparse(app_url)
-                                    if parsed.hostname and ".trycloudflare.com" not in parsed.hostname \
-                                            and parsed.hostname not in ("localhost", "127.0.0.1"):
-                                        host_header = parsed.hostname
-                                    break
-                    except Exception:
-                        pass
-
-                # Start fresh tunnel
-                new_url = await start_tunnel(project.name, target, host_header=host_header)
-
-                if new_url:
-                    # Update APP_URL in .env so app uses new tunnel
-                    if os.path.exists(env_path):
-                        try:
-                            with open(env_path) as f:
-                                content = f.read()
-                            import re as _re
-                            content = _re.sub(r'APP_URL=.*', f'APP_URL={new_url}', content)
-                            with open(env_path, 'w') as f:
-                                f.write(content)
-                            # Clear Laravel config cache
-                            from openclow.services.docker_guard import run_docker
-                            container = f"{compose_project}-{project.app_container_name or 'laravel.test'}-1"
-                            await run_docker("docker", "exec", container, "php", "artisan", "config:clear",
-                                             actor="open_app", timeout=10)
-                            await run_docker("docker", "exec", container, "php", "artisan", "cache:clear",
-                                             actor="open_app", timeout=10)
-                        except Exception:
-                            pass
-                    _show_url = new_url
-                else:
-                    # Tunnel failed — fall back to health check agent
-                    await client.chat_update(
-                        channel=channel, ts=ts, text="Checking app...",
-                        blocks=blocks.agent_thinking_blocks("⚠️ Tunnel failed — running full health check..."),
-                    )
-                    await bot_actions.enqueue_job("check_project_health", project_id, channel, ts, "slack")
-                    return
-
-            # Show the working URL
-            from openclow.providers.actions import ActionButton, project_nav_keyboard
-            kb = project_nav_keyboard(
-                project_id,
-                ActionButton("🌐 Open", "open_link", url=_show_url),
-                ActionButton("💚 Health", f"health:{project_id}"),
+            await client.chat_update(
+                channel=channel, ts=ts,
+                text="Opening app...",
+                blocks=blocks.loading_blocks("Opening app..."),
             )
-            text = f"✅ *{project.name}* is running\n🔗 {_show_url}"
-            blks = [blocks.section_block(text)] + blocks.translate_keyboard(kb)
-            await client.chat_update(channel=channel, ts=ts, text=text, blocks=blks)
-
+            await bot_actions.enqueue_job("check_project_health", project_id, channel, ts, "slack")
         except Exception as e:
             log.error("slack.open_app_failed", error=str(e))
-            await client.chat_update(
-                channel=body["channel"]["id"], ts=body["message"]["ts"],
-                text="Error", blocks=blocks.error_blocks(f"Failed: {str(e)[:100]}")
-            )
+            try:
+                await client.chat_update(
+                    channel=body["channel"]["id"], ts=body["message"]["ts"],
+                    text="Error", blocks=blocks.error_blocks(f"Failed: {str(e)[:100]}")
+                )
+            except Exception:
+                pass
 
     # ── Home Tab Actions (prefixed with home:) ───────────────
     # These are identical to menu: actions but triggered from the Home Tab

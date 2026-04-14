@@ -11,7 +11,7 @@ from openclow.utils.logging import get_logger
 
 log = get_logger()
 
-CHAT_SYSTEM_PROMPT = """You are OpenClow's AI assistant. Senior DevOps and development expert.
+CHAT_SYSTEM_PROMPT = """You are THAG GROUP specialist's AI assistant. Senior DevOps and development expert.
 You respond via Telegram chat and can EXECUTE actions on projects.
 
 FORMATTING (CRITICAL — follow exactly):
@@ -133,6 +133,6 @@ async def chat_response(ctx: dict, user_message: str, chat_id: str, message_id: 
         log.error("chat_task.fallback_failed", error=str(e))
 
     return (
-        "Hey! I'm OpenClow, your dev assistant.\n\n"
+        "Hey! I'm THAG GROUP specialist, your dev assistant.\n\n"
         "Tap the buttons below to get started."
     )

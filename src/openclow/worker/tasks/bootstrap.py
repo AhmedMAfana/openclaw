@@ -302,20 +302,36 @@ async def _step_env(on_progress, workspace: str, compose: str) -> str:
 
 
 async def _preflight(project, workspace: str, compose: str, compose_project: str):
-    """Pre-bootstrap cleanup and verification. Runs BEFORE the agent starts.
+    """Pre-bootstrap/repair cleanup and verification. Runs BEFORE the agent starts.
 
-    Handles all the infrastructure problems that an LLM agent can't fix:
-    1. Kill old containers for this project (prevent port conflicts + orphans)
-    2. Kill bare-name compose stacks (agent forgot -p flag on previous run)
-    3. Write port env vars into .env (so docker compose reads them)
-    4. Verify Docker-in-Docker host path detection works
-    5. Stop old tunnel (will be recreated after app is verified)
+    Handles infrastructure problems that an LLM agent can't fix:
+    1. Verify Docker daemon is accessible
+    2. Kill old containers for this project (prevent port conflicts + orphans)
+    3. Kill orphan stacks with task ID suffixes
+    4. Prune dangling networks
+    5. Write port env vars into .env
+    6. Verify Docker-in-Docker host path detection
+    7. Stop old tunnel (recreated after app verified)
+    8. Free up ports — stop anything using our allocated ports
+    9. Verify compose file exists
     """
     from openclow.services.docker_guard import run_docker_compose, _detect_host_workspace_path
     from openclow.services.port_allocator import get_port_env_vars
     import subprocess
 
-    # 1. Stop any old containers for this project (both naming patterns)
+    # 1. Verify Docker daemon is accessible
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            log.error("preflight.docker_unavailable", stderr=result.stderr[:200])
+            raise RuntimeError("Docker daemon is not running or not accessible")
+    except FileNotFoundError:
+        raise RuntimeError("Docker CLI not found")
+
+    # 2. Stop any old containers for this project (both naming patterns)
     for proj_name in [compose_project, project.name]:
         try:
             await run_docker_compose(
@@ -327,38 +343,70 @@ async def _preflight(project, workspace: str, compose: str, compose_project: str
         except Exception:
             pass
 
-    # 2. Write port env vars directly into .env (not a separate file)
-    #    This ensures docker compose sees them even when called by the agent
-    #    through MCP tools (which don't pass project_id to docker_guard).
+    # 3. Kill orphan stacks with task ID suffixes (openclow-{name}-{taskid})
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--filter", f"name=openclow-{project.name}-",
+             "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        orphans = set()
+        for name in result.stdout.strip().split("\n"):
+            name = name.strip()
+            if not name:
+                continue
+            # Extract compose project from container name (e.g. openclow-tagh-fre-abc12345-app-1 → openclow-tagh-fre-abc12345)
+            parts = name.rsplit("-", 1)  # Remove service suffix (-1)
+            if len(parts) == 2:
+                stack = parts[0].rsplit("-", 1)[0]  # Remove service name
+                if stack != compose_project and stack.startswith(f"openclow-{project.name}"):
+                    orphans.add(stack)
+        for orphan in orphans:
+            log.warning("preflight.cleaning_orphan", stack=orphan)
+            subprocess.run(
+                ["docker", "compose", "-p", orphan, "down", "--remove-orphans"],
+                capture_output=True, timeout=30,
+            )
+    except Exception:
+        pass
+
+    # 4. Prune dangling networks (leftover from failed compose down)
+    try:
+        subprocess.run(
+            ["docker", "network", "prune", "-f"],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass
+
+    # 5. Write port env vars directly into .env
     port_vars = get_port_env_vars(project.id)
     env_path = os.path.join(workspace, ".env")
     if os.path.exists(env_path):
         with open(env_path) as f:
             env_content = f.read()
-        # Remove old port vars if present
         lines = [l for l in env_content.split("\n")
                  if not any(l.startswith(f"{k}=") for k in port_vars)]
-        # Append fresh port vars
         lines.append("\n# OpenClow port isolation (auto-generated)")
         for k, v in port_vars.items():
             lines.append(f"{k}={v}")
         with open(env_path, "w") as f:
             f.write("\n".join(lines))
 
-    # 3. Verify Docker-in-Docker path detection
+    # 6. Verify Docker-in-Docker path detection
     host_path = await _detect_host_workspace_path()
     if not host_path:
         log.warning("preflight.no_host_path",
                     hint="Docker-in-Docker path detection failed — volume mounts may not work")
 
-    # 4. Stop old tunnel (will be recreated in step 7 after app is verified)
+    # 7. Stop old tunnel (recreated after app verified)
     try:
         from openclow.services.tunnel_service import stop_tunnel
         await stop_tunnel(project.name)
     except Exception:
         pass
 
-    # 5. Free up ports — find and stop containers using our allocated ports
+    # 8. Free up ports — stop anything using our allocated ports
     app_port = port_vars.get("APP_PORT", "")
     if app_port:
         try:
@@ -368,7 +416,7 @@ async def _preflight(project, workspace: str, compose: str, compose_project: str
             )
             for container in result.stdout.strip().split("\n"):
                 container = container.strip()
-                if container and not container.startswith("openclow-") and container != compose_project:
+                if container and container != f"{compose_project}-{project.app_container_name or 'app'}-1":
                     subprocess.run(
                         ["docker", "stop", container],
                         capture_output=True, timeout=10,
@@ -376,6 +424,11 @@ async def _preflight(project, workspace: str, compose: str, compose_project: str
                     log.info("preflight.stopped_port_conflict", container=container, port=app_port)
         except Exception:
             pass
+
+    # 9. Verify compose file exists
+    compose_path = os.path.join(workspace, compose)
+    if not os.path.exists(compose_path):
+        raise RuntimeError(f"Compose file not found: {compose_path}")
 
     log.info("preflight.done", project=project.name, host_path=host_path,
              ports=f"app={app_port}")
@@ -614,12 +667,11 @@ async def _configure_app_for_tunnel(workspace: str, tunnel_url: str, compose_pro
         lines = f.readlines()
 
     # URL env vars to update (key → new value)
-    # ASSET_URL is left empty so Laravel generates RELATIVE asset paths —
-    # this avoids CORS issues when the same app is accessed from both
-    # localhost and the tunnel URL. VITE vars use "/" for the same reason.
+    # ASSET_URL must be the full HTTPS tunnel URL — empty causes Laravel to use
+    # the request scheme (http from cloudflared) which causes mixed content.
     url_vars = {
         "APP_URL": tunnel_url,
-        "ASSET_URL": "",
+        "ASSET_URL": tunnel_url,
         "VITE_API_BASE_URL": "/",
         "VITE_APP_URL": "",
         "NEXT_PUBLIC_URL": tunnel_url,
@@ -665,7 +717,7 @@ async def _configure_app_for_tunnel(workspace: str, tunnel_url: str, compose_pro
         f.writelines(new_lines)
 
     # No nginx server_name rewrite needed — we use --http-host-header in cloudflared
-    # No container restart needed — .env changes apply on next request (Laravel reads .env on boot)
+    # Container .env + trustedproxy.php + cache clear handled by start_tunnel() → sync_project_tunnel()
 
     log.info("bootstrap.tunnel_configured", url=tunnel_url, workspace=workspace)
 
@@ -1779,7 +1831,6 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
             checklist._footer = f"❌ {reason}"
             from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
             kb = ActionKeyboard(rows=[
-                ActionRow([ActionButton("🤖 Talk to Agent", f"agent_diagnose:{project.id}")]),
                 ActionRow([ActionButton("🔄 Retry Bootstrap", f"project_bootstrap:{project.id}")]),
                 ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
             ])
@@ -2020,7 +2071,6 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
         try:
             from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
             await checklist._force_render(keyboard=ActionKeyboard(rows=[
-                ActionRow([ActionButton("🤖 Talk to Agent", f"agent_diagnose:{project.id}")]),
                 ActionRow([ActionButton("🔄 Retry Bootstrap", f"project_bootstrap:{project.id}")]),
                 ActionRow([
                     ActionButton("🔗 Unlink", f"project_unlink:{project.id}"),

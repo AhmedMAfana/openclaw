@@ -97,6 +97,7 @@ services:
       - activity_logs:/app/logs
       - /var/run/docker.sock:/var/run/docker.sock  # access to host Docker
       - ./src:/app/src  # live-reload: code changes without rebuild
+      - ./auth.json:/app/auth.json:ro  # Composer GitLab deploy tokens
     deploy:
       resources:
         limits:

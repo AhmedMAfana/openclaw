@@ -11,6 +11,36 @@ from openclow.utils.logging import get_logger
 
 log = get_logger()
 
+# Cancel flag key — set by UI when user clicks Stop
+_CANCEL_KEY = "openclow:cancel:{chat_id}:{message_id}"
+
+
+async def _check_cancelled(chat_id: str, message_id: str) -> bool:
+    """Check if user requested cancellation via Redis flag."""
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(settings.redis_url)
+        val = await r.get(_CANCEL_KEY.format(chat_id=chat_id, message_id=message_id))
+        await r.aclose()
+        return val is not None
+    except Exception:
+        return False
+
+
+async def set_session_cancelled(chat_id: str, message_id: str):
+    """Set cancel flag for an agent session (called from UI handler)."""
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(settings.redis_url)
+        await r.set(
+            _CANCEL_KEY.format(chat_id=chat_id, message_id=message_id),
+            "1", ex=300,  # Auto-expire after 5 min
+        )
+        await r.aclose()
+    except Exception as e:
+        log.warning("agent_session.set_cancel_failed", error=str(e))
+
+
 # Per-user conversation memory — each user in a channel has their own history
 # Key: openclow:conv:{chat_id}:{user_id}  (falls back to {chat_id} if no user_id)
 _CONV_KEY = "openclow:conv:{session_key}"
@@ -109,20 +139,40 @@ async def agent_session(ctx: dict, user_message: str, chat_id: str, message_id: 
             pass
         return
 
-async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message_id: str,
-                        project_context: str = "", chat_provider_type: str = "telegram", user_id: str = ""):
+async def _check_auth_cached() -> bool | None:
+    """Check Claude auth with Redis cache (5 min TTL). Returns True/False/None (unknown)."""
+    _AUTH_CACHE_KEY = "openclow:claude_auth_ok"
     try:
-        chat = await factory.get_chat_by_type(chat_provider_type)
-    except Exception:
-        chat = await factory.get_chat()
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(settings.redis_url)
+        cached = await r.get(_AUTH_CACHE_KEY)
+        if cached is not None:
+            await r.aclose()
+            return cached == b"1"
+        # Cache miss — check via subprocess
+        import json as _json
+        auth_proc = await asyncio.create_subprocess_exec(
+            "claude", "auth", "status", "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        auth_out, _ = await asyncio.wait_for(auth_proc.communicate(), timeout=10)
+        auth_status = _json.loads(auth_out.decode())
+        ok = auth_status.get("loggedIn", False)
+        await r.set(_AUTH_CACHE_KEY, "1" if ok else "0", ex=300)
+        await r.aclose()
+        return ok
+    except Exception as e:
+        log.warning("agent_session.auth_check_failed", error=str(e))
+        return None  # Unknown — try anyway
 
-    # Auto-cleanup: Cancel old stuck diff_preview tasks when user sends a new message
-    # This prevents the UI from showing multiple unapproved tasks
+
+async def _cleanup_old_tasks(chat_id: str):
+    """Cancel old stuck diff_preview tasks in background."""
     try:
         from openclow.models import Task, async_session
-        from sqlalchemy import select, update
+        from sqlalchemy import select
         async with async_session() as session:
-            # Find old diff_preview tasks in the same channel
             old_stuck = await session.execute(
                 select(Task).where(
                     Task.chat_id == chat_id,
@@ -130,7 +180,6 @@ async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message
                 ).order_by(Task.created_at.desc()).offset(0).limit(10)
             )
             old_tasks = old_stuck.scalars().all()
-            # Cancel all but the most recent one (which might still be reviewing)
             if len(old_tasks) > 1:
                 for old_task in old_tasks[1:]:
                     old_task.status = "cancelled"
@@ -140,59 +189,21 @@ async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message
     except Exception as e:
         log.warning("agent_session.cleanup_failed", error=str(e))
 
-    try:
-        from claude_agent_sdk import query, ClaudeAgentOptions
-        from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
-    except ImportError:
-        await chat.edit_message(chat_id, message_id, "Agent SDK unavailable. Install claude-agent-sdk.")
-        return
 
-    # Pre-check: is Claude authenticated?
-    try:
-        import json as _json
-        auth_proc = await asyncio.create_subprocess_exec(
-            "claude", "auth", "status", "--json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        auth_out, _ = await asyncio.wait_for(auth_proc.communicate(), timeout=10)
-        auth_status = _json.loads(auth_out.decode())
-        if not auth_status.get("loggedIn"):
-            log.warning("agent_session.auth_expired", chat_id=chat_id)
-            try:
-                from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
-                kb = ActionKeyboard(rows=[
-                    ActionRow([ActionButton("🔑 Authenticate Claude", "claude_auth")]),
-                    ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
-                ])
-                await chat.edit_message_with_actions(
-                    chat_id, message_id,
-                    "🔑 Claude is not authenticated.\n\nTap to sign in:",
-                    kb,
-                )
-            except Exception as edit_err:
-                log.error("agent_session.auth_edit_failed", error=str(edit_err))
-                # Fallback: plain text
-                await chat.edit_message(
-                    chat_id, message_id,
-                    "🔑 Claude is not authenticated. Run /settings to re-authenticate.",
-                )
-            await chat.close()
-            return
-    except Exception as e:
-        log.warning("agent_session.auth_check_failed", error=str(e))
-        # If check fails, try anyway — might work
+async def _build_context(chat_id: str, project_context: str, user_id: str):
+    """Build project context + check admin status in a single DB session.
 
-    # Build project context from DB
-    from openclow.models import Project, Task, async_session
+    Returns (context_parts, workspace, tunnel_url, project_name, target_pid, is_admin).
+    """
+    from openclow.models import Project, Task, TaskLog, User, async_session
     from sqlalchemy import select
 
     context_parts: list[str] = []
     workspace: str | None = None
-    tunnel_url: str | None = None  # For "Open App" button
-    project_name: str | None = None  # For response header
+    tunnel_url: str | None = None
+    project_name: str | None = None
+    is_admin = False
 
-    # Extract target project_id from context (channel binding)
     target_pid: int | None = None
     if project_context and "project_id:" in project_context:
         try:
@@ -201,12 +212,22 @@ async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message
             pass
 
     async with async_session() as session:
+        # ── Admin check (same session) ──
+        if user_id:
+            user_result = await session.execute(
+                select(User).where(User.chat_provider_uid == user_id)
+            )
+            db_user = user_result.scalar_one_or_none()
+            is_admin = db_user and db_user.is_admin
+        else:
+            db_user = None
+
+        # ── Projects ──
         result = await session.execute(
             select(Project).where(Project.status == "active")
         )
         all_projects = result.scalars().all()
 
-        # If channel is linked, scope to that project only
         if target_pid:
             projects = [p for p in all_projects if p.id == target_pid]
         else:
@@ -215,23 +236,19 @@ async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message
         if projects:
             if len(projects) == 1:
                 p = projects[0]
-                project_name = p.name  # Store for response header
+                project_name = p.name
                 context_parts.append(f"FOCUSED PROJECT: {p.name} ({p.tech_stack or 'N/A'})")
                 if p.description:
                     context_parts.append(f"Description: {p.description}")
                 if p.agent_system_prompt:
                     context_parts.append(f"Conventions:\n{p.agent_system_prompt}")
+                # Get tunnel URL without health check (fast path)
                 try:
-                    from openclow.services.tunnel_service import get_tunnel_url, check_tunnel_health
+                    from openclow.services.tunnel_service import get_tunnel_url
                     t_url = await get_tunnel_url(p.name)
                     if t_url:
-                        # Verify tunnel is actually alive before showing "Open App" button
-                        tunnel_alive = await check_tunnel_health(p.name)
-                        if tunnel_alive:
-                            tunnel_url = t_url
-                            t_url_display = t_url
-                        else:
-                            t_url_display = "tunnel not responding"
+                        tunnel_url = t_url
+                        t_url_display = t_url
                     else:
                         t_url_display = "no tunnel"
                 except Exception as e:
@@ -247,25 +264,16 @@ async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message
                     "If the user asks to do work, ask which project they mean, or suggest the most relevant one.\n"
                     "Available projects:"
                 )
-                for p in projects[:3]:  # Limit to 3 to avoid prompt bloat
+                for p in projects[:3]:
                     context_parts.append(f"  • {p.name} ({p.tech_stack or 'N/A'})")
                     if p.description:
                         context_parts.append(f"    Description: {p.description[:150]}")
                 workspace = f"{settings.workspace_base_path}/_cache"
 
-        # Recent tasks with full context (files changed, errors, summaries)
-        # Filter by user if available, else show all tasks in channel
-        from openclow.models import TaskLog
+        # ── Recent tasks ──
         task_query = select(Task).where(Task.chat_id == chat_id)
-        if user_id:
-            # Look up user by provider UID to filter tasks
-            from openclow.models import User
-            user_result = await session.execute(
-                select(User).where(User.chat_provider_uid == user_id)
-            )
-            db_user = user_result.scalar_one_or_none()
-            if db_user:
-                task_query = task_query.where(Task.user_id == db_user.id)
+        if db_user:
+            task_query = task_query.where(Task.user_id == db_user.id)
 
         result = await session.execute(task_query.order_by(Task.created_at.desc()).limit(3))
         recent_tasks = result.scalars().all()
@@ -279,7 +287,6 @@ async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message
                     line += f" | Error: {t.error_message[:60]}"
                 context_parts.append(line)
 
-                # Load task logs for detail (what was done, files changed)
                 log_result = await session.execute(
                     select(TaskLog)
                     .where(TaskLog.task_id == t.id)
@@ -295,10 +302,56 @@ async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message
     if not workspace:
         workspace = settings.workspace_base_path
 
+    return context_parts, workspace, tunnel_url, project_name, target_pid, is_admin
+
+
+async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message_id: str,
+                        project_context: str = "", chat_provider_type: str = "telegram", user_id: str = ""):
+    try:
+        chat = await factory.get_chat_by_type(chat_provider_type)
+    except Exception:
+        chat = await factory.get_chat()
+
+    try:
+        from claude_agent_sdk import query, ClaudeAgentOptions
+        from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
+    except ImportError:
+        await chat.edit_message(chat_id, message_id, "Agent SDK unavailable. Install claude-agent-sdk.")
+        return
+
+    # ── Run all setup in parallel: auth, cleanup, context, conversation ──
+    auth_result, _, (context_parts, workspace, tunnel_url, project_name, target_pid, is_admin), conv_history, _ = await asyncio.gather(
+        _check_auth_cached(),
+        _cleanup_old_tasks(chat_id),
+        _build_context(chat_id, project_context, user_id),
+        _load_conversation(chat_id, user_id),
+        _save_message(chat_id, "user", user_message, user_id),
+    )
+
+    # Auth check: block only if definitively not logged in
+    if auth_result is False:
+        log.warning("agent_session.auth_expired", chat_id=chat_id)
+        try:
+            from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+            kb = ActionKeyboard(rows=[
+                ActionRow([ActionButton("🔑 Authenticate Claude", "claude_auth")]),
+                ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+            ])
+            await chat.edit_message_with_actions(
+                chat_id, message_id,
+                "🔑 Claude is not authenticated.\n\nTap to sign in:",
+                kb,
+            )
+        except Exception:
+            await chat.edit_message(
+                chat_id, message_id,
+                "🔑 Claude is not authenticated. Run /settings to re-authenticate.",
+            )
+        await chat.close()
+        return
+
     context_str = "\n".join(context_parts) if context_parts else "No active projects."
 
-    # Load conversation history for context (per-user)
-    conv_history = await _load_conversation(chat_id, user_id)
     conv_str = ""
     if conv_history:
         conv_lines = []
@@ -306,9 +359,6 @@ async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message
             role = "User" if msg["role"] == "user" else "You"
             conv_lines.append(f"{role}: {msg['text']}")
         conv_str = "\n".join(conv_lines)
-
-    # Save user message to per-user conversation history
-    await _save_message(chat_id, "user", user_message, user_id)
 
     system_prompt = f"""You are THAG GROUP specialist — an AI Dev Orchestrator. You're chatting with the user in real time.
 
@@ -338,11 +388,8 @@ Be concise. Talk like a person, not a manual.
 
     from openclow.providers.llm.claude import _mcp_playwright
 
-    # Determine tools based on user role
-    # Admins get full access, normal users get limited tools
     base_tools = [
         "Read", "Write", "Edit", "Glob", "Grep",
-        # Playwright MCP — browse apps, screenshots (safe for all users)
         "mcp__playwright__browser_navigate",
         "mcp__playwright__browser_snapshot",
         "mcp__playwright__browser_take_screenshot",
@@ -351,22 +398,8 @@ Be concise. Talk like a person, not a manual.
         "mcp__playwright__browser_type",
     ]
 
-    # Check if user is admin (has is_admin flag set)
-    is_admin = False
-    if user_id:
-        from openclow.models import User, async_session
-        from sqlalchemy import select
-        async with async_session() as session:
-            user_result = await session.execute(
-                select(User).where(User.chat_provider_uid == user_id)
-            )
-            db_user = user_result.scalar_one_or_none()
-            is_admin = db_user and db_user.is_admin
-
-    # Only add docker/infrastructure tools for admins
     if is_admin:
         base_tools.extend([
-            # Docker MCP — containers, commands, tunnels (admin only)
             "mcp__docker__list_containers",
             "mcp__docker__container_logs",
             "mcp__docker__container_health",
@@ -374,14 +407,12 @@ Be concise. Talk like a person, not a manual.
             "mcp__docker__restart_container",
             "mcp__docker__compose_up",
             "mcp__docker__compose_ps",
-            # Tunnel MCP (admin only)
             "mcp__docker__tunnel_start",
             "mcp__docker__tunnel_stop",
             "mcp__docker__tunnel_get_url",
             "mcp__docker__tunnel_list",
         ])
 
-    # Build MCP servers dict based on user role
     mcp_servers = {"playwright": _mcp_playwright()}
     if is_admin:
         mcp_servers["docker"] = _mcp_docker()
@@ -396,32 +427,56 @@ Be concise. Talk like a person, not a manual.
         max_turns=20,
     )
 
-    # Stream agent response — lightweight for chat, richer when using tools
+    # Stream agent response
     response_text = ""
     last_update = ""
     tool_lines: list[str] = []
     _start = _time.time()
     _is_slack = chat_provider_type == "slack"
-    _using_tools = False  # Track if agent is actually using tools
+    _using_tools = False
+    _turn_count = 0
+    _cancelled_by_user = False
+    _SPINNERS = ["🔄", "⏳", "🔃", "⚙️"]
+
+    from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+    _stop_kb = ActionKeyboard(rows=[
+        ActionRow([ActionButton("⏹️ Stop", f"session_cancel:{chat_id}:{message_id}")]),
+    ])
+
+    def _spinner() -> str:
+        elapsed = int(_time.time() - _start)
+        icon = _SPINNERS[elapsed % len(_SPINNERS)]
+        return f"{icon} `{elapsed}s`"
+
+    async def _show_progress(display: str):
+        """Update message with text + stop button."""
+        nonlocal last_update
+        if display != last_update:
+            last_update = display
+            try:
+                await chat.edit_message_with_actions(chat_id, message_id, display, _stop_kb)
+            except Exception:
+                pass
 
     try:
         async for message in query(prompt=user_message, options=options):
+            _turn_count += 1
+
+            # Check cancel flag every 3 turns (avoid Redis spam)
+            if _turn_count % 3 == 0 and await _check_cancelled(chat_id, message_id):
+                _cancelled_by_user = True
+                response_text = "Stopped by user."
+                break
+
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         response_text = block.text
-                        # Text is the star — show it prominently
-                        # Tool context underneath (subtle, not dominant)
                         display = response_text[:3800]
                         if tool_lines and _using_tools:
-                            tool_ctx = "  " + " → ".join(t.split(" ", 1)[-1][:30] for t in tool_lines[-3:])
-                            display = f"{display}\n\n`{tool_ctx}`"
-                        if display != last_update:
-                            last_update = display
-                            try:
-                                await chat.edit_message(chat_id, message_id, display)
-                            except Exception:
-                                pass
+                            tool_ctx = " → ".join(t.split(" ", 1)[-1][:30] for t in tool_lines[-3:])
+                            display = f"{display}\n\n{_spinner()}  `{tool_ctx}`"
+                        await _show_progress(display)
 
                     elif isinstance(block, ToolUseBlock):
                         _using_tools = True
@@ -430,20 +485,12 @@ Be concise. Talk like a person, not a manual.
                         if len(tool_lines) > 5:
                             tool_lines = tool_lines[-5:]
 
-                        # Show tool activity — but keep last text visible above it
-                        try:
-                            tool_summary = " → ".join(t.split(" ", 1)[-1][:30] for t in tool_lines[-3:])
-                            if response_text:
-                                # Agent said something before using tools — keep it visible
-                                display = f"{response_text[:3000]}\n\n⚡ `{tool_summary}`"
-                            else:
-                                # No text yet — show tool progress
-                                display = f"⚡ `{tool_summary}`"
-                            if display != last_update:
-                                last_update = display
-                                await chat.edit_message(chat_id, message_id, display)
-                        except Exception:
-                            pass
+                        tool_summary = " → ".join(t.split(" ", 1)[-1][:30] for t in tool_lines[-3:])
+                        if response_text:
+                            display = f"{response_text[:3000]}\n\n{_spinner()}  `{tool_summary}`"
+                        else:
+                            display = f"{_spinner()}  `{tool_summary}`"
+                        await _show_progress(display)
 
     except asyncio.CancelledError:
         log.warning("agent_session.cancelled", chat_id=chat_id)
@@ -496,10 +543,8 @@ Be concise. Talk like a person, not a manual.
         from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
         rows = []
         if pid:
-            row1 = [ActionButton("🤖 Chat Again", f"agent_diagnose:{pid}")]
             from openclow.providers.actions import open_app_btn
-            row1.append(open_app_btn(pid))
-            rows.append(ActionRow(row1))
+            rows.append(ActionRow([open_app_btn(pid)]))
             rows.append(ActionRow([
                 ActionButton("🚀 New Task", "menu:task"),
                 ActionButton("◀️ Main Menu", "menu:main"),

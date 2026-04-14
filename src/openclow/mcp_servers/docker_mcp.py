@@ -81,12 +81,54 @@ async def docker_exec(container_name: str, command: str) -> str:
 
 
 @mcp.tool()
-async def compose_up(compose_file: str, project_name: str, working_dir: str) -> str:
-    """Start a Docker Compose stack. Returns output with SUCCESS/FAILED prefix."""
-    rc, output = await run_docker(
-        "docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d",
-        actor="mcp_docker", cwd=working_dir,
-    )
+async def compose_build(compose_file: str, project_name: str, working_dir: str) -> str:
+    """Build images for a Docker Compose stack (without starting containers).
+
+    Use this before compose_up() when the project has custom Dockerfiles.
+    This runs without --project-directory so build contexts resolve correctly
+    inside the worker container (Docker-in-Docker).
+    """
+    args = ["docker", "compose", "-f", compose_file, "-p", project_name, "build"]
+    rc, output = await run_docker(*args, actor="mcp_docker", cwd=working_dir, timeout=600)
+    if rc != 0:
+        return f"FAILED (exit code {rc}):\n{output}"
+    return f"SUCCESS:\n{output}"
+
+
+@mcp.tool()
+async def compose_up(compose_file: str, project_name: str, working_dir: str, build: bool = False) -> str:
+    """Start a Docker Compose stack. Returns output with SUCCESS/FAILED prefix.
+
+    Args:
+        build: If True, build images first then start. Handles Docker-in-Docker
+               path translation automatically (builds use container paths for
+               build contexts, up uses host paths for volume mounts).
+    """
+    # When build=True, run build and up as separate steps.
+    # Build needs container filesystem paths (Docker CLI tars build context).
+    # Up needs host filesystem paths (Docker daemon resolves volume mounts).
+    # docker_guard handles this: skips --project-directory for build commands.
+    if build:
+        build_args = ["docker", "compose", "-f", compose_file, "-p", project_name, "build"]
+        rc, output = await run_docker(*build_args, actor="mcp_docker", cwd=working_dir, timeout=600)
+        if rc != 0:
+            return f"FAILED (build, exit code {rc}):\n{output}"
+
+    up_args = ["docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d"]
+    rc, output = await run_docker(*up_args, actor="mcp_docker", cwd=working_dir, timeout=300)
+
+    if rc != 0 and not build:
+        # Image might not exist yet — try building first then starting
+        if "pull access denied" in output or "not found" in output.lower() or "no such image" in output.lower():
+            build_args = ["docker", "compose", "-f", compose_file, "-p", project_name, "build"]
+            rc2, out2 = await run_docker(*build_args, actor="mcp_docker", cwd=working_dir, timeout=600)
+            if rc2 != 0:
+                return f"FAILED (auto-build, exit code {rc2}):\n{out2}"
+            rc3, out3 = await run_docker(*up_args, actor="mcp_docker", cwd=working_dir, timeout=300)
+            if rc3 == 0:
+                return f"SUCCESS (auto-built):\n{out3}"
+            return f"FAILED (exit code {rc3}):\n{out3}"
+
     if rc != 0:
         return f"FAILED (exit code {rc}):\n{output}"
     return f"SUCCESS:\n{output}"

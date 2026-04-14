@@ -143,6 +143,19 @@ async def start_tunnel(
         log.error("tunnel.no_url", service=service_name, target=target_url)
         return None
 
+    # Drain stderr so buffer doesn't fill up and block
+    drain_task = asyncio.create_task(_drain_stderr(service_name, proc))
+    drain_task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+    # Wait briefly for QUIC connection to stabilize before verifying.
+    # Cloudflared prints the URL before the tunnel is fully registered with CF.
+    await asyncio.sleep(2)
+
+    # Quick health check — process still alive?
+    verified = proc.returncode is None
+    if not verified:
+        log.warning("tunnel.died_after_start", service=service_name, url=url)
+
     # Store in DB and memory
     _active_processes[service_name] = proc
     await set_config(TUNNEL_CATEGORY, service_name, {
@@ -155,11 +168,118 @@ async def start_tunnel(
 
     log.info("tunnel.started", service=service_name, url=url, pid=proc.pid)
 
-    # Drain stderr so buffer doesn't fill up and block
-    drain_task = asyncio.create_task(_drain_stderr(service_name, proc))
-    drain_task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+    # Auto-sync project container (update .env, inject trustedproxy, clear caches)
+    # Awaited, not fire-and-forget — callers need the sync done before they use the URL.
+    try:
+        await sync_project_tunnel(service_name, url)
+    except Exception as e:
+        log.warning("tunnel.auto_sync_failed", service=service_name, error=str(e))
 
     return url
+
+
+# Infrastructure tunnels — never need container sync
+_INFRA_TUNNELS = {"dozzle", "settings"}
+
+
+async def sync_project_tunnel(service_name: str, tunnel_url: str):
+    """Sync a project's container after tunnel URL change.
+
+    Updates host .env, container .env, injects config/trustedproxy.php,
+    and clears framework caches. Skips infrastructure tunnels.
+
+    Called automatically by start_tunnel() — callers don't need to do this.
+    """
+    if service_name in _INFRA_TUNNELS:
+        return
+
+    import re as _re
+    from openclow.settings import settings as app_settings
+
+    # ── Find project in DB ──
+    try:
+        from openclow.models import Project, async_session
+        from sqlalchemy import select
+        async with async_session() as session:
+            # Don't filter by status — if a tunnel runs, the container needs sync
+            result = await session.execute(
+                select(Project).where(Project.name == service_name)
+            )
+            project = result.scalar_one_or_none()
+        if not project:
+            return
+    except Exception as e:
+        log.warning("tunnel.sync_project_lookup_failed", service=service_name, error=str(e))
+        return
+
+    workspace = f"{app_settings.workspace_base_path}/_cache/{service_name}"
+    compose_project = f"openclow-{service_name}"
+    container_name = project.app_container_name or "laravel.test"
+    container = f"{compose_project}-{container_name}-1"
+
+    # ── 1. Update host .env ──
+    env_path = os.path.join(workspace, ".env")
+    if os.path.exists(env_path):
+        try:
+            with open(env_path) as f:
+                content = f.read()
+            # Replace all old trycloudflare URLs
+            content = _re.sub(
+                r'https://[a-z0-9-]+\.trycloudflare\.com',
+                tunnel_url, content,
+            )
+            # Ensure APP_URL and ASSET_URL point to HTTPS tunnel
+            for key in ("APP_URL", "ASSET_URL"):
+                if _re.search(rf'^{key}=', content, _re.MULTILINE):
+                    content = _re.sub(rf'^{key}=.*$', f'{key}={tunnel_url}', content, flags=_re.MULTILINE)
+                else:
+                    content += f"\n{key}={tunnel_url}\n"
+            with open(env_path, "w") as f:
+                f.write(content)
+        except Exception as e:
+            log.warning("tunnel.sync_host_env_failed", service=service_name, error=str(e))
+
+    # ── 2. Update container .env + inject trustedproxy + clear caches ──
+    try:
+        from openclow.services.docker_guard import run_docker
+
+        # Replace tunnel URLs in container .env
+        for env_loc in (".env", "/var/www/html/.env", "/app/.env"):
+            await run_docker(
+                "docker", "exec", container, "sh", "-c",
+                f"[ -f {env_loc} ] && sed -i 's|https://[a-z0-9-]*\\.trycloudflare\\.com|{tunnel_url}|g' {env_loc} || true",
+                actor="tunnel_sync", timeout=10,
+            )
+            # Set ASSET_URL to full HTTPS tunnel URL
+            await run_docker(
+                "docker", "exec", container, "sh", "-c",
+                f"[ -f {env_loc} ] && (grep -q '^ASSET_URL=' {env_loc} && sed -i 's|^ASSET_URL=.*|ASSET_URL={tunnel_url}|' {env_loc} || echo 'ASSET_URL={tunnel_url}' >> {env_loc}) || true",
+                actor="tunnel_sync", timeout=10,
+            )
+
+        # Inject config/trustedproxy.php — Laravel needs this to trust
+        # cloudflared's X-Forwarded-Proto header. Without it → mixed content.
+        # Use base64 to avoid shell quoting issues with PHP single quotes.
+        import base64
+        trust_php = b"<?php return ['proxies' => '*', 'headers' => -1];"
+        b64 = base64.b64encode(trust_php).decode()
+        await run_docker(
+            "docker", "exec", container, "sh", "-c",
+            f"for d in . /var/www/html /app; do [ -d \"$d/config\" ] && echo {b64} | base64 -d > \"$d/config/trustedproxy.php\" && break; done || true",
+            actor="tunnel_sync", timeout=10,
+        )
+
+        # Clear all framework caches
+        await run_docker(
+            "docker", "exec", container, "sh", "-c",
+            "php artisan config:clear 2>/dev/null; php artisan cache:clear 2>/dev/null; "
+            "php artisan view:clear 2>/dev/null; php artisan route:clear 2>/dev/null || true",
+            actor="tunnel_sync", timeout=10,
+        )
+
+        log.info("tunnel.project_synced", service=service_name, url=tunnel_url)
+    except Exception as e:
+        log.warning("tunnel.sync_container_failed", service=service_name, error=str(e))
 
 
 async def stop_tunnel(service_name: str) -> None:

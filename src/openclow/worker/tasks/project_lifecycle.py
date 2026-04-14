@@ -80,19 +80,33 @@ async def docker_up_task(ctx: dict, project_id: int, chat_id: str, message_id: s
             f"PORT: {port}\n\n"
             f"DOCKER-COMPOSE CONTENTS:\n```yaml\n{compose_contents}\n```\n\n"
             f".ENV CONTENTS:\n```\n{env_contents}\n```\n\n"
+            f"ARCHITECTURE — READ CAREFULLY:\n"
+            f"- Project apps run inside Docker containers (managed by docker-compose)\n"
+            f"- Cloudflare tunnels run on the WORKER HOST, NOT inside containers\n"
+            f"- NEVER run 'which cloudflared' or 'cloudflared' inside containers — it does not exist there\n"
+            f"- Use tunnel_start/tunnel_get_url MCP tools for tunnel management\n"
+            f"- The app listens on port {port} INSIDE the container\n"
+            f"- Always read container_logs BEFORE attempting fixes\n\n"
             f"STEPS:\n"
             f'1. compose_up("{compose}", "{compose_project}", "{workspace}")\n'
-            f"2. compose_ps(\"{compose_project}\") — verify all containers running\n"
-            f"3. If any container down: container_logs(\"<name>\", 50) → diagnose → fix → retry\n"
-            f"4. docker_exec(\"<app_container>\", \"curl -sf http://localhost:80/ -o /dev/null -w %{{http_code}}\")\n"
-            f'5. tunnel_get_url("{project.name}") — if empty, tunnel_start("{project.name}", "<target>")\n\n'
-            f"OUTPUT:\n"
-            f"- STATUS: <what you're doing>\n"
-            f"- DIAGNOSIS: <what's wrong>\n"
-            f"- ACTION: <what you're fixing>\n"
-            f"- FIXED: <tunnel_url> — when everything works\n\n"
-            f"SELF-HEALING: When ANY command fails, investigate (docker_exec pwd/ls/which), fix root cause, retry.\n"
-            f"NEVER give up. Try at least 2 different approaches per issue."
+            f'2. compose_ps("{compose_project}") — verify all containers running\n'
+            f"3. If any container down: container_logs(\"<name>\", 50) → read error → diagnose → fix → retry\n"
+            f'4. docker_exec("<app_container>", "curl -sf http://localhost:{port}/ -o /dev/null -w %{{http_code}}")\n'
+            f'5. tunnel_get_url("{project.name}") — if empty, tunnel_start("{project.name}", "http://<app_container_ip>:{port}")\n\n'
+            f"TOOL CALLS — USE EXACT NAMES:\n"
+            f'- compose_up(compose_file="{compose}", project_name="{compose_project}", working_dir="{workspace}")\n'
+            f'- compose_ps(project_name="{compose_project}")\n'
+            f"- container_logs(container_name=\"<name>\", tail=50)\n"
+            f"- docker_exec(container_name=\"<name>\", command=\"<cmd>\")\n"
+            f"- restart_container(container_name=\"<name>\")\n"
+            f'- tunnel_get_url(service_name="{project.name}")\n'
+            f'- tunnel_start(service_name="{project.name}", target_url="http://<container>:{port}")\n\n'
+            f"DO NOT USE:\n"
+            f"- No Bash tool. No shell commands on the host.\n"
+            f"- No 'which cloudflared' — tunnels are NOT inside containers.\n"
+            f"- No 'apt-get install' for cloudflared — it's a host service.\n\n"
+            f"OUTPUT: STATUS: <step> | DIAGNOSIS: <issue> | ACTION: <fix> | FIXED: <tunnel_url>\n\n"
+            f"SELF-HEALING: Read errors carefully. Fix root cause. Never give up. Try 2+ approaches per issue."
         )
 
         status_lines = []

@@ -60,6 +60,7 @@ class BaseReporter:
         self._last_send = 0.0
         self._heartbeat_task: asyncio.Task | None = None
         self._stopped = False
+        self._last_keyboard: ActionKeyboard | None = None
 
     # -- Lifecycle -------------------------------------------------------------
 
@@ -90,17 +91,26 @@ class BaseReporter:
         return int(time.time() - self._start_time)
 
     async def _render(self, keyboard: ActionKeyboard | None = None):
+        if keyboard is not None:
+            self._last_keyboard = keyboard
         now = time.time()
         if now - self._last_send < self._rate_limit:
             return
         await self._force_render(keyboard)
 
     async def _force_render(self, keyboard: ActionKeyboard | None = None):
+        if keyboard is not None:
+            self._last_keyboard = keyboard
         self._last_send = time.time()
         text = self._build_text()[:4000]
+        kb = keyboard or self._last_keyboard
+        # is_final=True when an explicit keyboard is passed (e.g. final buttons)
+        # This bypasses Slack's 1s debounce so the final render always lands.
+        is_final = keyboard is not None
         try:
             await self._chat.edit_message_with_actions(
-                self._chat_id, self._message_id, text, keyboard,
+                self._chat_id, self._message_id, text, kb,
+                is_final=is_final,
             )
         except Exception as e:
             if "message is not modified" not in str(e):

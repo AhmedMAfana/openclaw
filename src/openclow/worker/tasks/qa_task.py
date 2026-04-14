@@ -32,7 +32,7 @@ log = get_logger()
 # The full QA prompt — Claude Agent drives Playwright through EVERY flow
 # ---------------------------------------------------------------------------
 
-QA_PROMPT = """You are a QA tester. Open Telegram Web, go to the OpenClow bot, and test EVERY feature.
+QA_PROMPT = """You are a QA tester. Open Telegram Web, go to the THAG GROUP bot, and test EVERY feature.
 
 BOT: @{bot_username}
 URL: https://web.telegram.org/k/#{bot_username}
