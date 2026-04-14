@@ -1359,7 +1359,7 @@ def register(app):
     async def handle_url_buttons(ack):
         await ack()
 
-    # Open App — fast path: if tunnel URL exists, open it. Otherwise health check.
+    # Open App — fast probe: tunnel exists + app responds? Show URL. Otherwise health check.
     @app.action(re.compile(r"^open_app:"))
     async def handle_open_app(ack, body, client):
         await ack()
@@ -1369,7 +1369,7 @@ def register(app):
             channel = body["channel"]["id"]
             ts = body["message"]["ts"]
 
-            # Fast path: check if tunnel URL already exists
+            # Fast path: check if tunnel URL exists AND app actually responds
             from openclow.models import Project, async_session
             from sqlalchemy import select as sa_select
             async with async_session() as session:
@@ -1382,23 +1382,33 @@ def register(app):
                 from openclow.services.tunnel_service import get_tunnel_url
                 url = await get_tunnel_url(project.name)
                 if url:
-                    # Tunnel exists — show URL directly with action buttons
-                    from openclow.providers.actions import ActionButton, project_nav_keyboard
-                    kb = project_nav_keyboard(
-                        project_id,
-                        ActionButton("🌐 Open", "open_link", url=url),
-                        ActionButton("💚 Health", f"health:{project_id}"),
-                    )
-                    text = f"✅ *{project.name}* is running\n🔗 {url}"
-                    blks = [blocks.section_block(text)] + blocks.translate_keyboard(kb)
-                    await client.chat_update(channel=channel, ts=ts, text=text, blocks=blks)
-                    return
+                    # Tunnel exists — quick HTTP probe to verify app is alive
+                    import httpx
+                    app_alive = False
+                    try:
+                        async with httpx.AsyncClient(timeout=5, follow_redirects=True, verify=False) as http:
+                            resp = await http.get(url)
+                            app_alive = resp.status_code < 502
+                    except Exception:
+                        pass
 
-            # No tunnel — fall back to full health check + repair
+                    if app_alive:
+                        from openclow.providers.actions import ActionButton, project_nav_keyboard
+                        kb = project_nav_keyboard(
+                            project_id,
+                            ActionButton("🌐 Open", "open_link", url=url),
+                            ActionButton("💚 Health", f"health:{project_id}"),
+                        )
+                        text = f"✅ *{project.name}* is running\n🔗 {url}"
+                        blks = [blocks.section_block(text)] + blocks.translate_keyboard(kb)
+                        await client.chat_update(channel=channel, ts=ts, text=text, blocks=blks)
+                        return
+
+            # No tunnel or app not responding — full health check + repair
             await client.chat_update(
                 channel=channel, ts=ts,
                 text="Checking app...",
-                blocks=blocks.agent_thinking_blocks("🔍 No tunnel found — checking app health..."),
+                blocks=blocks.agent_thinking_blocks("🔍 App not responding — running health check..."),
             )
 
             await bot_actions.enqueue_job("check_project_health", project_id, channel, ts, "slack")
