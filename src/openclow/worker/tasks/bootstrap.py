@@ -1660,9 +1660,20 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
             for k, v in port_vars.items():
                 f.write(f"{k}={v}\n")
 
-        # ── Helper: bail on failure — skip remaining steps, show retry ──
+        # ── Helper: bail on failure — clean up containers, skip remaining steps ──
         async def _bail(reason: str):
-            """Mark all pending/running steps as skipped, set failed status, stop."""
+            """Clean up Docker containers, mark steps skipped, set failed status."""
+            # CRITICAL: Stop containers so they don't pile up across retries
+            from openclow.services.docker_guard import run_docker_compose
+            try:
+                await run_docker_compose(
+                    "down", "--remove-orphans",
+                    compose_file=compose, compose_project=compose_project,
+                    actor="bootstrap", project_name=project.name,
+                    cwd=workspace, timeout=30,
+                )
+            except Exception:
+                pass
             for i, s in enumerate(checklist.steps):
                 if s["status"] in ("pending", "running"):
                     await checklist.skip_step(i, "skipped")
@@ -1860,6 +1871,17 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
 
     except (Exception, asyncio.CancelledError, TimeoutError) as e:
         await _set_project_status(project_id, "failed")
+        # Clean up containers on crash — don't leave orphans
+        try:
+            from openclow.services.docker_guard import run_docker_compose
+            await run_docker_compose(
+                "down", "--remove-orphans",
+                compose_file=compose, compose_project=compose_project,
+                actor="bootstrap", project_name=project.name,
+                cwd=workspace, timeout=30,
+            )
+        except Exception:
+            pass
         await checklist.stop()
         error_msg = "Job timed out" if isinstance(e, (asyncio.CancelledError, TimeoutError)) else str(e)[:150]
         log.error("bootstrap.failed", project=project.name, error=error_msg)

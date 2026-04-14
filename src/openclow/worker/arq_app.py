@@ -117,6 +117,53 @@ async def on_startup(ctx: dict):
     except Exception as e:
         log.warning("worker.project_tunnel_restore_failed", error=str(e))
 
+    # Clean up orphaned Docker stacks from failed bootstraps
+    # Two patterns to catch:
+    # 1. "openclow-{name}-{taskid}" — old workspace_service with task ID suffix
+    # 2. "{name}" (bare) — LLM agent ran `docker compose up` without -p flag
+    # Legitimate stacks: "openclow-{name}" (no extra suffix)
+    try:
+        import subprocess
+        from sqlalchemy import select as sa_select3
+        from openclow.models import Project, async_session
+
+        # Get known project names from DB
+        known_projects = set()
+        async with async_session() as session:
+            result = await session.execute(sa_select3(Project.name))
+            known_projects = {row[0] for row in result.all()}
+
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--filter", "label=com.docker.compose.project",
+             "--format", "{{.Labels}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        orphan_stacks = set()
+        for line in result.stdout.strip().split("\n"):
+            if not line:
+                continue
+            for label in line.split(","):
+                if "com.docker.compose.project=" in label:
+                    proj = label.split("=", 1)[1]
+                    # Skip our own infra stack
+                    if proj == "openclow":
+                        continue
+                    # Pattern 1: openclow-{name}-{extra} (task ID suffix)
+                    if proj.startswith("openclow-") and len(proj.split("-")) > 2:
+                        orphan_stacks.add(proj)
+                    # Pattern 2: bare project name (agent ran compose without -p)
+                    elif proj in known_projects:
+                        orphan_stacks.add(proj)
+
+        for orphan_proj in orphan_stacks:
+            log.warning("worker.cleaning_orphan_stack", project=orphan_proj)
+            subprocess.run(
+                ["docker", "compose", "-p", orphan_proj, "down", "--remove-orphans"],
+                capture_output=True, timeout=30,
+            )
+    except Exception as e:
+        log.warning("worker.orphan_cleanup_failed", error=str(e))
+
     # Recover orphaned "bootstrapping" projects — worker died mid-bootstrap
     try:
         from sqlalchemy import select as sa_select2, update as sa_update
