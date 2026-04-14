@@ -31,6 +31,10 @@ _active_processes: dict[str, asyncio.subprocess.Process] = {}
 # Unique ID per worker boot — detects stale DB entries after restart
 _worker_instance_id: str = uuid.uuid4().hex[:12]
 
+# Rate limit cooldown — when Cloudflare returns 429, stop ALL tunnel attempts
+# until this timestamp. Prevents the death spiral of retries making it worse.
+_rate_limit_until: list[float] = [0.0]  # mutable list so nested functions can write
+
 
 async def start_tunnel(
     service_name: str, target_url: str, host_header: str | None = None,
@@ -48,6 +52,12 @@ async def start_tunnel(
 
     Returns the public URL or None on failure.
     """
+    # Rate limit cooldown — don't even try if Cloudflare is blocking us
+    if time.time() < _rate_limit_until[0]:
+        remaining = int(_rate_limit_until[0] - time.time())
+        log.debug("tunnel.cooldown_active", service=service_name, remaining_s=remaining)
+        return None
+
     # Check if we already have an active process handle
     existing_proc = _active_processes.get(service_name)
     if existing_proc and existing_proc.returncode is None:
@@ -110,15 +120,21 @@ async def start_tunnel(
     if not url:
         # Check if cloudflared already exited (e.g. 429 rate limit)
         if proc.returncode is not None:
-            # Read any remaining stderr for diagnosis
             try:
                 remaining = await proc.stderr.read(4096)
                 stderr_text = remaining.decode()
             except Exception:
                 stderr_text = ""
             if "429" in stderr_text or "Too Many Requests" in stderr_text:
+                # Set a cooldown — don't attempt ANY tunnels for 10 minutes
+                _rate_limit_until[0] = time.time() + 600
                 log.warning("tunnel.rate_limited", service=service_name,
-                            detail="Cloudflare 429 — will retry via health loop")
+                            cooldown_minutes=10,
+                            hint="Will auto-retry via health loop after cooldown")
+                try:
+                    proc.kill()
+                except (OSError, ProcessLookupError):
+                    pass
                 return None
         try:
             proc.kill()
