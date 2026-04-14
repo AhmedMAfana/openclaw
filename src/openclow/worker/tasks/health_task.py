@@ -150,32 +150,51 @@ PROBLEMS FOUND:
 
 YOUR GOAL: Get ALL containers running + tunnel URL working.
 
+ARCHITECTURE — READ CAREFULLY:
+- The project runs inside Docker containers (managed by docker-compose)
+- Cloudflare tunnels run on the WORKER HOST, NOT inside containers
+- You manage tunnels via tunnel_start/tunnel_get_url MCP tools
+- NEVER run "which cloudflared" or "cloudflared" inside containers — it does not exist there
+- The app listens on port {port} INSIDE the container
+
 STEPS:
 1. compose_ps("{compose_project}") — see current state
-2. If containers down: compose_up("{compose_file}", "{compose_project}", "{workspace}")
-3. If compose_up fails:
-   - DIAGNOSIS: <read the error>
-   - ACTION: <fix docker-compose.yml, .env, or Dockerfile>
-   - Retry compose_up
-4. container_logs("<container_name>", 50) — check for app errors
-5. docker_exec("<app_container>", "curl -sf http://localhost:{port}/ -o /dev/null -w %{{http_code}}")
-6. tunnel_get_url("{project_name}") — if empty, tunnel_start("{project_name}", "<target>")
+2. container_logs("<container_name>", 50) — read logs for EVERY non-running container
+3. If containers down/exited:
+   - Read the logs FIRST to understand why
+   - DIAGNOSIS: <what the logs say>
+   - If config issue: Edit the file in workspace ({workspace})
+   - compose_up("{compose_file}", "{compose_project}", "{workspace}")
+4. If containers running but app not responding:
+   - docker_exec("<app_container>", "curl -sf http://localhost:{port}/ -o /dev/null -w %{{http_code}}")
+   - If 000/error: check logs, fix app config, restart container
+5. tunnel_get_url("{project_name}") — check if tunnel exists
+6. If no tunnel: tunnel_start("{project_name}", "http://<app_container_ip>:{port}")
 
-OUTPUT:
+TOOL CALLS — USE EXACT NAMES:
+- compose_ps(compose_project="{compose_project}")
+- compose_up(compose_file="{compose_file}", compose_project="{compose_project}", workspace="{workspace}")
+- container_logs(container_name="<name>", tail=50)
+- docker_exec(container_name="<name>", command="<cmd>")
+- restart_container(container_name="<name>")
+- tunnel_get_url(service_name="{project_name}")
+- tunnel_start(service_name="{project_name}", target_url="http://<container>:{port}")
+- Read/Edit/Glob for workspace files at {workspace}
+
+DO NOT USE:
+- No Bash tool. No shell commands on the host.
+- No "which cloudflared" — tunnels are NOT inside containers.
+- No "apt-get install" for cloudflared — it's a host service.
+
+OUTPUT FORMAT:
 - STATUS: <what you're doing>
 - DIAGNOSIS: <what's wrong>
 - ACTION: <what you're fixing>
 - FIXED: <tunnel_url> — when everything works
 
-TOOL USAGE:
-- No Bash. Use ONLY Docker MCP tools.
-- docker_exec(container, "command") for container commands
-- Read/Edit/Glob for host workspace files
-- compose_up/compose_ps/compose_down for Docker Compose
-
 SELF-HEALING:
-- When ANY command fails, investigate: docker_exec to check pwd, ls, which
-- Fix the root cause, retry
+- Read error messages carefully before acting
+- Fix the root cause, not symptoms
 - NEVER give up after first failure
 - Try at least 2 different approaches per issue
 """

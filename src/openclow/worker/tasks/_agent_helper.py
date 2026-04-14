@@ -23,10 +23,17 @@ AVAILABLE TOOLS:
 - tunnel_start/tunnel_stop/tunnel_get_url — manage Cloudflare tunnels
 - Read/Edit/Glob/Grep — read and modify files on host
 
+CRITICAL ARCHITECTURE:
+- Project apps run inside Docker containers (managed by docker-compose).
+- Cloudflare tunnels run on the WORKER HOST, NOT inside project containers.
+- NEVER run "which cloudflared" or "cloudflared" inside containers — it does not exist there.
+- Use tunnel_start/tunnel_get_url/tunnel_stop MCP tools for tunnel management.
+- Always read container_logs BEFORE attempting fixes — understand the error first.
+
 RULES:
 - No Bash. Use ONLY the MCP tools above.
 - When a command fails, read the error output carefully.
-- Use docker_exec to investigate: pwd, ls, which, cat, env
+- Use docker_exec to investigate: pwd, ls, cat, env (inside containers)
 - Fix the root cause, not the symptom.
 - NEVER repeat a failed approach. Always try something new.
 - NEVER say you can't fix it. You have all the tools.
@@ -180,7 +187,7 @@ async def run_repair_agent(
     status_lines: list[str],
     max_turns: int = 30,
     max_attempts: int = 3,
-    timeout_per_attempt: int = 120,
+    timeout_per_attempt: int = 300,
     notify_fn=None,
     card: RepairCard | None = None,
 ) -> bool:

@@ -1359,7 +1359,7 @@ def register(app):
     async def handle_url_buttons(ack):
         await ack()
 
-    # Open App — triggers health check + auto-fix + tunnel start
+    # Open App — fast path: if tunnel URL exists, open it. Otherwise health check.
     @app.action(re.compile(r"^open_app:"))
     async def handle_open_app(ack, body, client):
         await ack()
@@ -1369,10 +1369,36 @@ def register(app):
             channel = body["channel"]["id"]
             ts = body["message"]["ts"]
 
+            # Fast path: check if tunnel URL already exists
+            from openclow.models import Project, async_session
+            from sqlalchemy import select as sa_select
+            async with async_session() as session:
+                result = await session.execute(sa_select(Project).where(Project.id == project_id))
+                project = result.scalar_one_or_none()
+                if project:
+                    session.expunge(project)
+
+            if project:
+                from openclow.services.tunnel_service import get_tunnel_url
+                url = await get_tunnel_url(project.name)
+                if url:
+                    # Tunnel exists — show URL directly with action buttons
+                    from openclow.providers.actions import ActionButton, project_nav_keyboard
+                    kb = project_nav_keyboard(
+                        project_id,
+                        ActionButton("🌐 Open", "open_link", url=url),
+                        ActionButton("💚 Health", f"health:{project_id}"),
+                    )
+                    text = f"✅ *{project.name}* is running\n🔗 {url}"
+                    blks = [blocks.section_block(text)] + blocks.translate_keyboard(kb)
+                    await client.chat_update(channel=channel, ts=ts, text=text, blocks=blks)
+                    return
+
+            # No tunnel — fall back to full health check + repair
             await client.chat_update(
                 channel=channel, ts=ts,
                 text="Checking app...",
-                blocks=blocks.agent_thinking_blocks("🔍 Checking if your app is running..."),
+                blocks=blocks.agent_thinking_blocks("🔍 No tunnel found — checking app health..."),
             )
 
             await bot_actions.enqueue_job("check_project_health", project_id, channel, ts, "slack")
