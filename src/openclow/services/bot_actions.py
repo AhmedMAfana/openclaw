@@ -60,19 +60,32 @@ async def get_active_tasks(chat_id: str, limit: int = 5, user_id: str | None = N
         return list(result.scalars().all())
 
 
-async def get_all_active_tasks(limit: int = 5) -> list[Task]:
-    """Get active tasks across all channels (for Home Tab / dashboard)."""
+async def get_all_active_tasks(limit: int = 5, user_id: str | None = None) -> list[Task]:
+    """Get active tasks across all channels (for Home Tab / dashboard).
+
+    If user_id is provided, only return tasks owned by that user.
+    """
     active_statuses = [
         "pending", "preparing", "planning", "plan_review", "coding",
         "reviewing", "diff_preview", "awaiting_approval", "pushing",
     ]
     async with async_session() as session:
-        result = await session.execute(
+        query = (
             select(Task)
             .where(Task.status.in_(active_statuses))
             .order_by(Task.created_at.desc())
             .limit(limit)
         )
+        if user_id:
+            from openclow.models import User
+            user_result = await session.execute(
+                select(User).where(User.chat_provider_uid == user_id)
+            )
+            db_user = user_result.scalar_one_or_none()
+            if db_user:
+                query = query.where(Task.user_id == db_user.id)
+
+        result = await session.execute(query)
         return list(result.scalars().all())
 
 
@@ -275,24 +288,12 @@ async def get_task_by_id(task_id: str | Any) -> Task | None:
                 select(Task).where(Task.id == task_id)
             )
             return result.scalar_one_or_none()
-    except Exception:
+    except ValueError as e:
+        log.error("task.get_by_id_invalid_uuid", task_id=str(task_id)[:50], error=str(e))
         return None
-
-
-# ── URL lookups ──────────────────────────────────────────────────
-
-
-async def get_dashboard_url(service: str = "dozzle") -> str | None:
-    """Get the tunnel URL for the dashboard (dozzle) service."""
-    from openclow.services.tunnel_service import get_tunnel_url
-    return await get_tunnel_url(service)
-
-
-async def get_settings_url() -> str | None:
-    """Get the settings dashboard URL."""
-    from openclow.services.tunnel_service import get_tunnel_url
-    url = await get_tunnel_url("settings")
-    return f"{url}/settings" if url else None
+    except Exception as e:
+        log.error("task.get_by_id_failed", task_id=str(task_id)[:50], error=str(e))
+        return None
 
 
 # ── GitHub repo fetching ─────────────────────────────────────────

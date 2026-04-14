@@ -59,9 +59,15 @@ async def claude_auth_task(ctx: dict, chat_id: str, message_id: str,
 
     if not url:
         proc.kill()
-        await chat.edit_message(chat_id, message_id,
-                                "Failed to get auth URL.\n"
-                                "Run manually: docker exec -it openclow-worker-1 claude login")
+        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+        await chat.edit_message_with_actions(
+            chat_id, message_id,
+            "Failed to get auth URL. Tap to try again.",
+            ActionKeyboard(rows=[
+                ActionRow([ActionButton("🔑 Try Again", "claude_auth", style="primary")]),
+                ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+            ]),
+        )
         return
 
     from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow

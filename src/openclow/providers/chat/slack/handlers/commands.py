@@ -9,6 +9,7 @@ We prefix with /oc- (OpenClow) to avoid conflicts.
 from __future__ import annotations
 
 from openclow.providers.chat.slack import blocks
+from openclow.providers.chat.slack.handlers.actions import _open_task_modal
 from openclow.providers.chat.slack.middleware import check_auth, is_admin_async
 from openclow.services import bot_actions
 from openclow.utils.logging import get_logger
@@ -26,6 +27,7 @@ async def _ack_if_unauthorized(ack, body, client) -> bool:
             channel=body["channel_id"],
             user=user_id,
             text="You are not authorized. Ask an admin to add your Slack ID.",
+            blocks=blocks.error_blocks("You are not authorized. Ask an admin to add your Slack ID."),
         )
         return True
     return False
@@ -42,29 +44,14 @@ def register(app):
             return
 
         channel_id = body["channel_id"]
-
-        # If channel is linked to a project, skip the picker
-        from openclow.services.channel_service import get_channel_project
-        binding = await get_channel_project(channel_id)
-        if binding:
-            modal = blocks.build_task_modal_channel_scoped(
-                channel_id, binding["project_id"], binding["project_name"],
-            )
-            await client.views_open(trigger_id=body["trigger_id"], view=modal)
-            return
-
-        projects = await bot_actions.get_all_projects()
-        if not projects:
+        err = await _open_task_modal(client, body["trigger_id"], channel_id)
+        if err:
             await client.chat_postEphemeral(
                 channel=channel_id,
                 user=body["user_id"],
-                text="No projects configured.",
-                blocks=blocks.project_list_blocks([]),
+                text=err,
+                blocks=blocks.project_list_blocks([]) if "No projects" in err else blocks.error_blocks(err),
             )
-            return
-
-        modal = blocks.build_task_modal(projects, channel_id)
-        await client.views_open(trigger_id=body["trigger_id"], view=modal)
 
     # ── /oc-status ───────────────────────────────────────────
 
@@ -73,7 +60,7 @@ def register(app):
         if await _ack_if_unauthorized(ack, body, client):
             return
 
-        tasks = await bot_actions.get_active_tasks(body["channel_id"])
+        tasks = await bot_actions.get_active_tasks(body["channel_id"], user_id=body["user_id"])
         blks = blocks.status_blocks(tasks or [])
         await client.chat_postMessage(
             channel=body["channel_id"],
@@ -141,7 +128,22 @@ def register(app):
         from openclow.services.channel_service import get_channel_project
         binding = await get_channel_project(body["channel_id"])
         project_name = binding["project_name"] if binding else None
-        blks = blocks.welcome_blocks(project_name=project_name, dev_mode=True)
+        project_id = binding["project_id"] if binding else None
+        tunnel_url = None
+        if project_id and project_name:
+            try:
+                from openclow.services.tunnel_service import get_tunnel_url, check_tunnel_health
+                t_url = await get_tunnel_url(project_name)
+                if t_url and await check_tunnel_health(project_name):
+                    tunnel_url = t_url
+            except Exception:
+                pass
+        blks = blocks.welcome_blocks(
+            project_name=project_name,
+            project_id=project_id,
+            tunnel_url=tunnel_url,
+            dev_mode=True
+        )
         await client.chat_postMessage(
             channel=body["channel_id"], text="Use the menu buttons below.",
             blocks=blks,
@@ -204,12 +206,13 @@ def register(app):
         if await _ack_if_unauthorized(ack, body, client):
             return
 
-        task = await bot_actions.cancel_latest_task(body["channel_id"])
+        task = await bot_actions.cancel_latest_task(body["channel_id"], user_id=body["user_id"])
         if not task:
             await client.chat_postEphemeral(
                 channel=body["channel_id"],
                 user=body["user_id"],
                 text="No cancellable tasks found.",
+                blocks=blocks.terminal_blocks("No cancellable tasks found."),
             )
             return
 

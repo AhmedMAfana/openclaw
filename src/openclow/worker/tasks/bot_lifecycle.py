@@ -90,26 +90,63 @@ async def restart_bot_task(ctx: dict, reason: str = "config_change"):
     log.info("bot_lifecycle.container_restarted", container=container)
     log_event("bot_restart", {"status": "waiting_healthy", "container": container})
 
-    # 3. Wait for the container to become healthy (poll every 3s, max 60s)
+    # 3. Wait for healthy — quick poll first, then agent if stuck
     healthy = False
-    for attempt in range(20):
+    for attempt in range(10):
         await asyncio.sleep(3)
         health = await _get_container_health(container)
         state = await _get_container_state(container)
 
         if state != "running":
-            error = f"Container exited unexpectedly (state={state})"
-            log.error("bot_lifecycle.container_died", state=state)
-            log_event("bot_restart", {"status": "failed", "error": error})
-            return {"ok": False, "error": error}
+            break
 
         if health == "healthy":
             healthy = True
             break
 
+    # If not healthy after 30s, run agentic repair
     if not healthy:
-        error = "Bot did not become healthy within 60 seconds"
-        log.error("bot_lifecycle.health_timeout")
+        log.warning("bot_lifecycle.unhealthy_triggering_agent", container=container)
+        log_event("bot_restart", {"status": "agent_repair", "container": container})
+        try:
+            from openclow.worker.tasks._agent_helper import run_repair_agent
+
+            # Get container details for rich context
+            logs = ""
+            try:
+                from openclow.services.docker_guard import run_docker as _run_docker
+                _, logs = await _run_docker("docker", "logs", container, "--tail", "80", actor="bot_repair", timeout=10)
+            except Exception:
+                pass
+
+            prompt = (
+                f"Bot container '{container}' was restarted but is NOT healthy. Fix it.\n\n"
+                f"CONTAINER: {container}\n"
+                f"CURRENT STATE: {await _get_container_state(container)}\n"
+                f"HEALTH: {await _get_container_health(container)}\n\n"
+                f"RECENT LOGS:\n```\n{logs[-2000:]}\n```\n\n"
+                f"STEPS:\n"
+                f"1. container_logs(\"{container}\", 80) — read full logs\n"
+                f"2. DIAGNOSIS: <analyze what's wrong from logs>\n"
+                f"3. ACTION: <fix it — restart_container, docker_exec, edit config>\n"
+                f"4. container_health(\"{container}\") — verify healthy\n\n"
+                f"OUTPUT: STATUS: <step> | DIAGNOSIS: <issue> | ACTION: <fix> | FIXED: <summary>\n\n"
+                f"SELF-HEALING: When a fix doesn't work, try a different approach. Never give up."
+            )
+            status_lines = []
+            fixed = await run_repair_agent(
+                prompt, "/app", chat=None, chat_id="", message_id="",
+                status_lines=status_lines, max_turns=15,
+                notify_fn=lambda text: log_event("bot_restart", {"status": "agent", "detail": text[-200:]}),
+            )
+            if fixed:
+                healthy = True
+        except Exception as e:
+            log.error("bot_lifecycle.agent_repair_failed", error=str(e))
+
+    if not healthy:
+        error = "Bot did not become healthy — agent could not fix"
+        log.error("bot_lifecycle.health_failed")
         log_event("bot_restart", {"status": "failed", "error": error})
         return {"ok": False, "error": error}
 

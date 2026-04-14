@@ -11,6 +11,58 @@ from openclow.utils.logging import get_logger
 
 log = get_logger()
 
+
+async def _check_task_owner(user_id: str, task_id: str) -> tuple[bool, object | None]:
+    """Check auth + task ownership. Returns (ok, task). Admins bypass ownership."""
+    ok, db_user = await check_auth(user_id)
+    if not ok:
+        return False, None
+    task = await bot_actions.get_task_by_id(task_id)
+    if not task:
+        return False, None
+    if not db_user.is_admin and task.user_id != db_user.id:
+        return False, None
+    return True, task
+
+
+async def _open_task_modal(client, trigger_id: str, channel_id: str, project_id: int | None = None):
+    """Open the task creation modal — single entry point for all paths.
+
+    If project_id is provided (task_for: button), use it directly.
+    If channel is linked to a project, use the binding.
+    Otherwise, show the full modal with project dropdown.
+    Returns error string if modal can't be opened, None on success.
+    """
+    from openclow.services.channel_service import get_channel_project
+
+    # 1. Explicit project (task_for: buttons)
+    if project_id is not None:
+        project = await bot_actions.get_project_by_id(project_id)
+        if not project:
+            return "Project not found."
+        modal = blocks.build_task_modal_channel_scoped(channel_id, project_id, project.name)
+        await client.views_open(trigger_id=trigger_id, view=modal)
+        return None
+
+    # 2. Channel linked to a project
+    binding = await get_channel_project(channel_id)
+    if binding:
+        modal = blocks.build_task_modal_channel_scoped(
+            channel_id, binding["project_id"], binding["project_name"],
+        )
+        await client.views_open(trigger_id=trigger_id, view=modal)
+        return None
+
+    # 3. No project context — show dropdown
+    projects = await bot_actions.get_all_projects()
+    if not projects:
+        return "No projects configured."
+
+    modal = blocks.build_task_modal(projects, channel_id)
+    await client.views_open(trigger_id=trigger_id, view=modal)
+    return None
+
+
 # Actions that map to review_guard + job enqueue
 _REVIEW_ACTIONS = {
     "approve_plan": ("execute_plan", ":white_check_mark: Plan approved! Starting implementation..."),
@@ -77,11 +129,16 @@ def register(app):
     async def handle_review_action(ack, body, client):
         await ack()
 
-        action_value = body["actions"][0]["value"]
+        # Get value or fall back to action_id
+        action = body["actions"][0]
+        action_value = action.get("value") or action.get("action_id")
+        if not action_value:
+            log.error("review_action.no_value", action=action)
+            return
         action_name, task_id = action_value.split(":", 1)
 
         user_id = body["user"]["id"]
-        ok, _ = await check_auth(user_id)
+        ok, db_user = await check_auth(user_id)
         if not ok:
             return
 
@@ -93,7 +150,9 @@ def register(app):
         channel = body["channel"]["id"]
         ts = body["message"]["ts"]
 
-        guard_ok, error_msg = await bot_actions.review_guard(action_name, task_id)
+        guard_ok, error_msg = await bot_actions.review_guard(
+            action_name, task_id, user_id=user_id, is_admin=db_user.is_admin,
+        )
         if not guard_ok:
             await client.chat_update(
                 channel=channel, ts=ts,
@@ -124,11 +183,26 @@ def register(app):
             except Exception as e:
                 log.error("menu_main.dm_open_failed", user_id=user_id, error=str(e))
                 return
-        # Show linked project name in welcome if channel is bound
+        # Show linked project name and health in welcome if channel is bound
         from openclow.services.channel_service import get_channel_project
         binding = await get_channel_project(channel) if channel else None
         project_name = binding["project_name"] if binding else None
-        blks = blocks.welcome_blocks(project_name=project_name, dev_mode=await is_admin_async(user_id))
+        project_id = binding["project_id"] if binding else None
+        tunnel_url = None
+        if project_id and project_name:
+            try:
+                from openclow.services.tunnel_service import get_tunnel_url, check_tunnel_health
+                t_url = await get_tunnel_url(project_name)
+                if t_url and await check_tunnel_health(project_name):
+                    tunnel_url = t_url
+            except Exception:
+                pass
+        blks = blocks.welcome_blocks(
+            project_name=project_name,
+            project_id=project_id,
+            tunnel_url=tunnel_url,
+            dev_mode=await is_admin_async(user_id)
+        )
         await _post_or_update(client, channel, ts, "OpenClow Menu", blks)
 
     @app.action("menu:cancel")
@@ -141,7 +215,7 @@ def register(app):
 
         channel = body.get("channel", {}).get("id") or body.get("channel_id")
         ts = body.get("message", {}).get("ts")
-        task = await bot_actions.cancel_latest_task(channel)
+        task = await bot_actions.cancel_latest_task(channel, user_id=user_id)
         if not task:
             blks = blocks.terminal_blocks("No cancellable tasks found.")
         else:
@@ -158,54 +232,29 @@ def register(app):
             return
 
         channel_id = body["channel"]["id"]
-
-        # If channel is linked to a project, skip the picker
-        from openclow.services.channel_service import get_channel_project
-        binding = await get_channel_project(channel_id)
-        if binding:
-            modal = blocks.build_task_modal_channel_scoped(
-                channel_id, binding["project_id"], binding["project_name"],
+        err = await _open_task_modal(client, body["trigger_id"], channel_id)
+        if err:
+            await client.chat_postMessage(
+                channel=channel_id, text=err,
+                blocks=blocks.project_list_blocks([]) if "No projects" in err else blocks.error_blocks(err),
             )
-            await client.views_open(trigger_id=body["trigger_id"], view=modal)
-            return
-
-        projects = await bot_actions.get_all_projects()
-        if not projects:
-            blks = blocks.project_list_blocks([])
-            await client.chat_postMessage(channel=channel_id, text="No projects", blocks=blks)
-            return
-
-        modal = blocks.build_task_modal(projects, channel_id)
-        await client.views_open(trigger_id=body["trigger_id"], view=modal)
-
-    # ── Task for specific project ────────────────────────────
 
     @app.action(re.compile(r"^task_for:"))
     async def handle_task_for(ack, body, client):
-        """Open task modal with pre-selected project."""
+        """Open task modal for a known project — no dropdown needed."""
         await ack()
         user_id = body["user"]["id"]
         ok, _ = await check_auth(user_id)
         if not ok:
             return
 
-        # Extract project_id from action value
-        action_value = body["actions"][0]["value"]
-        project_id = int(action_value.split(":", 1)[1])
-
-        projects = await bot_actions.get_all_projects()
-        if not projects:
-            channel = body["channel"]["id"]
+        project_id = int(body["actions"][0]["value"].split(":", 1)[1])
+        channel_id = body["channel"]["id"]
+        err = await _open_task_modal(client, body["trigger_id"], channel_id, project_id=project_id)
+        if err:
             await client.chat_postMessage(
-                channel=channel,
-                text="No projects available.",
-                blocks=blocks.error_blocks("No projects configured."),
+                channel=channel_id, text=err, blocks=blocks.error_blocks(err),
             )
-            return
-
-        # Open modal with pre-selected project
-        modal = blocks.build_task_modal_with_project(projects, body["channel"]["id"], project_id)
-        await client.views_open(trigger_id=body["trigger_id"], view=modal)
 
     @app.action("menu:projects")
     async def handle_menu_projects(ack, body, client):
@@ -228,7 +277,8 @@ def register(app):
         await ack()
         channel = body["channel"]["id"]
         ts = body["message"]["ts"]
-        tasks = await bot_actions.get_active_tasks(channel)
+        user_id = body["user"]["id"]
+        tasks = await bot_actions.get_active_tasks(channel, user_id=user_id)
         blks = blocks.status_blocks(tasks or [])
         await _post_or_update(client, channel, ts, "Status", blks)
 
@@ -607,7 +657,18 @@ def register(app):
 
         channel = body["channel"]["id"]
         ts = body["message"]["ts"]
-        blks = blocks.project_detail_blocks(project)
+
+        # Fetch tunnel URL with health check — only show "Open App" if tunnel is alive
+        tunnel_url = None
+        try:
+            from openclow.services.tunnel_service import get_tunnel_url, check_tunnel_health
+            t_url = await get_tunnel_url(project.name)
+            if t_url and await check_tunnel_health(project.name):
+                tunnel_url = t_url
+        except Exception:
+            pass
+
+        blks = blocks.project_detail_blocks(project, tunnel_url=tunnel_url)
         await _post_or_update(client, channel, ts, f"Project: {project.name}", blks)
 
     # ── Destructive Action Confirmations ───────────────────────
@@ -883,18 +944,17 @@ def register(app):
     async def handle_task_view(ack, body, client):
         """View task details and Claude session activity."""
         await ack()
-        action_value = body["actions"][0]["value"]
-        task_id = action_value.split(":", 1)[1]
-        channel = body["channel"]["id"]
-        ts = body["message"]["ts"]
-
         try:
-            from openclow.services import bot_actions
-            task = await bot_actions.get_task_by_id(task_id)
-            if not task:
+            action_value = body["actions"][0]["value"]
+            task_id = action_value.split(":", 1)[1]
+            channel = body["channel"]["id"]
+            ts = body["message"]["ts"]
+
+            ok, task = await _check_task_owner(body["user"]["id"], task_id)
+            if not ok or not task:
                 await client.chat_update(
                     channel=channel, ts=ts,
-                    text="Task not found", blocks=blocks.error_blocks("Task not found.")
+                    text="Task not found", blocks=blocks.error_blocks("Task not found or access denied.")
                 )
                 return
 
@@ -912,25 +972,47 @@ def register(app):
             if task.pr_url:
                 details += f"*PR:* <{task.pr_url}|View PR>\n"
 
+            # Build action buttons based on task status
+            action_buttons = [
+                blocks.button_element("🔄 Refresh", f"task_view:{task_id}", value=f"task_view:{task_id}"),
+            ]
+
+            # Add approval buttons based on task status
+            if task.status == "diff_preview":
+                action_buttons.append(blocks.button_element("✅ Approve", f"approve:{task_id}", value=f"approve:{task_id}", style="primary"))
+                action_buttons.append(blocks.button_element("❌ Discard", f"discard:{task_id}", value=f"discard:{task_id}", style="danger"))
+            elif task.status == "awaiting_approval":
+                action_buttons.append(blocks.button_element("✅ Merge", f"merge:{task_id}", value=f"merge:{task_id}", style="primary"))
+                action_buttons.append(blocks.button_element("❌ Reject", f"reject:{task_id}", value=f"reject:{task_id}", style="danger"))
+            elif task.status == "plan_review":
+                action_buttons.append(blocks.button_element("✅ Approve Plan", f"approve_plan:{task_id}", value=f"approve_plan:{task_id}", style="primary"))
+                action_buttons.append(blocks.button_element("❌ Discard", f"discard:{task_id}", value=f"discard:{task_id}", style="danger"))
+
+            # Add pause/cancel for cancellable statuses
+            if task.status in ("pending", "preparing", "planning", "coding", "reviewing"):
+                action_buttons.append(blocks.button_element("⏸️ Pause", f"task_pause:{task_id}", value=f"task_pause:{task_id}"))
+            action_buttons.append(blocks.button_element("❌ Cancel", f"task_cancel:{task_id}", value=f"task_cancel:{task_id}", style="danger"))
+            action_buttons.append(blocks.button_element("◀️ Back", "menu:status", value="menu:status"))
+
             await client.chat_update(
                 channel=channel, ts=ts,
                 text=title,
                 blocks=[
                     blocks.section_block(details),
-                    blocks.actions_block([
-                        blocks.button_element("🔄 Refresh", f"task_view:{task_id}"),
-                        blocks.button_element("⏸️ Pause", f"task_pause:{task_id}"),
-                        blocks.button_element("❌ Cancel", f"task_cancel:{task_id}", style="danger"),
-                        blocks.button_element("◀️ Back", "menu:status"),
-                    ])
+                    blocks.actions_block(action_buttons)
                 ]
             )
+            log.info("task_view.shown", task_id=task_id)
         except Exception as e:
-            log.error("task_view_failed", error=str(e))
-            await client.chat_update(
-                channel=channel, ts=ts,
-                text="Error", blocks=blocks.error_blocks(f"Could not load task: {str(e)[:100]}")
-            )
+            import traceback
+            log.error("task_view_failed", error=str(e), traceback=traceback.format_exc())
+            try:
+                await client.chat_update(
+                    channel=body["channel"]["id"], ts=body["message"]["ts"],
+                    text="Error", blocks=blocks.error_blocks(f"Could not load task: {str(e)[:100]}")
+                )
+            except Exception:
+                pass
 
     @app.action(re.compile(r"^task_pause:"))
     async def handle_task_pause(ack, body, client):
@@ -940,6 +1022,10 @@ def register(app):
         task_id = action_value.split(":", 1)[1]
         channel = body["channel"]["id"]
         ts = body["message"]["ts"]
+
+        ok, task = await _check_task_owner(body["user"]["id"], task_id)
+        if not ok:
+            return
 
         try:
             await client.chat_update(
@@ -960,17 +1046,21 @@ def register(app):
         channel = body["channel"]["id"]
         ts = body["message"]["ts"]
 
+        ok, task = await _check_task_owner(body["user"]["id"], task_id)
+        if not ok:
+            return
+
         try:
-            # Update task status to cancelled
             from openclow.models import Task, async_session
+            from sqlalchemy import update
             import uuid
-            from sqlalchemy import update, select
             async with async_session() as session:
-                result = await session.execute(select(Task).where(Task.id == uuid.UUID(task_id)))
-                task = result.scalar_one_or_none()
-                if task:
-                    task.status = "cancelled"
-                    await session.commit()
+                await session.execute(
+                    update(Task)
+                    .where(Task.id == uuid.UUID(task_id))
+                    .values(status="cancelled")
+                )
+                await session.commit()
 
             await client.chat_update(
                 channel=channel, ts=ts,
@@ -978,9 +1068,9 @@ def register(app):
                 blocks=[
                     blocks.section_block(":white_check_mark: *Task Cancelled*\n\nThe task has been stopped."),
                     blocks.actions_block([
-                        blocks.button_element("📊 View Tasks", "menu:status"),
-                        blocks.button_element("🚀 New Task", "menu:task", style="primary"),
-                        blocks.button_element("◀️ Menu", "menu:main"),
+                        blocks.button_element("📊 View Tasks", "menu:status", value="menu:status"),
+                        blocks.button_element("🚀 New Task", "menu:task", value="menu:task", style="primary"),
+                        blocks.button_element("◀️ Menu", "menu:main", value="menu:main"),
                     ])
                 ]
             )
@@ -1050,7 +1140,27 @@ def register(app):
             blks = blocks.help_blocks()
             await _post_or_update(client, channel, ts, "Help", blks)
         else:
-            blks = blocks.welcome_blocks()
+            # Get project context if channel is bound
+            binding = await bot_actions.get_channel_binding(channel, "slack")
+            project_id = binding.get("project_id") if binding else None
+            project = None
+            tunnel_url = None
+            if project_id:
+                try:
+                    project = await bot_actions.get_project_by_id(project_id)
+                    if project:
+                        from openclow.services.tunnel_service import get_tunnel_url, check_tunnel_health
+                        t_url = await get_tunnel_url(project.name)
+                        if t_url and await check_tunnel_health(project.name):
+                            tunnel_url = t_url
+                except Exception:
+                    pass
+
+            blks = blocks.welcome_blocks(
+                project_name=project.name if project else None,
+                project_id=project_id,
+                tunnel_url=tunnel_url,
+            )
             await _post_or_update(client, channel, ts, "Menu", blks)
 
     @app.action(re.compile(r"^project:overflow"))
@@ -1171,13 +1281,14 @@ def register(app):
             ts=body["message"]["ts"],
             text=f"Channel linked to {project_name}",
             blocks=[
-                {"type": "section", "text": {"type": "mrkdwn", "text":
+                blocks.section_block(
                     f"✅ Channel linked to *{project_name}*\n\n"
-                    f"All messages and tasks in this channel will now be scoped to this project.\n"}},
-                {"type": "actions", "elements": [
+                    f"All messages and tasks in this channel will now be scoped to this project."
+                ),
+                blocks.actions_block([
                     blocks.button_element("🔗 Unlink", f"project_unlink:{project_id}", value=f"project_unlink:{project_id}"),
                     blocks.button_element("Menu", "menu:main", value="menu:main"),
-                ]},
+                ]),
             ],
         )
 
@@ -1244,9 +1355,33 @@ def register(app):
         await ack()
 
     # URL buttons — Slack fires actions for these even though they just open links
-    @app.action(re.compile(r"^(open_dashboard|open_settings|open_wizard|open_app:|view_pr:)"))
+    @app.action(re.compile(r"^(open_dashboard|open_settings|open_wizard|view_pr:)"))
     async def handle_url_buttons(ack):
         await ack()
+
+    # Open App — triggers health check + auto-fix + tunnel start
+    @app.action(re.compile(r"^open_app:"))
+    async def handle_open_app(ack, body, client):
+        await ack()
+        try:
+            action_value = body["actions"][0]["value"]
+            project_id = int(action_value.split(":", 1)[1])
+            channel = body["channel"]["id"]
+            ts = body["message"]["ts"]
+
+            await client.chat_update(
+                channel=channel, ts=ts,
+                text="Checking app...",
+                blocks=blocks.agent_thinking_blocks("🔍 Checking if your app is running..."),
+            )
+
+            await bot_actions.enqueue_job("check_project_health", project_id, channel, ts, "slack")
+        except Exception as e:
+            log.error("slack.open_app_failed", error=str(e))
+            await client.chat_update(
+                channel=body["channel"]["id"], ts=body["message"]["ts"],
+                text="Error", blocks=blocks.error_blocks(f"Failed to check app: {str(e)[:100]}")
+            )
 
     # ── Home Tab Actions (prefixed with home:) ───────────────
     # These are identical to menu: actions but triggered from the Home Tab
@@ -1290,18 +1425,14 @@ def register(app):
             return
 
         if menu_action == "menu:task":
-            projects = await bot_actions.get_all_projects()
-            if not projects:
-                await client.chat_postMessage(channel=channel, text="No projects", blocks=blocks.project_list_blocks([]))
-                return
-            # For task modal, we need trigger_id
-            modal = blocks.build_task_modal(projects, channel)
-            await client.views_open(trigger_id=body["trigger_id"], view=modal)
+            err = await _open_task_modal(client, body["trigger_id"], channel)
+            if err:
+                await client.chat_postMessage(channel=channel, text=err, blocks=blocks.project_list_blocks([]))
         elif menu_action == "menu:projects":
             projects = await bot_actions.get_all_projects()
             await client.chat_postMessage(channel=channel, text="Projects", blocks=blocks.project_list_blocks(projects or []))
         elif menu_action == "menu:status":
-            tasks = await bot_actions.get_all_active_tasks(limit=10)
+            tasks = await bot_actions.get_all_active_tasks(limit=10, user_id=user_id)
             await client.chat_postMessage(channel=channel, text="Status", blocks=blocks.status_blocks(tasks or []))
         elif menu_action == "menu:help":
             await client.chat_postMessage(channel=channel, text="Help", blocks=blocks.help_blocks())
@@ -1341,7 +1472,47 @@ def register(app):
             blks = blocks.repo_list_blocks(repos or [], existing_map)
             await client.chat_update(channel=channel, ts=msg["ts"], text="Add Project", blocks=blks)
         else:
-            await client.chat_postMessage(channel=channel, text="Menu", blocks=blocks.welcome_blocks())
+            # Show welcome with user's default project context if available
+            project_id = db_user.default_project_id if db_user else None
+            project = None
+            tunnel_url = None
+            if project_id:
+                try:
+                    project = await bot_actions.get_project_by_id(project_id)
+                    if project:
+                        from openclow.services.tunnel_service import get_tunnel_url, check_tunnel_health
+                        t_url = await get_tunnel_url(project.name)
+                        if t_url and await check_tunnel_health(project.name):
+                            tunnel_url = t_url
+                except Exception:
+                    pass
+
+            await client.chat_postMessage(
+                channel=channel, text="Menu",
+                blocks=blocks.welcome_blocks(
+                    project_name=project.name if project else None,
+                    project_id=project_id,
+                    tunnel_url=tunnel_url,
+                )
+            )
+
+    # ── Cancel Session ──────────────────────────────────────────
+
+    @app.action("cancel_session")
+    async def handle_cancel_session(ack, body, client):
+        """Cancel an in-progress LLM session."""
+        await ack()
+        channel = body["channel"]["id"]
+        ts = body["message"]["ts"]
+
+        try:
+            await client.chat_update(
+                channel=channel, ts=ts,
+                text="Cancelled",
+                blocks=blocks.error_blocks(":stop_sign: Request cancelled."),
+            )
+        except Exception as e:
+            log.error("cancel_session.failed", error=str(e))
 
     # ── Catch-all (must be LAST) ─────────────────────────────
 

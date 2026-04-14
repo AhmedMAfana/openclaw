@@ -5,7 +5,6 @@ Uses the 'tiny' model (~75MB, ~1 sec per message).
 """
 import asyncio
 import os
-import tempfile
 
 from openclow.utils.logging import get_logger
 
@@ -84,36 +83,3 @@ def _transcribe_sync(wav_path: str) -> str:
     segments, info = model.transcribe(wav_path, beam_size=1, language=None)
     text = " ".join(segment.text.strip() for segment in segments)
     return text.strip()
-
-
-async def transcribe_telegram_voice(bot, voice_file_id: str) -> str:
-    """Download and transcribe a Telegram voice message.
-
-    Args:
-        bot: aiogram Bot instance
-        voice_file_id: Telegram file_id of the voice message
-
-    Returns:
-        Transcribed text string
-    """
-    tmp_dir = tempfile.mkdtemp()
-    ogg_path = os.path.join(tmp_dir, "voice.ogg")
-
-    try:
-        # Download voice file from Telegram
-        file = await bot.get_file(voice_file_id)
-        await bot.download_file(file.file_path, destination=ogg_path)
-        log.info("transcription.downloaded", size=os.path.getsize(ogg_path))
-
-        # Transcribe
-        text = await transcribe_ogg(ogg_path)
-        return text
-
-    except Exception as e:
-        log.error("transcription.download_failed", error=str(e))
-        return ""
-    finally:
-        try:
-            os.rmdir(tmp_dir)
-        except OSError:
-            pass

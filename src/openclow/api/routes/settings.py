@@ -140,22 +140,46 @@ async def update_config(category: str, body: ProviderConfigUpdate):
     return result
 
 
+# Cache for bot status to avoid overwhelming the queue
+_bot_status_cache = {"data": None, "timestamp": 0}
+_BOT_STATUS_CACHE_TTL = 25  # seconds (matches dashboard polling interval)
+
 @router.get("/bot-status")
 async def bot_status():
-    """Get bot status by asking the worker (which has Docker socket access)."""
+    """Get bot status by asking the worker (which has Docker socket access).
+
+    Uses caching to prevent overwhelming the job queue with repeated requests
+    from the dashboard polling every 15 seconds.
+    """
+    import time
+    now = time.time()
+
+    # Return cached result if still fresh
+    if _bot_status_cache["data"] and (now - _bot_status_cache["timestamp"]) < _BOT_STATUS_CACHE_TTL:
+        return _bot_status_cache["data"]
+
     try:
         from openclow.worker.arq_app import get_arq_pool
         pool = await get_arq_pool()
         job = await pool.enqueue_job("get_bot_status_task")
         result = await job.result(timeout=10)
+        # Cache the result
+        _bot_status_cache["data"] = result
+        _bot_status_cache["timestamp"] = now
         return result
     except Exception as e:
         # Fallback: just return provider config
         try:
             ptype, _ = await config_service.get_provider_config("chat")
-            return {"running": None, "health": "unknown", "provider": ptype}
+            fallback = {"running": None, "health": "unknown", "provider": ptype}
+            _bot_status_cache["data"] = fallback
+            _bot_status_cache["timestamp"] = now
+            return fallback
         except Exception:
-            return {"running": False, "health": "error", "error": str(e)[:200]}
+            error_result = {"running": False, "health": "error", "error": str(e)[:200]}
+            _bot_status_cache["data"] = error_result
+            _bot_status_cache["timestamp"] = now
+            return error_result
 
 
 @router.get("/providers")

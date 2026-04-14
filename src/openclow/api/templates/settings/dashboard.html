@@ -218,6 +218,6 @@ async function refreshChatCardStatus() {
     } catch (e) {}
 }
 refreshChatCardStatus();
-setInterval(refreshChatCardStatus, 15000);
+setInterval(refreshChatCardStatus, 30000);  // Poll every 30s instead of 15s to reduce queue pressure
 </script>
 {% endblock %}

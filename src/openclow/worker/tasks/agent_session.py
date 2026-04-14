@@ -32,7 +32,8 @@ async def _load_conversation(chat_id: str, user_id: str = "") -> list[dict]:
         await r.aclose()
         import json
         return [json.loads(m) for m in reversed(raw)]  # oldest first
-    except Exception:
+    except Exception as e:
+        log.warning("agent_session.redis_load_failed", chat_id=chat_id, error=str(e))
         return []
 
 
@@ -48,8 +49,8 @@ async def _save_message(chat_id: str, role: str, text: str, user_id: str = ""):
         await r.ltrim(key, -_CONV_MAX, -1)
         await r.expire(key, 3600)  # 1 hour TTL
         await r.aclose()
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("agent_session.redis_save_failed", chat_id=chat_id, error=str(e))
 
 
 def _format_response(text: str, provider: str = "telegram") -> str:
@@ -189,6 +190,7 @@ async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message
     context_parts: list[str] = []
     workspace: str | None = None
     tunnel_url: str | None = None  # For "Open App" button
+    project_name: str | None = None  # For response header
 
     # Extract target project_id from context (channel binding)
     target_pid: int | None = None
@@ -213,17 +215,23 @@ async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message
         if projects:
             if len(projects) == 1:
                 p = projects[0]
+                project_name = p.name  # Store for response header
                 context_parts.append(f"FOCUSED PROJECT: {p.name} ({p.tech_stack or 'N/A'})")
                 if p.description:
                     context_parts.append(f"Description: {p.description}")
                 if p.agent_system_prompt:
                     context_parts.append(f"Conventions:\n{p.agent_system_prompt}")
                 try:
-                    from openclow.services.tunnel_service import get_tunnel_url
+                    from openclow.services.tunnel_service import get_tunnel_url, check_tunnel_health
                     t_url = await get_tunnel_url(p.name)
                     if t_url:
-                        tunnel_url = t_url
-                        t_url_display = t_url
+                        # Verify tunnel is actually alive before showing "Open App" button
+                        tunnel_alive = await check_tunnel_health(p.name)
+                        if tunnel_alive:
+                            tunnel_url = t_url
+                            t_url_display = t_url
+                        else:
+                            t_url_display = "tunnel not responding"
                     else:
                         t_url_display = "no tunnel"
                 except Exception as e:
@@ -417,60 +425,8 @@ RULES:
                                 pass
 
                     elif isinstance(block, ToolUseBlock):
-                        inp = block.input if isinstance(block.input, dict) else {}
-                        name = block.name
-                        if name == "Read":
-                            path = inp.get("file_path", "")
-                            desc = f"📖 Reading {path.split('/')[-1]}" if path else "📖 Reading file"
-                        elif name == "Edit":
-                            path = inp.get("file_path", "")
-                            desc = f"✏️ Editing {path.split('/')[-1]}" if path else "✏️ Editing file"
-                        elif name == "Write":
-                            path = inp.get("file_path", "")
-                            desc = f"📝 Writing {path.split('/')[-1]}" if path else "📝 Creating file"
-                        elif name == "Bash":
-                            cmd = inp.get("command", "")[:50]
-                            desc = f"⚡ {cmd}" if cmd else "⚡ Running command"
-                        elif name == "Grep":
-                            desc = f"🔍 Searching: {inp.get('pattern', '')[:30]}"
-                        elif name == "Glob":
-                            desc = f"📁 Finding: {inp.get('pattern', '')[:30]}"
-                        elif "docker_exec" in name:
-                            desc = f"🐳 {inp.get('command', '')[:40]}"
-                        elif "container_logs" in name:
-                            desc = f"📋 Logs: {inp.get('container_name', '').split('-')[-2] if inp.get('container_name') else ''}"
-                        elif "list_containers" in name:
-                            desc = "🐳 Checking containers"
-                        elif "container_health" in name:
-                            desc = "💚 Health check"
-                        elif "restart_container" in name:
-                            desc = f"🔄 Restarting {inp.get('container_name', '').split('-')[-2] if inp.get('container_name') else 'container'}"
-                        elif "compose_up" in name:
-                            desc = "🐳 Starting Docker stack"
-                        elif "compose_ps" in name:
-                            desc = "🐳 Checking stack status"
-                        elif "tunnel" in name:
-                            action = name.split("__")[-1].replace("tunnel_", "")
-                            desc = f"🌐 Tunnel: {action}"
-                        elif "playwright" in name or "browser" in name:
-                            action = name.split("__")[-1].replace("browser_", "")
-                            url = inp.get("url", "")
-                            if "navigate" in name:
-                                desc = f"🌐 Opening {url[:40]}" if url else "🌐 Navigating"
-                            elif "screenshot" in name:
-                                desc = "📸 Taking screenshot"
-                            elif "click" in name:
-                                desc = f"👆 Clicking: {inp.get('element', '')[:30]}"
-                            elif "fill" in name or "type" in name:
-                                desc = f"⌨️ Typing in form"
-                            elif "snapshot" in name:
-                                desc = "🔍 Reading page content"
-                            else:
-                                desc = f"🌐 Browser: {action}"
-                        else:
-                            desc = f"🔧 {name.replace('mcp__', '').replace('__', ': ')}"
-
-                        tool_lines.append(desc)
+                        from openclow.worker.tasks._agent_base import describe_tool
+                        tool_lines.append(describe_tool(block))
                         if len(tool_lines) > 5:
                             tool_lines = tool_lines[-5:]
 
@@ -489,10 +445,10 @@ RULES:
         log.warning("agent_session.cancelled", chat_id=chat_id)
         response_text = "Agent session was cancelled. Try again."
     except Exception as e:
-        error_str = str(e).lower()
         import traceback
         log.error("agent_session.failed", error=str(e), traceback=traceback.format_exc())
-        if any(kw in error_str for kw in ["auth", "unauthorized", "logged in", "credential", "token expired", "not authenticated"]):
+        from openclow.worker.tasks._agent_base import is_auth_error
+        if is_auth_error(e):
             from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
             kb = ActionKeyboard(rows=[
                 ActionRow([ActionButton("🔑 Re-authenticate", "claude_auth")]),
@@ -516,14 +472,14 @@ RULES:
     final_text = _format_response(response_text[:3800], chat_provider_type)
 
     # Save assistant response to per-user conversation memory
-    await _save_message(chat_id, "assistant", final_text[:500], user_id)
+    await _save_message(chat_id, "assistant", final_text[:1000], user_id)
 
     pid = target_pid  # Already extracted above
 
     if _is_slack:
         # Rich Block Kit response for Slack
         from openclow.providers.chat.slack.blocks import agent_response_blocks
-        blks = agent_response_blocks(final_text, project_id=pid, tunnel_url=tunnel_url)
+        blks = agent_response_blocks(final_text, project_id=pid, tunnel_url=tunnel_url, project_name=project_name)
         try:
             await chat.edit_message_blocks(chat_id, message_id, blks, is_final=True)
         except Exception:
@@ -537,8 +493,8 @@ RULES:
         rows = []
         if pid:
             row1 = [ActionButton("🤖 Chat Again", f"agent_diagnose:{pid}")]
-            if tunnel_url:
-                row1.append(ActionButton("🌐 Open App", f"open_app:{pid}", url=tunnel_url))
+            from openclow.providers.actions import open_app_btn
+            row1.append(open_app_btn(pid))
             rows.append(ActionRow(row1))
             rows.append(ActionRow([
                 ActionButton("🚀 New Task", "menu:task"),

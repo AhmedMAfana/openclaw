@@ -85,7 +85,7 @@ src/openclow/
 │   └── chat/
 │       ├── telegram/  # Telegram provider (aiogram)
 │       └── slack/     # Slack provider (slack-bolt)
-├── services/         # bot_actions, project_service, docker_service, ai_chat, etc.
+├── services/         # bot_actions, project_service, health_service, ai_chat, etc.
 └── worker/
     ├── arq_app.py    # Worker entry + job registry
     └── tasks/        # All async jobs
@@ -102,3 +102,13 @@ src/openclow/
 - Imports: stdlib → third-party → local, with `from __future__ import annotations`
 - No docstrings on obvious functions. Comments only where logic isn't self-evident.
 - 2-space indent in templates, 4-space in Python
+
+## Agentic Design
+
+- **LLM agents decide, never hardcoded regex/if-elif.** Complex task routing, error diagnosis, and repair must go through Claude agents — not scripted logic. The only exception is user-initiated actions (approve/reject buttons map to specific jobs via `_REVIEW_ACTIONS`).
+- **No Bash tool in agent configs** — forces agents to use MCP tools (Docker, Git, Playwright) which have graceful error handling and don't crash the SDK.
+- **Agent Never Gives Up**: The word "UNFIXABLE" does not exist. When a command fails, read the error, try a completely different approach. When that fails too, try another. Keep going until fixed or out of turns. Never repeat a failed approach.
+- **Empty diff = retry**: If the coder agent produces no file changes, auto-retry with a stronger prompt before reporting failure to the user.
+- **No Dead Ends**: Every error message MUST include at least a Main Menu button. Slack: use `error_blocks()`. Telegram: use `_error_keyboard()`. Never show bare text errors without navigation buttons.
+- **Shared agent utilities**: use `worker/tasks/_agent_base.py` for tool descriptions (`describe_tool`), auth error detection (`is_auth_error`), and common patterns. Don't copy-paste agent boilerplate.
+- **MCP factories live in `providers/llm/claude.py`**: `_mcp_docker()`, `_mcp_playwright()`, `_mcp_git()`. Import these, don't inline MCP server configs.

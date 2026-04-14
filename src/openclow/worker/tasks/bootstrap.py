@@ -1846,8 +1846,8 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
 
         from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
         rows = []
-        if tunnel_url:
-            rows.append(ActionRow([ActionButton("🌐 Open App", "open_app", url=tunnel_url)]))
+        from openclow.providers.actions import open_app_btn
+        rows.append(ActionRow([open_app_btn(project.id)]))
         rows.append(ActionRow([
             ActionButton("🚀 New Task", "menu:task"),
             ActionButton("💚 Health", f"health:{project.id}"),

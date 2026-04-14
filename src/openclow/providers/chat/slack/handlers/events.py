@@ -16,12 +16,17 @@ def register(app):
     async def handle_mention(event, client):
         """Respond when the bot is @mentioned with rich blocks."""
         user_id = event.get("user", "")
+        if not user_id:
+            log.error("slack.event_missing_user_id", event_type="app_mention", channel=event["channel"])
+            return
         ok, _ = await check_auth(user_id)
         if not ok:
+            from openclow.providers.chat.slack import blocks as _blocks
             await client.chat_postEphemeral(
                 channel=event["channel"],
                 user=user_id,
                 text="You are not authorized.",
+                blocks=_blocks.error_blocks("You are not authorized. Ask an admin to add your Slack ID."),
             )
             return
 
@@ -36,7 +41,22 @@ def register(app):
             from openclow.providers.chat.slack.middleware import is_dev_mode
             binding = await get_channel_project(event["channel"])
             project_name = binding["project_name"] if binding else None
-            blks = blocks.welcome_blocks(project_name=project_name, dev_mode=is_dev_mode(user_id))
+            project_id = binding["project_id"] if binding else None
+            tunnel_url = None
+            if project_id and project_name:
+                try:
+                    from openclow.services.tunnel_service import get_tunnel_url, check_tunnel_health
+                    t_url = await get_tunnel_url(project_name)
+                    if t_url and await check_tunnel_health(project_name):
+                        tunnel_url = t_url
+                except Exception:
+                    pass
+            blks = blocks.welcome_blocks(
+                project_name=project_name,
+                project_id=project_id,
+                tunnel_url=tunnel_url,
+                dev_mode=is_dev_mode(user_id)
+            )
             await client.chat_postMessage(
                 channel=event["channel"],
                 text="Use /oc-task to submit a task, or /oc-help for commands.",
@@ -82,6 +102,9 @@ def register(app):
         channel = event["channel"]
         is_dm = channel_type == "im"
         user_id = event.get("user", "")
+        if not user_id:
+            log.error("slack.event_missing_user_id", event_type="message", channel=channel)
+            return
 
         # For channels/groups: only respond if the channel is linked to a project
         if not is_dm:

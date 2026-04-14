@@ -80,6 +80,16 @@ def button_element(
     return btn
 
 
+def open_app_button(project_id: int) -> dict:
+    """Open App button — always action button to trigger health check + auto-fix."""
+    return button_element(
+        "🚀 Open App",
+        f"open_app:{project_id}",
+        value=f"open_app:{project_id}",
+        style="primary",
+    )
+
+
 def overflow_element(options: list[tuple[str, str]], action_id: str = "overflow") -> dict:
     """Compact '...' menu for secondary actions. options = [(label, value), ...]."""
     return {
@@ -94,6 +104,96 @@ def overflow_element(options: list[tuple[str, str]], action_id: str = "overflow"
 
 def image_block(url: str, alt: str = "image") -> dict:
     return {"type": "image", "image_url": url, "alt_text": alt}
+
+
+# ── Shared Private Helpers ──────────────────────────────────────────
+
+def _nav_buttons(include_new_task: bool = True) -> list[dict]:
+    """Standard navigation button row — used at the bottom of most views."""
+    btns = []
+    if include_new_task:
+        btns.append(button_element("🚀 New Task", "menu:task", value="menu:task", style="primary"))
+    btns.append(button_element("📋 Main Menu", "menu:main", value="menu:main"))
+    return btns
+
+
+def _review_buttons(
+    task_id: str,
+    approve_action: str = "approve",
+    approve_label: str = ":white_check_mark: Create Pull Request",
+) -> list[dict]:
+    """Approve / Discard / Review Live button row for review screens."""
+    return [
+        button_element(approve_label, f"{approve_action}:{task_id}", value=f"{approve_action}:{task_id}", style="primary"),
+        button_element(":wastebasket: Discard Changes", f"discard:{task_id}", value=f"discard:{task_id}", style="danger"),
+        button_element(":globe_with_meridians: Review Live", f"open_app:{task_id}", value=f"open_app:{task_id}", style="primary"),
+    ]
+
+
+def _diff_stats(diff: str) -> tuple[int, int, int]:
+    """Count files changed, insertions, deletions from a git diff."""
+    if not diff:
+        return (0, 0, 0)
+    return (diff.count(" | "), diff.count("\n+"), diff.count("\n-"))
+
+
+def _task_mode_block() -> dict:
+    """Quick/Full radio button input block — shared by both task modals."""
+    return {
+        "type": "input",
+        "block_id": "mode_block",
+        "element": {
+            "type": "radio_buttons",
+            "action_id": "task_mode",
+            "options": [
+                {
+                    "text": {"type": "plain_text", "text": "⚡ Quick — skip planning, start coding immediately", "emoji": True},
+                    "value": "quick",
+                },
+                {
+                    "text": {"type": "plain_text", "text": "📋 Full — create a plan first, then code", "emoji": True},
+                    "value": "full",
+                },
+            ],
+            "initial_option": {
+                "text": {"type": "plain_text", "text": "⚡ Quick — skip planning, start coding immediately", "emoji": True},
+                "value": "quick",
+            },
+        },
+        "label": {"type": "plain_text", "text": "Mode"},
+    }
+
+
+def _shorten_tech_stack(stack: str) -> str:
+    """Shorten tech stack for mobile — first 3 items + count."""
+    if not stack:
+        return ""
+    items = [s.strip() for s in stack.split(",")]
+    short = ", ".join(items[:3])
+    if len(items) > 3:
+        short += f" +{len(items) - 3}"
+    return short
+
+
+def _tunnel_state_blocks(name: str, icon: str, state: str, action_prefix: str) -> list[dict]:
+    """Generic tunnel retry/stopped blocks for dashboard and settings."""
+    if state == "retry":
+        return [
+            section_block(f"{icon} *{name}*\n_Tunnel starting up — try again in a moment_"),
+            actions_block([
+                button_element("Retry", f"menu:{action_prefix}", value=f"menu:{action_prefix}"),
+                button_element("Force Start", f"menu:{action_prefix}_refresh", value=f"menu:{action_prefix}_refresh"),
+                button_element("Menu", "menu:main", value="menu:main"),
+            ]),
+        ]
+    # stopped
+    return [
+        section_block(f":octagonal_sign: {name} tunnel stopped"),
+        actions_block([
+            button_element("Restart", f"menu:{action_prefix}_refresh", value=f"menu:{action_prefix}_refresh"),
+            button_element("Menu", "menu:main", value="menu:main"),
+        ]),
+    ]
 
 
 # ── Keyboard Translation (ActionKeyboard → Blocks) ──────────────────
@@ -241,7 +341,12 @@ PROJECT_STATUS_LABELS = {
 
 # ── Composite Builders — Views ───────────────────────────────────────
 
-def welcome_blocks(project_name: str | None = None, dev_mode: bool = False) -> list[dict]:
+def welcome_blocks(
+    project_name: str | None = None,
+    project_id: int | None = None,
+    tunnel_url: str | None = None,
+    dev_mode: bool = False,
+) -> list[dict]:
     """Welcome / main menu — employee mode by default, full admin if dev_mode."""
     if project_name:
         text = (
@@ -264,12 +369,21 @@ def welcome_blocks(project_name: str | None = None, dev_mode: bool = False) -> l
         context_block([
             "Use the buttons below or type `/oc-help` for commands."
         ]),
-        actions_block([
-            button_element("🚀 New Task", "menu:task", value="menu:task", style="primary"),
-            button_element("📊 Status", "menu:status", value="menu:status"),
-            button_element("❓ Help", "menu:help", value="menu:help"),
-        ]),
     ]
+
+    # Action buttons
+    elements = []
+
+    # Open App button
+    if project_id:
+        elements.append(open_app_button(project_id))
+
+    # Standard menu buttons
+    elements.append(button_element("✏️ New Task", "menu:task", value="menu:task", style="primary" if not project_id else None))
+    elements.append(button_element("📊 Status", "menu:status", value="menu:status"))
+    elements.append(button_element("❓ Help", "menu:help", value="menu:help"))
+
+    blks.append(actions_block(elements))
 
     if dev_mode:
         blks.append(actions_block([
@@ -302,9 +416,8 @@ def help_blocks() -> list[dict]:
             ":bulb: *Tip:* @mention me in a channel or DM me directly for AI-powered chat"
         ]),
         actions_block([
-            button_element("🚀 New Task", "menu:task", value="menu:task", style="primary"),
+            *_nav_buttons(),
             button_element("📊 Status", "menu:status", value="menu:status"),
-            button_element("📋 Main Menu", "menu:main", value="menu:main"),
         ]),
     ]
 
@@ -316,15 +429,7 @@ def project_card(project: Any) -> list[dict]:
     status = getattr(project, "status", "active")
     icon = PROJECT_STATUS_ICONS.get(status, ":white_circle:")
     label = PROJECT_STATUS_LABELS.get(status, status)
-    stack = getattr(project, "tech_stack", None) or ""
-    # Shorten tech stack for mobile — just first 3 items
-    if stack:
-        items = [s.strip() for s in stack.split(",")]
-        stack_short = ", ".join(items[:3])
-        if len(items) > 3:
-            stack_short += f" +{len(items) - 3}"
-    else:
-        stack_short = ""
+    stack_short = _shorten_tech_stack(getattr(project, "tech_stack", None) or "")
 
     text = f"{icon} *{project.name}* — {label}"
     if stack_short:
@@ -374,16 +479,7 @@ def project_detail_blocks(project: Any, tunnel_url: str | None = None) -> list[d
     label = PROJECT_STATUS_LABELS.get(status, status)
     pid = project.id
     docker = getattr(project, "is_dockerized", False)
-    stack = getattr(project, "tech_stack", None) or ""
-
-    # Shorten tech stack
-    if stack:
-        items = [s.strip() for s in stack.split(",")]
-        stack_short = ", ".join(items[:3])
-        if len(items) > 3:
-            stack_short += f" +{len(items) - 3}"
-    else:
-        stack_short = ""
+    stack_short = _shorten_tech_stack(getattr(project, "tech_stack", None) or "")
 
     # Header
     text = f"{icon} *{project.name}* — {label}"
@@ -403,9 +499,9 @@ def project_detail_blocks(project: Any, tunnel_url: str | None = None) -> list[d
     # Primary buttons — row 1: Open App + Chat with Agent
     if status == "active":
         row1 = []
-        if tunnel_url:
-            row1.append(button_element("Open App", f"open_app:{pid}", value=f"open_app:{pid}", url=tunnel_url))
-        row1.append(button_element("Chat with Agent", f"agent_diagnose:{pid}", value=f"agent_diagnose:{pid}", style="primary"))
+        # Always show Open App button as action (triggers health check + auto-fix)
+        row1.append(button_element("Open App", f"open_app:{pid}", value=f"open_app:{pid}", style="primary"))
+        row1.append(button_element("Chat with Agent", f"agent_diagnose:{pid}", value=f"agent_diagnose:{pid}"))
         blks.append(actions_block(row1))
 
         # Row 2: Task + Health
@@ -456,10 +552,7 @@ def status_blocks(tasks: list) -> list[dict]:
                 "You don't have any tasks running right now.\n\n"
                 "*Get started:* Submit a task or check your projects."
             ),
-            actions_block([
-                button_element("🚀 New Task", "menu:task", value="menu:task", style="primary"),
-                button_element("📋 Main Menu", "menu:main", value="menu:main"),
-            ]),
+            actions_block(_nav_buttons()),
         ]
 
     blks = [header_block(f"📊 Active Tasks ({len(tasks)})")]
@@ -498,10 +591,7 @@ def status_blocks(tasks: list) -> list[dict]:
         blks.append(divider())
 
     # Navigation buttons at bottom
-    blks.append(actions_block([
-        button_element("🚀 New Task", "menu:task", value="menu:task", style="primary"),
-        button_element("📋 Main Menu", "menu:main", value="menu:main"),
-    ]))
+    blks.append(actions_block(_nav_buttons()))
 
     return blks
 
@@ -534,27 +624,6 @@ def progress_blocks(
 
 def plan_preview_blocks(plan: str, task_id: str, tunnel_url: str | None = None) -> list[dict]:
     """Implementation plan — professional with context and clear actions."""
-    elements = [
-        button_element(
-            ":white_check_mark: Approve & Start",
-            f"approve_plan:{task_id}",
-            value=f"approve_plan:{task_id}",
-            style="primary",
-        ),
-        button_element(
-            ":x: Request Changes",
-            f"discard:{task_id}",
-            value=f"discard:{task_id}",
-            style="danger",
-        ),
-    ]
-    if tunnel_url:
-        elements.append(button_element(
-            ":globe_with_meridians: Open Live App",
-            f"open_app:{task_id}",
-            value=f"open_app:{task_id}", url=tunnel_url,
-        ))
-    
     return [
         section_block(
             f":scroll: *Implementation Plan Ready for Review*\n\n"
@@ -564,99 +633,53 @@ def plan_preview_blocks(plan: str, task_id: str, tunnel_url: str | None = None) 
         context_block([
             "Please review the plan above and approve to begin, or request changes if you'd like adjustments."
         ]),
-        actions_block(elements),
+        actions_block(_review_buttons(
+            task_id,
+            approve_action="approve_plan",
+            approve_label=":white_check_mark: Approve & Start",
+        )),
     ]
 
 
 def diff_preview_blocks(diff: str, task_id: str, tunnel_url: str | None = None) -> list[dict]:
     """Code diff — professional with context."""
-    elements = [
-        button_element(
-            ":white_check_mark: Create Pull Request",
-            f"approve:{task_id}",
-            value=f"approve:{task_id}",
-            style="primary",
-        ),
-        button_element(
-            ":wastebasket: Discard Changes",
-            f"discard:{task_id}",
-            value=f"discard:{task_id}",
-            style="danger",
-        ),
-    ]
-    if tunnel_url:
-        elements.append(button_element(
-            ":globe_with_meridians: Review Live",
-            f"open_app:{task_id}",
-            value=f"open_app:{task_id}", url=tunnel_url,
-        ))
-    
-    # Count stats from diff
-    files_changed = diff.count(" | ") if diff else 0
-    additions = diff.count("\n+") if diff else 0
-    deletions = diff.count("\n-") if diff else 0
-    
+    files_changed, additions, deletions = _diff_stats(diff)
     stats_text = f"*{files_changed} files changed, {additions} insertions(+), {deletions} deletions(-)*"
-    
+
     return [
         section_block(f":page_facing_up: *Changes Ready for Review*\n{stats_text}"),
         section_block(f"```\n{diff[:2200]}\n```"),
         context_block([
             "Review the changes above. When you're ready, create a PR to merge or discard if changes aren't right."
         ]),
-        actions_block(elements),
+        actions_block(_review_buttons(task_id)),
     ]
 
 
 def summary_blocks(summary: str, diff: str, task_id: str, tunnel_url: str | None = None) -> list[dict]:
     """Task completion — professional summary with clear actions."""
-    # Extract stats from diff
-    files_changed = diff.count(" | ") if diff else 0
-    additions = diff.count("\n+") if diff else 0
-    deletions = diff.count("\n-") if diff else 0
-    
+    files_changed, additions, deletions = _diff_stats(diff)
+
     main_text = (
         f":white_check_mark: *Implementation Complete*\n\n"
         f"{summary[:1500]}"
     )
-    
     stats_text = f"📊 *{files_changed}* files modified • *+{additions}* / *-{deletions}* lines"
-    
-    elements = [
-        button_element(
-            ":white_check_mark: Create Pull Request",
-            f"approve:{task_id}",
-            value=f"approve:{task_id}",
-            style="primary",
-        ),
-        button_element(
-            ":wastebasket: Discard Changes",
-            f"discard:{task_id}",
-            value=f"discard:{task_id}",
-            style="danger",
-        ),
-    ]
-    if tunnel_url:
-        elements.append(button_element(
-            ":globe_with_meridians: Review Live",
-            f"open_app:{task_id}",
-            value=f"open_app:{task_id}", url=tunnel_url,
-        ))
-    
-    blocks = [
+
+    blks = [
         section_block(main_text),
         context_block([stats_text]),
     ]
-    
+
     if diff:
-        blocks.append(section_block(f"*Changes overview:*\n```\n{diff[:800]}\n```"))
-    
-    blocks.append(context_block([
+        blks.append(section_block(f"*Changes overview:*\n```\n{diff[:800]}\n```"))
+
+    blks.append(context_block([
         "Your changes are staged and ready. Create a PR to merge them, or review in the live app first."
     ]))
-    blocks.append(actions_block(elements))
-    
-    return blocks
+    blks.append(actions_block(_review_buttons(task_id)))
+
+    return blks
 
 
 def pr_created_blocks(pr_url: str, task_id: str) -> list[dict]:
@@ -695,72 +718,17 @@ def pr_created_blocks(pr_url: str, task_id: str) -> list[dict]:
 
 
 def error_blocks(text: str, project_id: int | str | None = None) -> list[dict]:
-    """Error message — professional with context and next steps."""
-    # Use improved error messages for known errors
-    error_lower = text.lower()
-    if "worker" in error_lower and ("unavailable" in error_lower or "failed" in error_lower):
-        message = (
-            ":x: *Service Temporarily Unavailable*\n\n"
-            "We're experiencing a temporary issue connecting to the worker service. "
-            "This usually resolves automatically within a minute.\n\n"
-            "*What you can do:*\n"
-            "• Wait a moment and try again\n"
-            "• Check system status with `/oc-status`\n"
-            "• Contact support if the issue persists"
-        )
-    elif "no changes" in error_lower or "agent made no" in error_lower:
-        message = (
-            ":warning: *No Changes Detected*\n\n"
-            "The agent completed the task but didn't modify any files. This can happen when:\n"
-            "• The feature already exists in the codebase\n"
-            "• The task description needs more specific details\n"
-            "• The agent encountered a technical limitation\n\n"
-            "*What you can do:*\n"
-            "• Rephrase your request with more specific requirements\n"
-            "• Check if the feature is already implemented\n"
-            "• Use :speech_balloon: Chat with Agent to discuss"
-        )
-    elif "timeout" in error_lower or "timed out" in error_lower:
-        message = (
-            ":stopwatch: *Task Timed Out*\n\n"
-            "Your task took longer than expected and was automatically cancelled.\n\n"
-            "*This can happen when:*\n"
-            "• The task is very complex\n"
-            "• The codebase is large\n"
-            "• Network issues occurred\n\n"
-            "*What you can do:*\n"
-            "• Try breaking the task into smaller pieces\n"
-            "• Submit again (may complete faster on retry)\n"
-            "• Use :speech_balloon: Chat with Agent to discuss"
-        )
-    elif "not found" in error_lower:
-        message = (
-            ":mag: *Not Found*\n\n"
-            f"{text}\n\n"
-            "*What you can do:*\n"
-            "• Check the spelling and try again\n"
-            "• `/oc-projects` — View all your projects\n"
-            "• `/oc-addproject` — Connect a new repository"
-        )
-    else:
-        # Generic error with context
-        message = (
-            ":x: *Something Went Wrong*\n\n"
-            f"{text[:300]}\n\n"
-            "This has been logged for investigation. Please try again or contact support if the issue persists."
-        )
-    
+    """Compact error message — no walls of text, always has buttons."""
+    message = f"❌ {text[:200]}"
+
     elements = [
-        button_element("📋 Main Menu", "menu:main", value="menu:main"),
+        button_element("🔄 Retry", "menu:main", value="menu:main", style="primary"),
+        button_element("📊 Status", "menu:status", value="menu:status"),
+        button_element("◀️ Menu", "menu:main", value="menu:main"),
     ]
     if project_id is not None:
-        elements.insert(0, button_element(
-            ":speech_balloon: Chat with Agent",
-            f"agent_diagnose:{project_id}",
-            value=f"agent_diagnose:{project_id}",
-            style="primary",
-        ))
-    
+        elements.insert(0, open_app_button(int(project_id)))
+
     return [
         section_block(message),
         actions_block(elements),
@@ -786,75 +754,45 @@ def terminal_blocks(text: str) -> list[dict]:
     
     return [
         section_block(enhanced_text),
-        actions_block([
-            button_element("🚀 New Task", "menu:task", value="menu:task", style="primary"),
-            button_element("📋 Main Menu", "menu:main", value="menu:main"),
-        ]),
+        actions_block(_nav_buttons()),
     ]
 
 
 def agent_thinking_blocks(user_text: str | None = None, frame: int = 0) -> list[dict]:
-    """Professional thinking indicator with animated progress.
+    """Compact thinking indicator — same layout as working blocks for smooth transition."""
+    preview = f"\n> _{user_text[:80]}_" if user_text else ""
 
-    Args:
-        frame: Animation frame (0-2) for spinning animation
-    """
-    preview = f"\n> _{user_text[:100]}..._" if user_text else ""
-
-    # Animated spinner frames
-    spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-    spinner = spinners[frame % len(spinners)]
-
-    # Animated dots for loading indicators
-    dots_frames = ["  ·", " · ·", "· · ·", " · · ", "  · ", ""]
-    dots = dots_frames[frame % len(dots_frames)]
+    bar = "🟩" + "⬜" * 9
 
     return [
         section_block(
-            f"{spinner} *Starting...*{preview}\n\n"
-            f":hourglass_flowing_sand: Initializing Claude AI {dots}\n"
-            f":file_folder: Preparing workspace\n"
-            f":gear: Loading tools...\n\n"
-            f"_Step 1/3: Initialization_{dots}"
+            f"🤖 *AI Agent*{preview}\n\n"
+            f"{bar}\n\n"
+            f"⏳ Starting up..."
         ),
-        actions_block([button_element("Cancel", "cancel_session", style="danger")]),
+        actions_block([button_element("Cancel", "cancel_session", value="cancel_session", style="danger")]),
     ]
 
 
 def agent_working_blocks(tool_lines: list[str], elapsed: int = 0) -> list[dict]:
-    """Live agent activity with animated progress indicators."""
-    # Animated spinner for main activity
-    spinners = ["⠋ ", "⠙ ", "⠹ ", "⠸ ", "⠼ ", "⠴ ", "⠦ ", "⠧ ", "⠇ ", "⠏ "]
-    spinner = spinners[(elapsed // 1) % len(spinners)]  # Change every second
+    """Live agent activity — same layout as thinking blocks for smooth transition."""
+    # Progress bar fills over 30s
+    bar_len = 10
+    filled = min(bar_len, max(1, elapsed // 3))
+    bar = "🟩" * filled + "⬜" * (bar_len - filled)
 
-    # Show last 4 activities with checkmarks
-    activity = "\n".join(f":white_check_mark: {line}" for line in tool_lines[-4:]) or ":thinking_face: _Analyzing..._"
+    # Last 3 completed + current activity
+    recent = tool_lines[-3:]
+    done = "\n".join(f"✅ {l}" for l in recent[:-1]) if len(recent) > 1 else ""
+    current = f"🔄 {recent[-1]}" if recent else "🔄 Working..."
 
-    # Animated progress bar (smoothly fills as time passes)
-    bar_length = 10
-    filled = min(bar_length, max(1, elapsed // 3))  # Fills over 30 seconds
-    empty = bar_length - filled
-    progress_bar = "".join([":green_square:"] * filled) + "".join([":white_square:"] * empty)
-
-    # Determine current stage
-    if elapsed < 3:
-        stage = ":one: Planning"
-    elif elapsed < 8:
-        stage = ":two: Executing"
-    elif elapsed < 15:
-        stage = ":three: Reviewing"
-    else:
-        stage = ":four: Finalizing"
-
-    elapsed_msg = f"{elapsed}s elapsed"
     return [
         section_block(
-            f"{spinner}*AI Agent Working*\n\n"
-            f"*Current Activity:*\n{activity}\n\n"
-            f"*Progress:*\n{progress_bar}\n"
-            f"{stage} • _{elapsed_msg}_"
+            f"🤖 *AI Agent* `{elapsed}s`\n\n"
+            f"{bar}\n\n"
+            f"{done}\n{current}".strip()
         ),
-        context_block([":rocket: _Request is being processed. This usually takes 10-20 seconds._"]),
+        context_block([f"_Processing your request..._"]),
     ]
 
 
@@ -862,27 +800,39 @@ def agent_response_blocks(
     response: str,
     project_id: int | None = None,
     tunnel_url: str | None = None,
+    project_name: str | None = None,
 ) -> list[dict]:
-    """Professional agent response with context-aware actions."""
-    blks: list[dict] = [section_block(response[:3000])]
+    """Agent response with action buttons."""
+    blks: list[dict] = []
 
-    # Only add hint for longer responses
+    # Agent response text (clean, no header)
+    blks.append(section_block(response[:3000]))
+
+    # Context hint only for longer responses
     if len(response) > 400:
         blks.append(context_block([":speech_balloon: _Reply to continue the conversation_"]))
 
+    # Action buttons — match welcome_blocks exactly
     elements = []
-    if project_id and tunnel_url:
-        elements.append(button_element(
-            "Open App", f"open_app:{project_id}",
-            value=f"open_app:{project_id}", url=tunnel_url,
-            style="primary",
-        ))
+
+    # Open App button
+    if project_id:
+        elements.append(open_app_button(project_id))
+
+    # New Task button
     if project_id:
         elements.append(button_element(
-            "New Task", f"task_for:{project_id}",
+            "✏️ New Task", f"task_for:{project_id}",
             value=f"task_for:{project_id}",
         ))
-    elements.append(button_element("Menu", "menu:main", value="menu:main"))
+    else:
+        elements.append(button_element(
+            "✏️ New Task", "menu:task",
+            value="menu:task", style="primary",
+        ))
+
+    elements.append(button_element("📊 Status", "menu:status", value="menu:status"))
+    elements.append(button_element("❓ Help", "menu:help", value="menu:help"))
     blks.append(actions_block(elements))
     return blks
 
@@ -901,37 +851,19 @@ def project_busy_blocks(running_task_id: str | None = None) -> list[dict]:
             f"• Cancel the running task (if needed)"
         ),
         actions_block([
-            button_element("⏸️ View Task", f"view_task:{running_task_id}", style="primary"),
-            button_element("🔄 Retry", "retry_task"),
-            button_element("❌ Cancel", f"cancel_task:{running_task_id}", style="danger"),
-            button_element("◀️ Menu", "menu:main"),
+            button_element("👁️ View Task", f"task_view:{running_task_id}", value=f"task_view:{running_task_id}", style="primary"),
+            button_element("🔄 Retry", "retry_task", value="retry_task"),
+            button_element("❌ Cancel", f"task_cancel:{running_task_id}", value=f"task_cancel:{running_task_id}", style="danger"),
+            button_element("◀️ Menu", "menu:main", value="menu:main"),
         ]),
     ]
 
 
 def loading_blocks(text: str = "Processing your request...") -> list[dict]:
-    """Loading indicator with honest, real messaging (no fake placeholders)."""
-    # Enhance common loading messages with REAL, not dummy text
-    if "task" in text.lower() and ("submit" in text.lower() or "received" in text.lower()):
-        enhanced_text = (
-            ":rocket: *Task Queued*\n\n"
-            "Your request has been submitted. The AI agent is starting up...\n"
-            "This usually takes 10-20 seconds depending on what you asked.\n\n"
-            ":bulb: Real-time progress will show below once processing starts."
-        )
-    elif "onboard" in text.lower() or "bootstrap" in text.lower():
-        enhanced_text = (
-            f":arrows_counterclockwise: *{text}*\n\n"
-            "⏳ This is a longer operation that may take several minutes.\n"
-            "You'll see progress updates as things happen."
-        )
-    elif "health" in text.lower() or "check" in text.lower():
-        enhanced_text = f":mag: *{text}*"
-    else:
-        enhanced_text = f":hourglass_flowing_sand: {text}"
-
+    """Compact loading indicator — same visual language as agent blocks."""
+    bar = "🟩" + "⬜" * 9
     return [
-        section_block(enhanced_text),
+        section_block(f"⏳ *{text}*\n\n{bar}"),
     ]
 
 
@@ -954,27 +886,11 @@ def dashboard_blocks(url: str) -> list[dict]:
 
 
 def dashboard_retry_blocks() -> list[dict]:
-    """Dashboard unavailable — retry or force start."""
-    return [
-        section_block(
-            ":chart_with_upwards_trend: *Dashboard*\n_Tunnel starting up — try again in a moment_"
-        ),
-        actions_block([
-            button_element("Retry", "menu:dashboard", value="menu:dashboard"),
-            button_element("Force Start", "menu:dashboard_refresh", value="menu:dashboard_refresh"),
-            button_element("Menu", "menu:main", value="menu:main"),
-        ]),
-    ]
+    return _tunnel_state_blocks("Dashboard", ":chart_with_upwards_trend:", "retry", "dashboard")
 
 
 def dashboard_stopped_blocks() -> list[dict]:
-    return [
-        section_block(":octagonal_sign: Dashboard tunnel stopped"),
-        actions_block([
-            button_element("Restart", "menu:dashboard_refresh", value="menu:dashboard_refresh"),
-            button_element("Menu", "menu:main", value="menu:main"),
-        ]),
-    ]
+    return _tunnel_state_blocks("Dashboard", ":chart_with_upwards_trend:", "stopped", "dashboard")
 
 
 def settings_blocks(settings_url: str, wizard_url: str) -> list[dict]:
@@ -995,26 +911,11 @@ def settings_blocks(settings_url: str, wizard_url: str) -> list[dict]:
 
 
 def settings_retry_blocks() -> list[dict]:
-    return [
-        section_block(
-            ":gear: *Settings*\n_Tunnel starting up — try again in a moment_"
-        ),
-        actions_block([
-            button_element("Retry", "menu:settings", value="menu:settings"),
-            button_element("Force Start", "menu:settings_refresh", value="menu:settings_refresh"),
-            button_element("Menu", "menu:main", value="menu:main"),
-        ]),
-    ]
+    return _tunnel_state_blocks("Settings", ":gear:", "retry", "settings")
 
 
 def settings_stopped_blocks() -> list[dict]:
-    return [
-        section_block(":octagonal_sign: Settings tunnel stopped"),
-        actions_block([
-            button_element("Restart", "menu:settings_refresh", value="menu:settings_refresh"),
-            button_element("Menu", "menu:main", value="menu:main"),
-        ]),
-    ]
+    return _tunnel_state_blocks("Settings", ":gear:", "stopped", "settings")
 
 
 # ── Add Project Flow ─────────────────────────────────────────────────
@@ -1105,16 +1006,11 @@ def home_tab_blocks(
 
 # ── Modal Builders ───────────────────────────────────────────────────
 
-def build_task_modal(projects: list, channel_id: str, preselected_project_id: int | None = None) -> dict:
+def build_task_modal(projects: list, channel_id: str) -> dict:
     """Task creation modal with project selection + description.
 
     Raises ValueError if projects is empty (Slack requires at least 1 option).
     Callers must check for empty projects before calling this.
-
-    Args:
-        projects: List of projects to choose from
-        channel_id: The channel ID to store in private_metadata
-        preselected_project_id: Optional project ID to pre-select in the dropdown
     """
     if not projects:
         raise ValueError("Cannot build task modal with empty projects list")
@@ -1127,19 +1023,12 @@ def build_task_modal(projects: list, channel_id: str, preselected_project_id: in
         for p in projects
     ]
 
-    # Build project select element
     project_element = {
         "type": "static_select",
         "placeholder": {"type": "plain_text", "text": "Select a project"},
         "options": options,
         "action_id": "project_select",
     }
-    # Add initial_option if preselected
-    if preselected_project_id is not None:
-        for opt in options:
-            if opt["value"] == str(preselected_project_id):
-                project_element["initial_option"] = opt
-                break
 
     return {
         "type": "modal",
@@ -1173,39 +1062,9 @@ def build_task_modal(projects: list, channel_id: str, preselected_project_id: in
                     "text": "Minimum 10 characters. Be specific about what you want built.",
                 },
             },
-            {
-                "type": "input",
-                "block_id": "mode_block",
-                "element": {
-                    "type": "radio_buttons",
-                    "action_id": "task_mode",
-                    "options": [
-                        {
-                            "text": {"type": "plain_text", "text": "⚡ Quick — skip planning, start coding immediately", "emoji": True},
-                            "value": "quick",
-                        },
-                        {
-                            "text": {"type": "plain_text", "text": "📋 Full — create a plan first, then code", "emoji": True},
-                            "value": "full",
-                        },
-                    ],
-                    "initial_option": {
-                        "text": {"type": "plain_text", "text": "⚡ Quick — skip planning, start coding immediately", "emoji": True},
-                        "value": "quick",
-                    },
-                },
-                "label": {"type": "plain_text", "text": "Mode"},
-            },
+            _task_mode_block(),
         ],
     }
-
-
-def build_task_modal_with_project(projects: list, channel_id: str, project_id: int) -> dict:
-    """Task creation modal with pre-selected project.
-
-    Convenience wrapper around build_task_modal.
-    """
-    return build_task_modal(projects, channel_id, preselected_project_id=project_id)
 
 
 def build_task_modal_channel_scoped(channel_id: str, project_id: int, project_name: str) -> dict:
@@ -1238,29 +1097,7 @@ def build_task_modal_channel_scoped(channel_id: str, project_id: int, project_na
                     "text": "Minimum 10 characters. Be specific about what you want.",
                 },
             },
-            {
-                "type": "input",
-                "block_id": "mode_block",
-                "element": {
-                    "type": "radio_buttons",
-                    "action_id": "task_mode",
-                    "options": [
-                        {
-                            "text": {"type": "plain_text", "text": "⚡ Quick — skip planning, start coding immediately", "emoji": True},
-                            "value": "quick",
-                        },
-                        {
-                            "text": {"type": "plain_text", "text": "📋 Full — create a plan first, then code", "emoji": True},
-                            "value": "full",
-                        },
-                    ],
-                    "initial_option": {
-                        "text": {"type": "plain_text", "text": "⚡ Quick — skip planning, start coding immediately", "emoji": True},
-                        "value": "quick",
-                    },
-                },
-                "label": {"type": "plain_text", "text": "Mode"},
-            },
+            _task_mode_block(),
         ],
     }
 

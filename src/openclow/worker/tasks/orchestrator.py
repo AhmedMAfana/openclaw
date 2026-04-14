@@ -261,7 +261,7 @@ RULES:
 - Be fast — this runs before every task, don't waste turns on unnecessary checks
 - If everything is healthy on first check, just say HEALTHY and stop (1-2 turns max)
 - Only dig deeper if something is actually broken
-- Max 3 fix attempts per issue, then give up
+- Never give up — when a fix fails, try a completely different approach
 - End with: HEALTHY: <tunnel_url or "no tunnel"> or UNHEALTHY: <what's still broken>
 """
 
@@ -316,8 +316,8 @@ async def _ensure_project_healthy(task, reporter, task_id_str: str) -> tuple[boo
                     if isinstance(block, TextBlock):
                         full_output += block.text
                     elif isinstance(block, ToolUseBlock):
-                        tool = block.name.replace("mcp__docker__", "")
-                        await reporter.log(f"🔍 {tool}")
+                        from openclow.worker.tasks._agent_base import describe_tool
+                        await reporter.log(describe_tool(block))
 
         # Parse result
         healthy = "HEALTHY:" in full_output
@@ -563,9 +563,16 @@ async def execute_plan(ctx: dict, task_id: str):
         return
     ws = WorkspaceService()
 
-    # Re-acquire project lock for coding phase
+    # Re-acquire project lock for coding phase — wait with backoff
     from openclow.services.project_lock import acquire_project_lock, get_lock_holder
-    lock = await acquire_project_lock(task.project_id, task_id=task_id_str, wait=10)
+    lock = None
+    for _wait_secs in [10, 30, 60]:
+        lock = await acquire_project_lock(task.project_id, task_id=task_id_str, wait=_wait_secs)
+        if lock:
+            break
+        holder = await get_lock_holder(task.project_id)
+        await chat.edit_message(task.chat_id, task.chat_message_id,
+                                f"⏳ Waiting for another task to finish ({holder})...")
     if lock is None:
         holder = await get_lock_holder(task.project_id)
         await _update_task(task_id_str, status="failed",
@@ -654,36 +661,13 @@ async def execute_plan(ctx: dict, task_id: str):
                 last_tool_turn = turn_count
                 if tool_name in ("Edit", "Write"):
                     write_tool_seen = True
-                # Rich tool logging — show what the tool is doing, not just the name
+                # Rich tool logging — show what the tool is doing
+                from openclow.worker.tasks._agent_base import describe_tool
                 tool_desc = tool_name
                 if hasattr(message, 'content'):
                     for block in message.content:
-                        if hasattr(block, 'name') and hasattr(block, 'input') and isinstance(block.input, dict):
-                            inp = block.input
-                            if block.name == "Read":
-                                path = inp.get("file_path", "")
-                                tool_desc = f"Reading {path.split('/')[-1]}" if path else "Reading file"
-                            elif block.name == "Edit":
-                                path = inp.get("file_path", "")
-                                tool_desc = f"Editing {path.split('/')[-1]}" if path else "Editing file"
-                            elif block.name == "Write":
-                                path = inp.get("file_path", "")
-                                tool_desc = f"Writing {path.split('/')[-1]}" if path else "Writing file"
-                            elif block.name == "Bash":
-                                cmd = inp.get("command", "")[:50]
-                                tool_desc = f"Running: {cmd}" if cmd else "Running command"
-                            elif block.name == "Grep":
-                                pattern = inp.get("pattern", "")[:30]
-                                tool_desc = f"Searching: {pattern}" if pattern else "Searching"
-                            elif block.name == "Glob":
-                                pattern = inp.get("pattern", "")[:30]
-                                tool_desc = f"Finding: {pattern}" if pattern else "Finding files"
-                            elif "mcp__docker" in block.name:
-                                short = block.name.replace("mcp__docker__", "")
-                                tool_desc = f"Docker: {short}"
-                            elif "mcp__playwright" in block.name:
-                                short = block.name.replace("mcp__playwright__", "")
-                                tool_desc = f"Browser: {short}"
+                        if hasattr(block, 'name') and hasattr(block, 'input'):
+                            tool_desc = describe_tool(block)
                             break
                 await reporter.log(tool_desc)
 
@@ -776,23 +760,60 @@ async def execute_plan(ctx: dict, task_id: str):
         await git_ops.add_all(workspace_path)
         diff_summary = await git_ops.diff_stat(workspace_path)
 
-        if not diff_summary.strip():
-            # Log diagnostics to help understand why no changes were made
-            log.warning("orchestrator.no_changes", task_id=task_id_str, 
+        if not diff_summary.strip() and not getattr(task, '_empty_diff_retried', False):
+            # First attempt produced no changes — retry with stronger prompt
+            task._empty_diff_retried = True
+            log.warning("orchestrator.no_changes_retrying", task_id=task_id_str,
                        turns=turn_count, output_length=len(full_output))
-            
-            # Get git status for debugging
-            try:
-                git_status = await git_ops.status(workspace_path)
-                log.info("orchestrator.git_status", task_id=task_id_str, status=git_status)
-            except Exception:
-                git_status = "unknown"
-            
+            await reporter.stage("No changes detected — retrying with stronger prompt")
+
+            # Reset git state for clean retry
+            await git_ops.reset_hard(workspace_path)
+
+            retry_turn_count = 0
+            async for message in llm.run_coder(
+                workspace_path=workspace_path,
+                task_description=(
+                    f"IMPORTANT: Your previous attempt made NO file changes in {turn_count} turns.\n"
+                    f"You MUST make actual edits to solve this task. Read the codebase carefully, then EDIT files.\n"
+                    f"Do NOT just read and explore — make real modifications.\n\n"
+                    f"Original task: {task.description}"
+                ),
+                project_name=task.project.name,
+                tech_stack=task.project.tech_stack or "",
+                description=task.project.description or "",
+                agent_system_prompt=task.project.agent_system_prompt or "",
+                max_turns=0,
+                plan=plan_text,
+                app_container_name=task.project.app_container_name,
+                app_port=task.project.app_port,
+            ):
+                tool_name = llm.is_tool_use(message)
+                if tool_name:
+                    from openclow.worker.tasks._agent_base import describe_tool
+                    tool_desc = tool_name
+                    if hasattr(message, 'content'):
+                        for block in message.content:
+                            if hasattr(block, 'name') and hasattr(block, 'input'):
+                                tool_desc = describe_tool(block)
+                                break
+                    await reporter.log(tool_desc)
+                retry_turn_count += 1
+
+            # Re-check diff after retry
+            await git_ops.add_all(workspace_path)
+            diff_summary = await git_ops.diff_stat(workspace_path)
+            turn_count += retry_turn_count
+
+        if not diff_summary.strip():
+            # Retried and still no changes — now fail with detailed message
+            log.warning("orchestrator.no_changes_after_retry", task_id=task_id_str,
+                       turns=turn_count, output_length=len(full_output))
+
             await _update_task(task_id_str, status="failed",
-                               error_message="Agent made no changes",
+                               error_message="Agent made no changes after retry",
                                agent_turns=turn_count)
-            
-            # More helpful error message
+
             from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
             kb = ActionKeyboard(rows=[
                 ActionRow([ActionButton("🤖 Talk to Agent", f"agent_diagnose:{task.project_id}")]),
@@ -801,11 +822,9 @@ async def execute_plan(ctx: dict, task_id: str):
             ])
             await reporter.error(
                 "⚠️ No Changes Detected\n\n"
-                "The agent completed but didn't modify any files. This can happen when:\n"
-                "• The feature already exists\n"
-                "• The task needs more specific details\n"
-                "• The agent encountered an issue\n\n"
-                "Try using 'Talk to Agent' to discuss what went wrong.",
+                "The agent completed two attempts but didn't modify any files.\n"
+                "• Try rephrasing the task with more specific details\n"
+                "• Use 'Talk to Agent' to discuss what went wrong",
                 keyboard=kb
             )
             return
@@ -874,9 +893,10 @@ async def execute_plan(ctx: dict, task_id: str):
             pass
     except Exception as e:
         error_str = str(e).lower()
-        
+
         # Check if this is an auth error
-        if any(kw in error_str for kw in ["auth", "unauthorized", "logged in", "credential", "token expired", "not authenticated"]):
+        from openclow.worker.tasks._agent_base import is_auth_error
+        if is_auth_error(e):
             from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
             kb = ActionKeyboard(rows=[
                 ActionRow([ActionButton("🔑 Authenticate Claude", "claude_auth")]),
@@ -1015,8 +1035,8 @@ async def approve_task(ctx: dict, task_id: str):
         from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
         rows = []
         rows.append(ActionRow([ActionButton("🔗 View PR", f"open_pr:{task_id_str}", url=pr_url)]))
-        if tunnel_url:
-            rows.append(ActionRow([ActionButton("🌐 Open App", f"open_app:{task.project_id}", url=tunnel_url)]))
+        from openclow.providers.actions import open_app_btn
+        rows.append(ActionRow([open_app_btn(task.project_id)]))
         rows.append(ActionRow([
             ActionButton("✅ Merge", f"merge:{task_id_str}"),
             ActionButton("❌ Reject", f"reject:{task_id_str}"),
@@ -1104,8 +1124,8 @@ async def merge_task(ctx: dict, task_id: str):
 
         from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
         rows = []
-        if tunnel_url:
-            rows.append(ActionRow([ActionButton("🌐 Open App", f"open_app:{task.project_id}", url=tunnel_url)]))
+        from openclow.providers.actions import open_app_btn
+        rows.append(ActionRow([open_app_btn(task.project_id)]))
         rows.append(ActionRow([
             ActionButton("🚀 New Task", "menu:task"),
             ActionButton("📦 Project", f"project_detail:{task.project_id}"),

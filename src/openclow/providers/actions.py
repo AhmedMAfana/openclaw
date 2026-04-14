@@ -68,6 +68,11 @@ def back_keyboard() -> ActionKeyboard:
     ])
 
 
+def open_app_btn(project_id: int) -> ActionButton:
+    """Open App button — triggers health check + auto-fix. ONE definition, used everywhere."""
+    return ActionButton("🌐 Open App", f"open_app:{project_id}", style="primary")
+
+
 def nav_keyboard(*extra: ActionButton) -> ActionKeyboard:
     """Compact navigation: optional extra buttons + Menu. All on one row."""
     buttons = list(extra) + [ActionButton("Menu", "menu:main")]

@@ -9,14 +9,68 @@ from openclow.utils.logging import get_logger
 log = get_logger()
 
 
+async def _create_and_dispatch_task(client, db_user, project_id: int, description: str, channel_id: str, skip_planning: bool):
+    """Create a task in DB, post status message, and dispatch to worker.
+
+    Shared by both task_submit and task_submit_scoped.
+    """
+    task = None
+    mode = "quick" if skip_planning else "full"
+    try:
+        log.info("slack.creating_task", user_id=db_user.id, project_id=project_id, channel=channel_id, mode=mode)
+
+        task = await bot_actions.create_task(
+            user_id=db_user.id,
+            project_id=project_id,
+            description=description,
+            chat_id=channel_id,
+            chat_provider_type="slack",
+        )
+
+        mode_label = ":zap: Quick" if skip_planning else ":clipboard: Full"
+        result = await client.chat_postMessage(
+            channel=channel_id,
+            text="Task submitted! Preparing...",
+            blocks=blocks.loading_blocks(f":rocket: Task submitted ({mode_label}) — preparing..."),
+        )
+
+        job = await bot_actions.enqueue_job("execute_task", str(task.id), skip_planning)
+        await bot_actions.update_task_message(task.id, result["ts"], job.job_id)
+
+        log.info("slack.task_dispatched", task_id=str(task.id), job_id=job.job_id)
+
+    except Exception as e:
+        log.error("slack.task_submit_failed", error=str(e), exc_info=True)
+        if task:
+            try:
+                from openclow.models import async_session, Task
+                from sqlalchemy import update
+                async with async_session() as session:
+                    await session.execute(
+                        update(Task)
+                        .where(Task.id == task.id)
+                        .values(status="failed", error_message=f"Dispatch failed: {str(e)[:200]}")
+                    )
+                    await session.commit()
+            except Exception as mark_err:
+                log.error("slack.failed_to_mark_task_failed", error=str(mark_err))
+        try:
+            await client.chat_postMessage(
+                channel=channel_id,
+                text=f"Failed to create task: {str(e)[:200]}",
+                blocks=blocks.error_blocks(f"Failed to dispatch task: {str(e)[:200]}"),
+            )
+        except Exception as e2:
+            log.error("slack.task_submit_error_notify_failed", error=str(e2))
+
+
 def register(app):
     """Register modal view submission handlers on the Slack Bolt app."""
 
-    # ── Task Submit ──────────────────────────────────────────
+    # ── Task Submit (with project dropdown) ──────────────────
 
     @app.view("task_submit")
     async def handle_task_submit(ack, body, client, view):
-        """User submitted the task creation modal."""
         user_id = body["user"]["id"]
         ok, db_user = await check_auth(user_id)
         if not ok:
@@ -25,9 +79,8 @@ def register(app):
             })
             return
 
-        # Extract values from the modal
         values = view["state"]["values"]
-        
+
         # Validate project selection
         project_select = values.get("project_block", {}).get("project_select", {})
         if not project_select or not project_select.get("selected_option"):
@@ -35,7 +88,7 @@ def register(app):
                 "project_block": "Please select a project.",
             })
             return
-        
+
         try:
             project_id = int(project_select["selected_option"]["value"])
         except (ValueError, KeyError) as e:
@@ -44,8 +97,7 @@ def register(app):
                 "project_block": "Invalid project selected.",
             })
             return
-        
-        # Validate description
+
         description = values.get("description_block", {}).get("task_description", {}).get("value", "").strip()
         if len(description) < 10:
             await ack(response_action="errors", errors={
@@ -53,12 +105,9 @@ def register(app):
             })
             return
 
-        # Quick vs Full mode
         mode_select = values.get("mode_block", {}).get("task_mode", {})
-        mode = (mode_select.get("selected_option") or {}).get("value", "quick")
-        skip_planning = mode == "quick"
+        skip_planning = (mode_select.get("selected_option") or {}).get("value", "quick") == "quick"
 
-        # Validate channel
         channel_id = view.get("private_metadata", "")
         if not channel_id:
             log.error("slack.task_submit_no_channel", user_id=user_id)
@@ -67,70 +116,13 @@ def register(app):
             })
             return
 
-        # Acknowledge immediately to prevent timeout
         await ack()
+        await _create_and_dispatch_task(client, db_user, project_id, description, channel_id, skip_planning)
 
-        try:
-            log.info("slack.creating_task", user_id=user_id, project_id=project_id, channel=channel_id, mode=mode)
-            
-            # Create task in DB
-            task = await bot_actions.create_task(
-                user_id=db_user.id,
-                project_id=project_id,
-                description=description,
-                chat_id=channel_id,
-                chat_provider_type="slack",
-            )
-
-            mode_label = "⚡ Quick" if skip_planning else "📋 Full"
-            # Send rich initial status message
-            result = await client.chat_postMessage(
-                channel=channel_id,
-                text="Task submitted! Preparing...",
-                blocks=blocks.loading_blocks(f"🚀 Task submitted ({mode_label}) — preparing..."),
-            )
-            message_ts = result["ts"]
-
-            # Dispatch to worker
-            job = await bot_actions.enqueue_job("execute_task", str(task.id), skip_planning)
-
-            # Save message ID and job ID
-            await bot_actions.update_task_message(task.id, message_ts, job.job_id)
-
-            log.info("slack.task_dispatched", task_id=str(task.id), job_id=job.job_id)
-
-        except Exception as e:
-            log.error("slack.task_submit_failed", error=str(e), exc_info=True)
-            # Mark task as failed if it was created
-            if 'task' in locals() and task:
-                try:
-                    from openclow.models import async_session, Task
-                    from sqlalchemy import update
-                    async with async_session() as session:
-                        await session.execute(
-                            update(Task)
-                            .where(Task.id == task.id)
-                            .values(status="failed", error_message=f"Dispatch failed: {str(e)[:200]}")
-                        )
-                        await session.commit()
-                except Exception as mark_err:
-                    log.error("slack.failed_to_mark_task_failed", error=str(mark_err))
-            
-            if channel_id:
-                try:
-                    await client.chat_postMessage(
-                        channel=channel_id,
-                        text=f"Failed to create task: {str(e)[:200]}",
-                        blocks=blocks.error_blocks(f"Failed to dispatch task to worker: {str(e)[:200]}"),
-                    )
-                except Exception as e2:
-                    log.error("slack.task_submit_error_notify_failed", error=str(e2))
-
-    # ── Channel-Scoped Task Submit (linked channel) ────────
+    # ── Channel-Scoped Task Submit (linked channel / known project) ──
 
     @app.view("task_submit_scoped")
     async def handle_task_submit_scoped(ack, body, client, view):
-        """Task submitted from a linked channel — project from metadata, mode from radio."""
         user_id = body["user"]["id"]
         ok, db_user = await check_auth(user_id)
         if not ok:
@@ -158,7 +150,6 @@ def register(app):
             return
 
         values = view["state"]["values"]
-
         description = values.get("description_block", {}).get("task_description", {}).get("value", "").strip()
         if len(description) < 10:
             await ack(response_action="errors", errors={
@@ -166,48 +157,11 @@ def register(app):
             })
             return
 
-        # Quick vs Full mode
         mode_select = values.get("mode_block", {}).get("task_mode", {})
-        mode = (mode_select.get("selected_option") or {}).get("value", "quick")
-        skip_planning = mode == "quick"
+        skip_planning = (mode_select.get("selected_option") or {}).get("value", "quick") == "quick"
 
         await ack()
-
-        try:
-            log.info("slack.creating_scoped_task", user_id=user_id, project_id=project_id, mode=mode)
-
-            task = await bot_actions.create_task(
-                user_id=db_user.id,
-                project_id=project_id,
-                description=description,
-                chat_id=channel_id,
-                chat_provider_type="slack",
-            )
-
-            mode_label = ":zap: Quick" if skip_planning else ":clipboard: Full"
-            result = await client.chat_postMessage(
-                channel=channel_id,
-                text="Task submitted! Preparing...",
-                blocks=blocks.loading_blocks(f":rocket: Task submitted ({mode_label}) — preparing..."),
-            )
-            message_ts = result["ts"]
-
-            job = await bot_actions.enqueue_job("execute_task", str(task.id), skip_planning)
-            await bot_actions.update_task_message(task.id, message_ts, job.job_id)
-
-            log.info("slack.scoped_task_dispatched", task_id=str(task.id), mode=mode)
-
-        except Exception as e:
-            log.error("slack.scoped_task_failed", error=str(e), exc_info=True)
-            if channel_id:
-                try:
-                    await client.chat_postMessage(
-                        channel=channel_id,
-                        text=f"Failed to create task: {str(e)[:200]}",
-                        blocks=blocks.error_blocks(f"Failed to dispatch task: {str(e)[:200]}"),
-                    )
-                except Exception as e2:
-                    log.error("slack.scoped_task_error_notify_failed", error=str(e2))
+        await _create_and_dispatch_task(client, db_user, project_id, description, channel_id, skip_planning)
 
     # ── Add Project Submit ───────────────────────────────────
 

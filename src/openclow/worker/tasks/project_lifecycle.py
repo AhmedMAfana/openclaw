@@ -51,119 +51,61 @@ async def docker_up_task(ctx: dict, project_id: int, chat_id: str, message_id: s
                           f"Workspace not found for {project.name}.\nRun bootstrap first.", keyboard=kb)
             return
 
-        status = StatusReporter(chat, chat_id, message_id, f"Starting {project.name}")
+        # Agentic: LLM agent with Docker MCP tools handles everything
+        from openclow.worker.tasks._agent_helper import run_repair_agent, RepairCard
 
-        # 1. Docker compose up
-        await status.add("🔄", "Starting Docker containers...")
-        rc, output = await run_docker(
-            "docker", "compose", "-f", compose, "-p", compose_project, "up", "-d",
-            actor="lifecycle", project_id=project_id, cwd=workspace, timeout=120,
+        card = RepairCard(project.name, chat, chat_id, message_id)
+        await card.set_phase("repairing", "Starting Docker...")
+
+        # Read compose + env for rich context (same as bootstrap)
+        import platform
+        compose_path = os.path.join(workspace, compose)
+        compose_contents = ""
+        if os.path.exists(compose_path):
+            with open(compose_path) as f:
+                compose_contents = f.read()[:4000]
+        env_path = os.path.join(workspace, ".env")
+        env_contents = ""
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                env_contents = f.read()[:2000]
+
+        prompt = (
+            f"Start Docker containers and get the app running. You have FULL CONTROL.\n\n"
+            f"PROJECT: {project.name}\n"
+            f"WORKSPACE: {workspace}\n"
+            f"COMPOSE FILE: {compose}\n"
+            f"COMPOSE PROJECT: {compose_project}\n"
+            f"HOST ARCHITECTURE: {platform.machine()}\n"
+            f"PORT: {port}\n\n"
+            f"DOCKER-COMPOSE CONTENTS:\n```yaml\n{compose_contents}\n```\n\n"
+            f".ENV CONTENTS:\n```\n{env_contents}\n```\n\n"
+            f"STEPS:\n"
+            f'1. compose_up("{compose}", "{compose_project}", "{workspace}")\n'
+            f"2. compose_ps(\"{compose_project}\") — verify all containers running\n"
+            f"3. If any container down: container_logs(\"<name>\", 50) → diagnose → fix → retry\n"
+            f"4. docker_exec(\"<app_container>\", \"curl -sf http://localhost:80/ -o /dev/null -w %{{http_code}}\")\n"
+            f'5. tunnel_get_url("{project.name}") — if empty, tunnel_start("{project.name}", "<target>")\n\n'
+            f"OUTPUT:\n"
+            f"- STATUS: <what you're doing>\n"
+            f"- DIAGNOSIS: <what's wrong>\n"
+            f"- ACTION: <what you're fixing>\n"
+            f"- FIXED: <tunnel_url> — when everything works\n\n"
+            f"SELF-HEALING: When ANY command fails, investigate (docker_exec pwd/ls/which), fix root cause, retry.\n"
+            f"NEVER give up. Try at least 2 different approaches per issue."
         )
 
-        if rc != 0:
-            # Parse error: extract meaningful message from raw Docker stderr
-            error_msg = output[:300]
-            # Strip timestamps and log-level noise
-            import re
-            clean_lines = []
-            for line in error_msg.split("\n"):
-                line = re.sub(r'time="[^"]*"\s*', '', line)
-                line = re.sub(r'level=\w+\s*', '', line)
-                line = re.sub(r'msg="([^"]*)"', r'\1', line)
-                line = line.strip()
-                if line and line not in clean_lines:
-                    clean_lines.append(line)
-            clean_error = "\n".join(clean_lines[:5]) or "Unknown error"
+        status_lines = []
+        fixed = await run_repair_agent(prompt, workspace, chat, chat_id, message_id, status_lines, card=card)
+        card.result_url = None  # Will be set by buttons
 
-            await status.add("❌", f"Docker start failed:\n{clean_error}")
-            from openclow.providers.actions import ActionButton, project_nav_keyboard
-            kb = project_nav_keyboard(project_id, ActionButton("Retry", f"project_up:{project_id}", style="primary"))
-            await chat.edit_message_with_actions(chat_id, message_id, status.text()[:4000], kb)
-            return
-
-        await status.add("✅", "Docker containers started", replace_last=True)
-
-        # 2. Wait for health — check via Docker exec (generic, works for any project)
-        await status.add("🔄", "Checking app health...")
-        await asyncio.sleep(8)
-
-        from openclow.worker.tasks.bootstrap import _find_app_container
-        app_ok = False
-        app_info = await _find_app_container(compose_project, workspace, project_id)
-        if app_info:
-            container_name, internal_port = app_info
-            for attempt in range(3):
-                try:
-                    proc = await asyncio.create_subprocess_exec(
-                        "docker", "exec", container_name,
-                        "curl", "-sf", f"http://localhost:{internal_port}/",
-                        "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "5",
-                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                    )
-                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
-                    code = stdout.decode().strip()
-                    if code.startswith("2") or code.startswith("3"):
-                        app_ok = True
-                        break
-                except Exception:
-                    pass
-                if attempt < 2:
-                    await asyncio.sleep(5)
-
-        if app_ok:
-            await status.add("✅", "App responding", replace_last=True)
-        else:
-            await status.add("⚠️", "App not responding yet (may need time)", replace_last=True)
-
-        # 3. Start tunnel (target container IP, not host port)
-        await status.add("🔄", "Creating public URL...")
-        tunnel_url = ""
-        try:
-            from openclow.worker.tasks.bootstrap import _get_tunnel_target
-            tunnel_target = await _get_tunnel_target(compose_project, workspace, project_id)
-            if not tunnel_target:
-                tunnel_target = f"http://localhost:{port}"
-            url = await start_tunnel(project.name, tunnel_target)
-            if url:
-                tunnel_url = url
-                await status.add("✅", f"Public URL: {url}", replace_last=True)
-            else:
-                log.warning("lifecycle.tunnel_failed", project=project.name, reason="start_returned_none")
-                await status.add("⚠️", "Tunnel failed — tap Docker Up to retry", replace_last=True)
-        except Exception as e:
-            log.warning("lifecycle.tunnel_error", project=project.name, error=str(e))
-            await status.add("⚠️", f"Tunnel error: {str(e)[:60]} — tap Docker Up to retry", replace_last=True)
-
-        # 4. Playwright verification
-        verify_ok, verify_detail = await _step_verify_app(
-            status, tunnel_url, port, project.name, workspace,
-        )
-
-        # 5. Final summary
-        await status.section("Summary")
-        if tunnel_url:
-            status.lines.append(f"🌐 {tunnel_url}")
-        if verify_ok:
-            status.lines.append(f"🔍 Verified: {verify_detail[:80]}")
-            status.lines.append("\n🚀 Ready!")
-        elif app_ok:
-            status.lines.append("\n✅ Docker running, app responding")
-        else:
-            status.lines.append("\n⚠️ Docker started but app may need time")
-
-        # Final buttons — compact single row
-        from openclow.providers.actions import ActionButton, project_nav_keyboard
-        extra = []
-        if tunnel_url:
-            extra.append(ActionButton("Open App", "open_app", url=tunnel_url))
-        extra.append(ActionButton("Health", f"health:{project.id}"))
+        # Final buttons
+        from openclow.providers.actions import ActionButton, project_nav_keyboard, open_app_btn
+        extra = [open_app_btn(project.id), ActionButton("Health", f"health:{project.id}")]
         kb = project_nav_keyboard(project.id, *extra)
-        await chat.edit_message_with_actions(
-            chat_id, message_id, status.text()[:4000], kb,
-        )
+        await chat.edit_message_with_actions(chat_id, message_id, "\n".join(status_lines)[:4000], kb)
 
-        log.info("lifecycle.docker_up", project=project.name, rc=rc,
-                 app_ok=app_ok, verified=verify_ok, tunnel=bool(tunnel_url))
+        log.info("lifecycle.docker_up", project=project.name, fixed=fixed)
     except asyncio.CancelledError:
         from openclow.providers.actions import ActionButton, project_nav_keyboard
         kb = project_nav_keyboard(project_id, ActionButton("Retry", f"project_up:{project_id}"))
