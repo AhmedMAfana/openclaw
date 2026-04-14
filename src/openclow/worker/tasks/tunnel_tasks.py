@@ -54,25 +54,66 @@ async def check_tunnel_health_task(ctx: dict) -> dict:
             projects = result.scalars().all()
 
         for p in projects:
+            # Always ensure a tunnel exists for active projects
             existing_url = await tunnel_service.get_tunnel_url(p.name)
-            if existing_url:
-                # Tunnel URL in DB — check if process is alive
-                alive = await tunnel_service.check_tunnel_health(p.name)
-                results[p.name] = {"url": existing_url, "healthy": alive}
-                if not alive:
-                    # Process dead but URL in DB — restart
-                    compose_project = f"openclow-{p.name}"
+            alive = await tunnel_service.check_tunnel_health(p.name) if existing_url else False
+
+            if alive:
+                results[p.name] = {"url": existing_url, "healthy": True}
+                continue
+
+            # Tunnel dead or missing — check if containers are actually running first
+            compose_project = f"openclow-{p.name}"
+            try:
+                from openclow.worker.tasks.bootstrap import _get_tunnel_target
+                target = await _get_tunnel_target(
+                    compose_project, f"/workspaces/_cache/{p.name}", p.id)
+            except Exception:
+                target = None
+
+            if not target:
+                # No running containers → no point starting tunnel
+                results[p.name] = {"url": None, "healthy": False}
+                continue
+
+            # Detect host header from .env APP_URL
+            import os
+            host_header = None
+            env_path = f"/workspaces/_cache/{p.name}/.env"
+            if os.path.exists(env_path):
+                with open(env_path) as f:
+                    for line in f:
+                        if line.strip().startswith("APP_URL="):
+                            from urllib.parse import urlparse
+                            app_url = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                            parsed = urlparse(app_url)
+                            if parsed.hostname and parsed.hostname not in ("localhost", "127.0.0.1"):
+                                # Only use host_header if it's a custom domain (not an old tunnel URL)
+                                if ".trycloudflare.com" not in parsed.hostname:
+                                    host_header = parsed.hostname
+                            break
+
+            url = await tunnel_service.start_tunnel(p.name, target, host_header=host_header)
+            if url:
+                # Update APP_URL in .env to match new tunnel
+                if os.path.exists(env_path):
                     try:
-                        from openclow.worker.tasks.bootstrap import _get_tunnel_target
-                        target = await _get_tunnel_target(
-                            compose_project, f"/workspaces/_cache/{p.name}", p.id)
+                        with open(env_path) as f:
+                            content = f.read()
+                        import re
+                        content = re.sub(r'APP_URL=.*', f'APP_URL={url}', content)
+                        with open(env_path, 'w') as f:
+                            f.write(content)
+                        # Clear Laravel config cache if applicable
+                        from openclow.services.docker_guard import run_docker
+                        container = f"{compose_project}-{p.app_container_name or 'laravel.test'}-1"
+                        await run_docker(
+                            "docker", "exec", container, "php", "artisan", "config:clear",
+                            actor="tunnel_health", timeout=10,
+                        )
                     except Exception:
-                        target = None
-                    if not target:
-                        from openclow.services.port_allocator import get_app_port
-                        target = f"http://localhost:{get_app_port(p.id)}"
-                    url = await tunnel_service.start_tunnel(p.name, target)
-                    results[p.name] = {"url": url, "healthy": url is not None}
+                        pass
+            results[p.name] = {"url": url, "healthy": url is not None}
     except Exception as e:
         log.warning("tunnel.project_health_check_failed", error=str(e))
 
