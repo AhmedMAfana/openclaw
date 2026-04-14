@@ -108,6 +108,18 @@ async def start_tunnel(
             continue
 
     if not url:
+        # Check if cloudflared already exited (e.g. 429 rate limit)
+        if proc.returncode is not None:
+            # Read any remaining stderr for diagnosis
+            try:
+                remaining = await proc.stderr.read(4096)
+                stderr_text = remaining.decode()
+            except Exception:
+                stderr_text = ""
+            if "429" in stderr_text or "Too Many Requests" in stderr_text:
+                log.warning("tunnel.rate_limited", service=service_name,
+                            detail="Cloudflare 429 — will retry via health loop")
+                return None
         try:
             proc.kill()
         except (OSError, ProcessLookupError):

@@ -31,9 +31,49 @@ async def stop_dashboard_tunnel(ctx: dict, service_name: str = "dozzle") -> dict
 
 
 async def check_tunnel_health_task(ctx: dict) -> dict:
-    """Check all registered tunnels, restart dead ones."""
+    """Check all registered tunnels + project tunnels, restart dead ones."""
     results = {}
+
+    # Infrastructure tunnels (dozzle, settings)
     for service_name, target_url in TUNNEL_DEFAULTS.items():
         url = await tunnel_service.ensure_tunnel(service_name, target_url)
         results[service_name] = {"url": url, "healthy": url is not None}
+
+    # Project tunnels — restore any that died
+    try:
+        from sqlalchemy import select as sa_select
+        from openclow.models import Project, async_session
+
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select(Project).where(
+                    Project.status == "active",
+                    Project.app_port.isnot(None),
+                )
+            )
+            projects = result.scalars().all()
+
+        for p in projects:
+            existing_url = await tunnel_service.get_tunnel_url(p.name)
+            if existing_url:
+                # Tunnel URL in DB — check if process is alive
+                alive = await tunnel_service.check_tunnel_health(p.name)
+                results[p.name] = {"url": existing_url, "healthy": alive}
+                if not alive:
+                    # Process dead but URL in DB — restart
+                    compose_project = f"openclow-{p.name}"
+                    try:
+                        from openclow.worker.tasks.bootstrap import _get_tunnel_target
+                        target = await _get_tunnel_target(
+                            compose_project, f"/workspaces/_cache/{p.name}", p.id)
+                    except Exception:
+                        target = None
+                    if not target:
+                        from openclow.services.port_allocator import get_app_port
+                        target = f"http://localhost:{get_app_port(p.id)}"
+                    url = await tunnel_service.start_tunnel(p.name, target)
+                    results[p.name] = {"url": url, "healthy": url is not None}
+    except Exception as e:
+        log.warning("tunnel.project_health_check_failed", error=str(e))
+
     return results
