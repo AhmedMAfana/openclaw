@@ -14,7 +14,7 @@ log = get_logger()
 # Per-user conversation memory — each user in a channel has their own history
 # Key: openclow:conv:{chat_id}:{user_id}  (falls back to {chat_id} if no user_id)
 _CONV_KEY = "openclow:conv:{session_key}"
-_CONV_MAX = 20  # Keep last 20 messages
+_CONV_MAX = 40  # Keep last 40 messages for richer context
 
 
 def _session_key(chat_id: str, user_id: str = "") -> str:
@@ -44,10 +44,10 @@ async def _save_message(chat_id: str, role: str, text: str, user_id: str = ""):
         import json
         r = aioredis.from_url(settings.redis_url)
         key = _CONV_KEY.format(session_key=_session_key(chat_id, user_id))
-        msg = json.dumps({"role": role, "text": text[:1000]})
+        msg = json.dumps({"role": role, "text": text[:2000]})
         await r.rpush(key, msg)
         await r.ltrim(key, -_CONV_MAX, -1)
-        await r.expire(key, 3600)  # 1 hour TTL
+        await r.expire(key, 14400)  # 4 hour TTL — conversation persists for a work session
         await r.aclose()
     except Exception as e:
         log.warning("agent_session.redis_save_failed", chat_id=chat_id, error=str(e))
@@ -310,35 +310,34 @@ async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message
     # Save user message to per-user conversation history
     await _save_message(chat_id, "user", user_message, user_id)
 
-    system_prompt = f"""You are OpenClow — an AI Dev Orchestrator running inside {'Telegram' if chat_provider_type == 'telegram' else 'Slack'}.
-You have FULL access to the user's projects via MCP tools.
+    system_prompt = f"""You are OpenClow — an AI Dev Orchestrator. This is a persistent chat conversation with the user.
 
 {context_str}
 
-CONVERSATION HISTORY (recent messages):
+CONVERSATION HISTORY:
 {conv_str if conv_str else "(first message)"}
 
+IMPORTANT: This is an ongoing conversation. The user may send casual messages, questions,
+or action requests. Respond naturally:
+- Casual messages ("hi", "thanks", "ok") → reply briefly, no tools needed
+- Questions about the project → answer from context or investigate with tools
+- Action requests ("fix the login page", "show me the logs") → use tools and do it
+
 YOU CAN:
-- Read, edit, write files in project workspaces
-- Run commands in Docker containers via docker_exec
-- Check container status, logs, health
-- Start/stop tunnels for public access
-- Restart containers
+- Read, edit, write files in /workspaces/_cache/<project_name>/
+- docker_exec — run commands in containers
+- container_logs — check what's happening
+- Restart containers, start/stop tunnels
+- Browse the app with Playwright (navigate, screenshot, click, fill)
 - Search code with Grep/Glob
-- Browse the app with Playwright — navigate to URLs, take screenshots, click, fill forms
-- Use the tunnel URL to browse the live app and verify changes visually
 
 RULES:
-- Be concise — Telegram messages are small
-- Show what you're doing as you do it
-- If the user asks to change code, DO IT — don't just explain
-- If something fails, investigate and fix it — don't give up after one try
-- Always verify your changes work (curl the app, check logs)
-- For file paths: project workspaces are at /workspaces/_cache/<project_name>/
-- If you hit a blocker you can't solve (need API key, credentials, user decision),
-  CLEARLY ASK the user what you need — don't fail silently
-- If containers are down, try to bring them up. If ports conflict, fix the conflict.
-- Be persistent — try at least 2-3 approaches before giving up
+- Be concise. Chat messages should be short.
+- For casual messages, just reply — don't use tools unnecessarily
+- When the user asks for action, DO IT — don't explain how, just do it
+- If something fails, investigate and fix — try 2-3 approaches
+- Verify changes work (curl, logs, Playwright screenshot)
+- If you need user input (API key, credentials), ask clearly
 """
 
     from openclow.providers.llm.claude import _mcp_playwright
@@ -401,12 +400,13 @@ RULES:
         max_turns=20,
     )
 
-    # Stream agent response, collecting text and updating chat
+    # Stream agent response — lightweight for chat, richer when using tools
     response_text = ""
     last_update = ""
     tool_lines: list[str] = []
     _start = _time.time()
     _is_slack = chat_provider_type == "slack"
+    _using_tools = False  # Track if agent is actually using tools
 
     try:
         async for message in query(prompt=user_message, options=options):
@@ -425,6 +425,7 @@ RULES:
                                 pass
 
                     elif isinstance(block, ToolUseBlock):
+                        _using_tools = True
                         from openclow.worker.tasks._agent_base import describe_tool
                         tool_lines.append(describe_tool(block))
                         if len(tool_lines) > 5:

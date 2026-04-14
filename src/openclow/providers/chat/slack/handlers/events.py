@@ -130,27 +130,17 @@ def register(app):
         if re.search(r"<@[A-Z0-9]+>", text):
             return
 
-        thread_ts = event.get("thread_ts") or event.get("ts") if not is_dm else None
-
-        # Show thinking indicator
-        thinking = await client.chat_postMessage(
-            channel=channel,
-            text="Processing your request...",
-            blocks=blocks.agent_thinking_blocks(text),
-            **({"thread_ts": thread_ts} if thread_ts else {}),
-        )
-
+        # Resolve project binding (DM or channel)
+        binding = None
         try:
             if is_dm:
                 from openclow.services.channel_service import get_channel_project
                 binding = await get_channel_project(channel)
                 if not binding:
-                    # Check for cached DM project selection
                     cached_pid = await bot_actions.get_dm_project("slack", user_id)
                     if cached_pid:
                         binding = {"project_id": cached_pid}
                     else:
-                        # Check user's default project
                         from openclow.models.user import User
                         from openclow.models.base import async_session
                         from sqlalchemy import select
@@ -166,15 +156,31 @@ def register(app):
                             if len(projects) == 1:
                                 binding = {"project_id": projects[0].id}
                             elif len(projects) > 1:
-                                await client.chat_update(
-                                    channel=channel,
-                                    ts=thinking["ts"],
-                                    text="Select a project",
+                                # Need project selection — post selector
+                                selector = await client.chat_postMessage(
+                                    channel=channel, text="Select a project",
                                     blocks=blocks.build_dm_project_selector(projects, text),
                                 )
                                 return
-            project_context = f"project_id:{binding['project_id']}" if binding else ""
+            else:
+                from openclow.services.channel_service import get_channel_project
+                binding = await get_channel_project(channel)
+        except Exception as e:
+            log.error("slack.binding_failed", error=str(e))
 
+        # Reply in the SAME thread if user is in a thread, otherwise start one
+        thread_ts = event.get("thread_ts") or event.get("ts") if not is_dm else None
+
+        # Lightweight thinking indicator — just a typing emoji, not a full card
+        thinking = await client.chat_postMessage(
+            channel=channel,
+            text="...",
+            blocks=[blocks.section_block("💭 ...")],
+            **({"thread_ts": thread_ts} if thread_ts else {}),
+        )
+
+        try:
+            project_context = f"project_id:{binding['project_id']}" if binding else ""
             await bot_actions.enqueue_job(
                 "agent_session", text, channel, thinking["ts"], project_context, "slack", user_id,
             )
