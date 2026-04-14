@@ -48,12 +48,32 @@ async def start_tunnel(
 
     Returns the public URL or None on failure.
     """
-    # Check if we already have an active process
+    # Check if we already have an active process handle
     existing_proc = _active_processes.get(service_name)
     if existing_proc and existing_proc.returncode is None:
         config = await get_config(TUNNEL_CATEGORY, service_name)
         if config and config.get("url"):
             return config["url"]
+
+    # No in-memory handle (e.g. after worker restart) — check if the old
+    # cloudflared process from DB is still alive. If so, reuse it instead
+    # of killing and creating a new tunnel (avoids Cloudflare rate limits).
+    config = await get_config(TUNNEL_CATEGORY, service_name)
+    if config and config.get("url") and config.get("pid"):
+        old_pid = config["pid"]
+        try:
+            proc_check = await asyncio.create_subprocess_exec(
+                "ps", "-p", str(old_pid), "-o", "comm=",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc_check.communicate()
+            if "cloudflared" in stdout.decode().strip():
+                log.info("tunnel.reusing_existing", service=service_name,
+                         pid=old_pid, url=config["url"])
+                return config["url"]
+        except (OSError, ProcessLookupError):
+            pass
 
     # Kill any stale process first
     await stop_tunnel(service_name)
