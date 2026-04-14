@@ -340,6 +340,13 @@ RULES:
 - DO things, don't explain how you'll do them. Just do it and report back.
 - If something fails, say what went wrong briefly, then try to fix it.
 - Be persistent — try 2-3 approaches before giving up.
+
+AFTER EVERY ACTION (code change, fix, restart, config change):
+1. VERIFY it works — curl the app, check logs, or use Playwright to screenshot the page
+2. Get the tunnel URL with tunnel_get_url and include it in your response
+3. If no tunnel, start one with tunnel_start
+4. Always end with the live link so the user can check: "Here's the app: <url>"
+   If you changed a specific page, give the direct URL: "<tunnel_url>/login"
 """
 
     from openclow.providers.llm.claude import _mcp_playwright
