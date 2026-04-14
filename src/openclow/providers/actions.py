@@ -68,9 +68,23 @@ def back_keyboard() -> ActionKeyboard:
     ])
 
 
-def open_app_btn(project_id: int) -> ActionButton:
-    """Open App button — triggers health check + auto-fix. ONE definition, used everywhere."""
+def open_app_btn(project_id: int, tunnel_url: str | None = None) -> ActionButton:
+    """Open App direct link if tunnel_url known, else health check action."""
+    if tunnel_url:
+        return ActionButton("🌐 Open App", f"open_app_link:{project_id}", url=tunnel_url, style="primary")
     return ActionButton("🌐 Open App", f"open_app:{project_id}", style="primary")
+
+
+def open_app_btns(project_id: int, tunnel_url: str | None = None) -> list[ActionButton]:
+    """Open App (direct) + Check & Fix (health check). Both buttons."""
+    btns = []
+    if tunnel_url:
+        btns.append(ActionButton("🌐 Open App", f"open_app_link:{project_id}", url=tunnel_url, style="primary"))
+    btns.append(ActionButton(
+        "🔧 Check & Fix" if tunnel_url else "🌐 Open App",
+        f"open_app:{project_id}",
+    ))
+    return btns
 
 
 def nav_keyboard(*extra: ActionButton) -> ActionKeyboard:

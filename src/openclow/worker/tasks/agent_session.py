@@ -543,8 +543,8 @@ Be concise. Talk like a person, not a manual.
         from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
         rows = []
         if pid:
-            from openclow.providers.actions import open_app_btn
-            rows.append(ActionRow([open_app_btn(pid)]))
+            from openclow.providers.actions import open_app_btns
+            rows.append(ActionRow(open_app_btns(pid, tunnel_url=tunnel_url)))
             rows.append(ActionRow([
                 ActionButton("🚀 New Task", "menu:task"),
                 ActionButton("◀️ Main Menu", "menu:main"),

@@ -1028,8 +1028,10 @@ async def approve_task(ctx: dict, task_id: str):
         from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
         rows = []
         rows.append(ActionRow([ActionButton("🔗 View PR", f"open_pr:{task_id_str}", url=pr_url)]))
-        from openclow.providers.actions import open_app_btn
-        rows.append(ActionRow([open_app_btn(task.project_id)]))
+        from openclow.providers.actions import open_app_btns
+        from openclow.services.tunnel_service import get_tunnel_url
+        _t_url = await get_tunnel_url(task.project.name) if task.project else None
+        rows.append(ActionRow(open_app_btns(task.project_id, tunnel_url=_t_url)))
         rows.append(ActionRow([
             ActionButton("✅ Merge", f"merge:{task_id_str}"),
             ActionButton("❌ Reject", f"reject:{task_id_str}"),
@@ -1117,8 +1119,10 @@ async def merge_task(ctx: dict, task_id: str):
 
         from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
         rows = []
-        from openclow.providers.actions import open_app_btn
-        rows.append(ActionRow([open_app_btn(task.project_id)]))
+        from openclow.providers.actions import open_app_btns
+        from openclow.services.tunnel_service import get_tunnel_url
+        _t_url = await get_tunnel_url(task.project.name) if task.project else None
+        rows.append(ActionRow(open_app_btns(task.project_id, tunnel_url=_t_url)))
         rows.append(ActionRow([
             ActionButton("🚀 New Task", "menu:task"),
             ActionButton("📦 Project", f"project_detail:{task.project_id}"),

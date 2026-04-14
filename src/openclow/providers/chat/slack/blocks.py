@@ -81,22 +81,34 @@ def button_element(
 
 
 def open_app_button(project_id: int, tunnel_url: str | None = None) -> dict:
-    """Open App button. If tunnel_url is known, opens in new tab directly (SPA-style).
-    Otherwise falls back to action button that runs health check."""
+    """Open App — direct URL link if tunnel known, else health check action."""
     if tunnel_url:
         return button_element(
-            "🚀 Open App",
-            f"open_app_link:{project_id}",
+            "🚀 Open App", f"open_app_link:{project_id}",
             value=f"open_app_link:{project_id}",
-            style="primary",
-            url=tunnel_url,
+            style="primary", url=tunnel_url,
         )
     return button_element(
-        "🚀 Open App",
-        f"open_app:{project_id}",
-        value=f"open_app:{project_id}",
-        style="primary",
+        "🚀 Open App", f"open_app:{project_id}",
+        value=f"open_app:{project_id}", style="primary",
     )
+
+
+def open_app_buttons(project_id: int, tunnel_url: str | None = None) -> list[dict]:
+    """Open App (direct link) + Check & Fix (health check). Returns list of button elements.
+    Use when you want both options — direct open AND repair fallback."""
+    btns = []
+    if tunnel_url:
+        btns.append(button_element(
+            "🚀 Open App", f"open_app_link:{project_id}",
+            value=f"open_app_link:{project_id}",
+            style="primary", url=tunnel_url,
+        ))
+    btns.append(button_element(
+        "🔧 Check & Fix" if tunnel_url else "🚀 Open App",
+        f"open_app:{project_id}", value=f"open_app:{project_id}",
+    ))
+    return btns
 
 
 def overflow_element(options: list[tuple[str, str]], action_id: str = "overflow") -> dict:
@@ -383,9 +395,9 @@ def welcome_blocks(
     # Action buttons
     elements = []
 
-    # Open App button
+    # Open App (direct link) + Check & Fix (health check)
     if project_id:
-        elements.append(open_app_button(project_id))
+        elements.extend(open_app_buttons(project_id, tunnel_url=tunnel_url))
 
     # Standard menu buttons
     elements.append(button_element("✏️ New Task", "menu:task", value="menu:task", style="primary" if not project_id else None))
@@ -827,12 +839,12 @@ def agent_response_blocks(
     if len(response) > 400:
         blks.append(context_block([":speech_balloon: _Reply to continue the conversation_"]))
 
-    # Action buttons — match welcome_blocks exactly
+    # Action buttons
     elements = []
 
-    # Open App button
+    # Open App (direct link) + Check & Fix (health check fallback)
     if project_id:
-        elements.append(open_app_button(project_id))
+        elements.extend(open_app_buttons(project_id, tunnel_url=tunnel_url))
 
     # New Task button
     if project_id:
