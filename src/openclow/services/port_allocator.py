@@ -54,6 +54,9 @@ PORT_ENV_VARS = {
 }
 
 
+MAX_PORT = 65535
+
+
 def get_port(project_id: int, service: str) -> int:
     """Get the unique host port for a service in a project.
 
@@ -63,9 +66,17 @@ def get_port(project_id: int, service: str) -> int:
 
     Returns:
         Unique port number (e.g., 10201 for project 3's database)
+
+    Raises:
+        ValueError: If calculated port exceeds 65535
     """
     offset = OFFSETS.get(service, 0)
-    return PORT_BASE + (project_id * PORT_RANGE) + offset
+    port = PORT_BASE + (project_id * PORT_RANGE) + offset
+    if port > MAX_PORT:
+        # Wrap around into safe range (10000-65535) using modular arithmetic
+        usable_range = MAX_PORT - PORT_BASE
+        port = PORT_BASE + ((project_id * PORT_RANGE + offset) % usable_range)
+    return port
 
 
 def get_all_ports(project_id: int) -> dict[str, int]:

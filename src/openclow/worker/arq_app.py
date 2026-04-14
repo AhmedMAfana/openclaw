@@ -138,6 +138,9 @@ async def on_startup(ctx: dict):
              "--format", "{{.Labels}}"],
             capture_output=True, text=True, timeout=10,
         )
+        # Build set of legitimate stack names: "openclow-{project_name}"
+        legitimate = {"openclow"} | {f"openclow-{name}" for name in known_projects}
+
         orphan_stacks = set()
         for line in result.stdout.strip().split("\n"):
             if not line:
@@ -145,13 +148,12 @@ async def on_startup(ctx: dict):
             for label in line.split(","):
                 if "com.docker.compose.project=" in label:
                     proj = label.split("=", 1)[1]
-                    # Skip our own infra stack
-                    if proj == "openclow":
+                    if proj in legitimate:
                         continue
-                    # Pattern 1: openclow-{name}-{extra} (task ID suffix)
-                    if proj.startswith("openclow-") and len(proj.split("-")) > 2:
+                    # Anything starting with "openclow-" that's NOT in legitimate = orphan
+                    if proj.startswith("openclow-"):
                         orphan_stacks.add(proj)
-                    # Pattern 2: bare project name (agent ran compose without -p)
+                    # Bare project name (agent ran compose without -p flag)
                     elif proj in known_projects:
                         orphan_stacks.add(proj)
 
@@ -252,6 +254,10 @@ async def on_startup(ctx: dict):
 
     # Start periodic tunnel health monitor
     asyncio.create_task(_tunnel_health_loop())
+
+    # Start periodic self-maintenance (cleanup orphans, stale workspaces, prune Docker)
+    from openclow.worker.tasks.maintenance import maintenance_loop
+    asyncio.create_task(maintenance_loop())
 
 
 async def _sync_tunnel_url(project_name: str, old_url: str, new_url: str, app_container_name: str | None = None):

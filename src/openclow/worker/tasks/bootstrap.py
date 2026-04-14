@@ -1871,7 +1871,7 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
 
     except (Exception, asyncio.CancelledError, TimeoutError) as e:
         await _set_project_status(project_id, "failed")
-        # Clean up containers on crash — don't leave orphans
+        # Clean up containers + tunnel on crash — don't leave orphans
         try:
             from openclow.services.docker_guard import run_docker_compose
             await run_docker_compose(
@@ -1880,6 +1880,11 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
                 actor="bootstrap", project_name=project.name,
                 cwd=workspace, timeout=30,
             )
+        except Exception:
+            pass
+        try:
+            from openclow.services.tunnel_service import stop_tunnel
+            await stop_tunnel(project.name)
         except Exception:
             pass
         await checklist.stop()
