@@ -23,40 +23,51 @@ interface ChatMessage {
   content: string;
 }
 
-// ── Stream parser ─────────────────────────────────────────────────────────────
-// Parses assistant-stream data-stream lines into text deltas and tool events.
+// ── Stream reader ─────────────────────────────────────────────────────────────
 
 async function readStream(
   body: ReadableStream<Uint8Array>,
+  signal: AbortSignal,
   onText: (accumulated: string) => void,
   onTool: (tool: string) => void,
-): Promise<string> {
+): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let accumulated = "";
+  let leftover = "";
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const chunk = decoder.decode(value, { stream: true });
-    for (const line of chunk.split("\n")) {
-      if (line.startsWith("0:")) {
-        try {
-          const text: string = JSON.parse(line.slice(2));
-          accumulated += text;
-          onText(accumulated);
-        } catch { /* malformed chunk */ }
-      } else if (line.startsWith("2:")) {
-        try {
-          const events = JSON.parse(line.slice(2)) as Array<{ type?: string; tool?: string }>;
-          for (const evt of events) {
-            if (evt.type === "tool_use" && evt.tool) onTool(evt.tool);
-          }
-        } catch { /* malformed data line */ }
+  try {
+    while (true) {
+      if (signal.aborted) break;
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = leftover + decoder.decode(value, { stream: true });
+      const lines = chunk.split("\n");
+      // Last element might be incomplete — carry it over
+      leftover = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (signal.aborted) break;
+        if (line.startsWith("0:")) {
+          try {
+            const text: string = JSON.parse(line.slice(2));
+            accumulated += text;
+            onText(accumulated);
+          } catch { /* malformed */ }
+        } else if (line.startsWith("2:")) {
+          try {
+            const events = JSON.parse(line.slice(2)) as Array<{ type?: string; tool?: string }>;
+            for (const evt of events) {
+              if (evt.type === "tool_use" && evt.tool) onTool(evt.tool);
+            }
+          } catch { /* malformed */ }
+        }
       }
     }
+  } finally {
+    reader.cancel().catch(() => {});
   }
-  return accumulated;
 }
 
 // ── App ──────────────────────────────────────────────────────────────────────
@@ -74,12 +85,13 @@ export default function App() {
   const [renameValue, setRenameValue] = useState("");
   const renameInputRef = useRef<HTMLInputElement>(null);
 
-  // Delete confirmation modal
+  // Delete modal
   const [deleteTarget, setDeleteTarget] = useState<ChatThread | null>(null);
 
-  useEffect(() => {
-    loadThreads();
-  }, []);
+  // Abort controller for in-progress streams
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => { loadThreads(); }, []);
 
   useEffect(() => {
     if (renamingId && renameInputRef.current) {
@@ -87,6 +99,16 @@ export default function App() {
       renameInputRef.current.select();
     }
   }, [renamingId]);
+
+  // Cancel any in-flight stream
+  function cancelStream() {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    setIsRunning(false);
+    setThinkingSteps([]);
+  }
 
   async function loadThreads() {
     setSidebarLoading(true);
@@ -104,9 +126,10 @@ export default function App() {
   }
 
   async function selectThread(id: string) {
+    if (id === activeThreadId) return; // already on this thread
+    cancelStream();
     setActiveThreadId(id);
     setMessages([]);
-    setThinkingSteps([]);
     try {
       const res = await fetch(`/api/threads/${id}/messages`, { credentials: "include" });
       if (res.ok) {
@@ -123,6 +146,7 @@ export default function App() {
   }
 
   async function newThread() {
+    cancelStream();
     try {
       const res = await fetch("/api/threads", { method: "POST", credentials: "include" });
       if (res.ok) {
@@ -131,7 +155,6 @@ export default function App() {
         setThreads((prev) => [thread, ...prev]);
         setActiveThreadId(thread.remoteId);
         setMessages([]);
-        setThinkingSteps([]);
       }
     } catch { /* silently fail */ }
   }
@@ -148,17 +171,21 @@ export default function App() {
   }
 
   async function deleteThread(threadId: string) {
+    if (activeThreadId === threadId) cancelStream();
     try {
-      await fetch(`/api/threads/${threadId}/archive`, {
-        method: "POST",
-        credentials: "include",
-      });
+      await fetch(`/api/threads/${threadId}/archive`, { method: "POST", credentials: "include" });
       setDeleteTarget(null);
       setThreads((prev) => prev.filter((t) => t.remoteId !== threadId));
       if (activeThreadId === threadId) {
         const remaining = threads.filter((t) => t.remoteId !== threadId);
-        if (remaining.length > 0) await selectThread(remaining[0].remoteId);
-        else { setActiveThreadId(null); setMessages([]); }
+        if (remaining.length > 0) {
+          // selectThread skips if same id; force it by clearing active first
+          setActiveThreadId(null);
+          await selectThread(remaining[0].remoteId);
+        } else {
+          setActiveThreadId(null);
+          setMessages([]);
+        }
       }
     } catch { /* silently fail */ }
   }
@@ -175,91 +202,79 @@ export default function App() {
     await persistTitle(threadId, title);
   }
 
-  // ── Shared streaming helper ─────────────────────────────────────────────────
+  // ── Core stream helper ────────────────────────────────────────────────────────
 
-  async function streamAssistant(
-    asstMsgId: string,
-    body: object,
-  ) {
+  async function runStream(asstMsgId: string, body: object): Promise<void> {
+    const abort = new AbortController();
+    abortRef.current = abort;
+
     const res = await fetch("/api/assistant", {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: abort.signal,
     });
+
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
     await readStream(
       res.body,
-      (accumulated) => {
-        setMessages((prev) =>
-          prev.map((m) => m.id === asstMsgId ? { ...m, content: accumulated } : m)
-        );
-      },
+      abort.signal,
+      (accumulated) => setMessages((prev) =>
+        prev.map((m) => m.id === asstMsgId ? { ...m, content: accumulated } : m)
+      ),
       (tool) => setThinkingSteps((prev) => [...prev, tool]),
     );
   }
 
-  // ── onNew (send message) ─────────────────────────────────────────────────────
+  // ── onNew ─────────────────────────────────────────────────────────────────────
 
-  const onNew = useCallback(
-    async (message: AppendMessage) => {
-      const userText = message.content
-        .filter((p) => p.type === "text")
-        .map((p) => (p as { type: "text"; text: string }).text)
-        .join(" ")
-        .trim();
+  const onNew = useCallback(async (message: AppendMessage) => {
+    const userText = message.content
+      .filter((p) => p.type === "text")
+      .map((p: { type: string; text?: string }) => p.text ?? "")
+      .join(" ").trim();
 
-      if (!userText) return;
+    if (!userText) return;
 
-      const userMsgId = `user-${Date.now()}`;
-      const asstMsgId = `asst-${Date.now() + 1}`;
+    const userMsgId = `user-${Date.now()}`;
+    const asstMsgId = `asst-${Date.now() + 1}`;
+    const threadId = activeThreadId;
+    const isFirstMessage = threads.find((t) => t.remoteId === threadId)?.title === "New Chat";
 
-      setThinkingSteps([]);
-      setMessages((prev) => [
-        ...prev,
-        { id: userMsgId, role: "user", content: userText },
-        { id: asstMsgId, role: "assistant", content: "" },
-      ]);
-      setIsRunning(true);
+    setThinkingSteps([]);
+    setMessages((prev) => [
+      ...prev,
+      { id: userMsgId, role: "user", content: userText },
+      { id: asstMsgId, role: "assistant", content: "" },
+    ]);
+    setIsRunning(true);
 
-      // Capture current thread id and whether title needs setting
-      const threadId = activeThreadId;
-      const currentTitle = threads.find((t) => t.remoteId === threadId)?.title ?? "";
-      const isFirstMessage = currentTitle === "New Chat";
+    try {
+      await runStream(asstMsgId, {
+        commands: [{ type: "add-message", message: { role: "user", parts: [{ type: "text", text: userText }] } }],
+        threadId,
+        mode: "quick",
+      });
 
-      try {
-        await streamAssistant(asstMsgId, {
-          commands: [{
-            type: "add-message",
-            message: { role: "user", parts: [{ type: "text", text: userText }] },
-          }],
-          threadId,
-          mode: "quick",
-        });
-
-        // Auto-title: persist on first message only
-        if (isFirstMessage && threadId) {
-          const newTitle = userText.slice(0, 60).trim();
-          setThreads((prev) =>
-            prev.map((t) => t.remoteId === threadId ? { ...t, title: newTitle } : t)
-          );
-          await persistTitle(threadId, newTitle);
-        }
-      } catch (e: unknown) {
-        const errMsg = e instanceof Error ? e.message : String(e);
-        setMessages((prev) =>
-          prev.map((m) => m.id === asstMsgId ? { ...m, content: `Error: ${errMsg}` } : m)
-        );
-      } finally {
-        setIsRunning(false);
+      if (isFirstMessage && threadId) {
+        const newTitle = userText.slice(0, 60).trim();
+        setThreads((prev) => prev.map((t) => t.remoteId === threadId ? { ...t, title: newTitle } : t));
+        await persistTitle(threadId, newTitle);
       }
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activeThreadId, threads]
-  );
+    } catch (e: unknown) {
+      if ((e as Error)?.name === "AbortError") return; // user cancelled — no error shown
+      const errMsg = e instanceof Error ? e.message : String(e);
+      setMessages((prev) => prev.map((m) => m.id === asstMsgId ? { ...m, content: `Error: ${errMsg}` } : m));
+    } finally {
+      if (!abortRef.current?.signal.aborted) setIsRunning(false);
+      if (abortRef.current?.signal.aborted === false) abortRef.current = null;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeThreadId, threads]);
 
-  // ── onReload (retry) — keeps user message, replaces only failed assistant msg ─
+  // ── onReload (retry last assistant response) ──────────────────────────────────
 
   const onReload = useCallback(async () => {
     if (isRunning || !activeThreadId) return;
@@ -269,8 +284,6 @@ export default function App() {
     if (!lastUser || !lastAsst) return;
 
     const newAsstId = `asst-retry-${Date.now()}`;
-
-    // Keep user message in place, swap assistant message with fresh placeholder
     setMessages((prev) => {
       const without = prev.filter((m) => m.id !== lastAsst.id);
       return [...without, { id: newAsstId, role: "assistant", content: "" }];
@@ -279,59 +292,49 @@ export default function App() {
     setIsRunning(true);
 
     try {
-      await streamAssistant(newAsstId, {
-        commands: [{
-          type: "add-message",
-          message: { role: "user", parts: [{ type: "text", text: lastUser.content }] },
-        }],
+      await runStream(newAsstId, {
+        commands: [{ type: "add-message", message: { role: "user", parts: [{ type: "text", text: lastUser.content }] } }],
         threadId: activeThreadId,
         mode: "quick",
-        retry: true,  // backend deletes old assistant msg and skips saving new user msg
+        retry: true,
       });
     } catch (e: unknown) {
+      if ((e as Error)?.name === "AbortError") return;
       const errMsg = e instanceof Error ? e.message : String(e);
-      setMessages((prev) =>
-        prev.map((m) => m.id === newAsstId ? { ...m, content: `Error: ${errMsg}` } : m)
-      );
+      setMessages((prev) => prev.map((m) => m.id === newAsstId ? { ...m, content: `Error: ${errMsg}` } : m));
     } finally {
-      setIsRunning(false);
+      if (!abortRef.current?.signal.aborted) setIsRunning(false);
+      if (abortRef.current?.signal.aborted === false) abortRef.current = null;
     }
   }, [activeThreadId, isRunning, messages]);
 
-  // ── onEdit — user edits a previous message, truncates history and re-runs ──────
+  // ── onEdit (replace a previous message) ──────────────────────────────────────
 
   const onEdit = useCallback(async (message: AppendMessage) => {
     if (isRunning || !activeThreadId) return;
 
     const newText = message.content
       .filter((p) => p.type === "text")
-      .map((p) => (p as { type: "text"; text: string }).text)
-      .join(" ")
-      .trim();
+      .map((p: { type: string; text?: string }) => p.text ?? "")
+      .join(" ").trim();
 
     if (!newText) return;
 
-    // parentId = the last message to KEEP (the one before the edited message)
-    const parentId = (message as AppendMessage & { parentId?: string | null }).parentId ?? null;
-
-    // Find how many messages to keep (everything up to and including parentId)
+    const parentId = message.parentId;
     const keepUpToIdx = parentId ? messages.findIndex((m) => m.id === parentId) : -1;
     const keepCount = keepUpToIdx >= 0 ? keepUpToIdx + 1 : 0;
 
-    // Truncate DB — best-effort so history stays clean for the agent
-    if (activeThreadId) {
-      fetch(`/api/threads/${activeThreadId}/truncate`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keep_count: keepCount }),
-      }).catch(() => {});
-    }
+    // Best-effort: clean up DB messages after the edit point
+    fetch(`/api/threads/${activeThreadId}/truncate`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keep_count: keepCount }),
+    }).catch(() => {});
 
     const newAsstId = `asst-edit-${Date.now()}`;
     const newUserMsgId = `user-edit-${Date.now()}`;
 
-    // Update local state: keep messages up to parentId, add new user + empty assistant
     setMessages([
       ...messages.slice(0, keepCount),
       { id: newUserMsgId, role: "user", content: newText },
@@ -341,22 +344,29 @@ export default function App() {
     setIsRunning(true);
 
     try {
-      await streamAssistant(newAsstId, {
+      await runStream(newAsstId, {
         commands: [{ type: "add-message", message: { role: "user", parts: [{ type: "text", text: newText }] } }],
         threadId: activeThreadId,
         mode: "quick",
       });
     } catch (e: unknown) {
+      if ((e as Error)?.name === "AbortError") return;
       const errMsg = e instanceof Error ? e.message : String(e);
-      setMessages((prev) =>
-        prev.map((m) => m.id === newAsstId ? { ...m, content: `Error: ${errMsg}` } : m)
-      );
+      setMessages((prev) => prev.map((m) => m.id === newAsstId ? { ...m, content: `Error: ${errMsg}` } : m));
     } finally {
-      setIsRunning(false);
+      if (!abortRef.current?.signal.aborted) setIsRunning(false);
+      if (abortRef.current?.signal.aborted === false) abortRef.current = null;
     }
   }, [activeThreadId, isRunning, messages]);
 
-  // ── Runtime ──────────────────────────────────────────────────────────────────
+  // ── onCancel (stop generating) ────────────────────────────────────────────────
+
+  const onCancel = useCallback(async () => {
+    cancelStream();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Runtime ───────────────────────────────────────────────────────────────────
 
   const runtime = useExternalStoreRuntime<ChatMessage>({
     messages,
@@ -364,6 +374,7 @@ export default function App() {
     onNew,
     onEdit,
     onReload,
+    onCancel,
     convertMessage: (msg) => ({
       id: msg.id,
       role: msg.role,
@@ -371,13 +382,12 @@ export default function App() {
     }),
   });
 
-  // ── Render ───────────────────────────────────────────────────────────────────
+  // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
     <div className="h-screen flex overflow-hidden bg-background">
       {/* Sidebar */}
       <aside className="w-[260px] shrink-0 flex flex-col border-r border-border bg-card">
-        {/* Header */}
         <div className="px-4 pt-5 pb-3">
           <div className="flex items-center gap-2.5 mb-4">
             <div className="size-7 rounded-lg flex items-center justify-center text-xs font-bold bg-primary text-primary-foreground">
@@ -394,7 +404,6 @@ export default function App() {
           </button>
         </div>
 
-        {/* Thread list */}
         <div className="flex-1 overflow-y-auto px-2 pb-2">
           <p className="px-2 py-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
             Recent
@@ -423,19 +432,12 @@ export default function App() {
           )}
         </div>
 
-        {/* Footer */}
         <div className="px-2 py-3 border-t border-border flex flex-col gap-0.5">
-          <a
-            href="/settings"
-            className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-          >
+          <a href="/settings" className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors">
             <SettingsIcon className="size-4" />
             Settings
           </a>
-          <a
-            href="/chat/logout"
-            className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-          >
+          <a href="/chat/logout" className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors">
             <LogOutIcon className="size-4" />
             Logout
           </a>
@@ -461,9 +463,7 @@ export default function App() {
                 <TrashIcon className="size-5 text-destructive" />
               </div>
               <div className="flex-1 min-w-0">
-                <Dialog.Title className="text-base font-semibold text-foreground">
-                  Delete chat?
-                </Dialog.Title>
+                <Dialog.Title className="text-base font-semibold text-foreground">Delete chat?</Dialog.Title>
                 <Dialog.Description className="mt-1 text-sm text-muted-foreground line-clamp-2">
                   "{deleteTarget?.title}" will be permanently deleted.
                 </Dialog.Description>
@@ -506,17 +506,8 @@ interface ThreadItemProps {
 }
 
 function ThreadItem({
-  thread,
-  isActive,
-  isRenaming,
-  renameValue,
-  renameInputRef,
-  onSelect,
-  onStartRename,
-  onRenameChange,
-  onRenameCommit,
-  onRenameCancel,
-  onDelete,
+  thread, isActive, isRenaming, renameValue, renameInputRef,
+  onSelect, onStartRename, onRenameChange, onRenameCommit, onRenameCancel, onDelete,
 }: ThreadItemProps) {
   const [hovered, setHovered] = useState(false);
 
@@ -527,24 +518,13 @@ function ThreadItem({
           ref={renameInputRef}
           value={renameValue}
           onChange={(e) => onRenameChange(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") onRenameCommit();
-            if (e.key === "Escape") onRenameCancel();
-          }}
+          onKeyDown={(e) => { if (e.key === "Enter") onRenameCommit(); if (e.key === "Escape") onRenameCancel(); }}
           className="flex-1 min-w-0 bg-transparent text-sm text-foreground outline-none"
         />
-        <button
-          onClick={onRenameCommit}
-          className="shrink-0 p-1 rounded text-muted-foreground hover:text-foreground"
-          title="Save"
-        >
+        <button onClick={onRenameCommit} className="shrink-0 p-1 rounded text-muted-foreground hover:text-foreground" title="Save">
           <CheckIcon className="size-3" />
         </button>
-        <button
-          onClick={onRenameCancel}
-          className="shrink-0 p-1 rounded text-muted-foreground hover:text-foreground"
-          title="Cancel"
-        >
+        <button onClick={onRenameCancel} className="shrink-0 p-1 rounded text-muted-foreground hover:text-foreground" title="Cancel">
           <XIcon className="size-3" />
         </button>
       </div>
@@ -559,14 +539,10 @@ function ThreadItem({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <button
-        onClick={onSelect}
-        className="flex-1 text-left px-3 py-2 text-sm truncate min-w-0"
-      >
+      <button onClick={onSelect} className="flex-1 text-left px-3 py-2 text-sm truncate min-w-0">
         {thread.title}
       </button>
 
-      {/* Hover actions */}
       {(hovered || isActive) && (
         <div className="flex items-center gap-0.5 pr-1.5 shrink-0">
           <button
