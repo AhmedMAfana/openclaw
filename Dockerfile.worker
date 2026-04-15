@@ -7,10 +7,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl wget ca-certificates gnupg openssh-client jq unzip procps ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js 20
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+# NVM + Node.js — agents can run `nvm install X && nvm use X` to switch versions
+ENV NVM_DIR=/usr/local/nvm
+ENV NODE_VERSION=20
+RUN mkdir -p $NVM_DIR \
+    && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash \
+    && . $NVM_DIR/nvm.sh \
+    && nvm install $NODE_VERSION \
+    && nvm alias default $NODE_VERSION \
+    # Symlink active version into /usr/local/bin so non-login shells can use node/npm
+    && node_ver=$(ls $NVM_DIR/versions/node/) \
+    && ln -sf $NVM_DIR/versions/node/$node_ver/bin/node /usr/local/bin/node \
+    && ln -sf $NVM_DIR/versions/node/$node_ver/bin/npm /usr/local/bin/npm \
+    && ln -sf $NVM_DIR/versions/node/$node_ver/bin/npx /usr/local/bin/npx \
+    # Profile for interactive shells (agent bash sessions: nvm install / nvm use)
+    && printf 'export NVM_DIR=%s\n[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"\n' \
+       "$NVM_DIR" > /etc/profile.d/nvm.sh && chmod +x /etc/profile.d/nvm.sh
 
 # GitHub CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -60,7 +72,7 @@ RUN mkdir -p /workspaces \
     && groupadd -f docker \
     && usermod -aG docker openclow \
     && mkdir -p /home/openclow/.claude \
-    && chown -R openclow:openclow /app /workspaces /home/openclow
+    && chown -R openclow:openclow /app /workspaces /home/openclow $NVM_DIR
 # Entrypoint that restores Claude credentials from volume
 COPY scripts/worker-entrypoint.sh /usr/local/bin/worker-entrypoint.sh
 RUN chmod +x /usr/local/bin/worker-entrypoint.sh

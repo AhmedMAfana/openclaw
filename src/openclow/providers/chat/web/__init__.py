@@ -55,14 +55,41 @@ class WebChatProvider(ChatProvider):
             return False
 
     async def send_message(self, chat_id: str, text: str) -> str:
-        """Send a new message (not editing an existing one)."""
+        """Send a new message (not editing an existing one).
+
+        Creates a DB row so the message_id can be used for subsequent edits.
+        Returns the numeric DB message id as string, or 'web_msg' on failure.
+        """
         user_id, session_id = self._parse_chat_id(chat_id)
         channel = f"wc:{user_id}:{session_id}"
+
+        # Create DB row so the worker can edit it later via edit_message(is_final=True)
+        msg_id = "web_msg"
+        if user_id and session_id:
+            try:
+                from openclow.models.base import async_session
+                from openclow.models.web_chat import WebChatMessage
+                async with async_session() as db:
+                    msg = WebChatMessage(
+                        session_id=session_id,
+                        user_id=user_id,
+                        role="assistant",
+                        content=text,
+                        is_complete=False,
+                    )
+                    db.add(msg)
+                    await db.commit()
+                    await db.refresh(msg)
+                    msg_id = str(msg.id)
+            except Exception as e:
+                log.warning("web_provider.send_message_db_failed", error=str(e))
+
         await self._publish(channel, {
             "type": "msg_new",
+            "message_id": msg_id,
             "text": text,
         })
-        return "web_msg"
+        return msg_id
 
     async def edit_message(
         self,
@@ -85,8 +112,8 @@ class WebChatProvider(ChatProvider):
             "text": text,
         }
 
-        if is_final:
-            # Mark message complete in DB
+        if is_final and message_id and str(message_id).isdigit():
+            # Mark message complete in DB (only when we have a real numeric DB id)
             try:
                 from openclow.models.base import async_session
                 from openclow.models.web_chat import WebChatMessage
@@ -109,45 +136,8 @@ class WebChatProvider(ChatProvider):
         keyboard: ActionKeyboard | None = None,
         is_final: bool = False,
     ) -> None:
-        """Update message with action buttons."""
-        user_id, session_id = self._parse_chat_id(chat_id)
-        channel = f"wc:{user_id}:{session_id}"
-
-        buttons = []
-        if keyboard:
-            for row in keyboard.rows:
-                row_buttons = []
-                for btn in row.buttons:
-                    row_buttons.append({
-                        "label": btn.label,
-                        "action_id": btn.action_id,
-                        "url": btn.url,
-                        "style": btn.style,  # "default", "primary", "danger"
-                    })
-                buttons.append(row_buttons)
-
-        data = {
-            "type": "msg_final" if is_final else "msg_update",
-            "message_id": message_id,
-            "text": text,
-            "buttons": buttons if buttons else None,
-        }
-
-        if is_final:
-            # Mark message complete in DB
-            try:
-                from openclow.models.base import async_session
-                from openclow.models.web_chat import WebChatMessage
-                async with async_session() as session:
-                    msg = await session.get(WebChatMessage, int(message_id))
-                    if msg:
-                        msg.content = text
-                        msg.is_complete = True
-                        await session.commit()
-            except Exception as e:
-                log.warning("web_provider.mark_complete_failed", message_id=message_id, error=str(e))
-
-        await self._publish(channel, data)
+        """Web: buttons stripped — web is conversational, no button clicks needed."""
+        await self.edit_message(chat_id, message_id, text, is_final=is_final)
 
     async def send_tool_event(
         self,
@@ -171,6 +161,97 @@ class WebChatProvider(ChatProvider):
             "input": tool_input[:100],  # truncate long inputs
             "status": status,
         })
+
+    async def send_message_with_actions(
+        self,
+        chat_id: str,
+        text: str,
+        keyboard: "ActionKeyboard | None" = None,
+        parse_mode: str | None = None,
+    ) -> str:
+        """Web: buttons stripped — web is conversational, no button clicks needed."""
+        return await self.send_message(chat_id, text)
+
+    async def send_plan_preview(
+        self, chat_id: str, message_id: str, task_id: str, plan: str
+    ) -> None:
+        """Web: send plan as plain text — no approve/reject buttons needed."""
+        await self.edit_message(chat_id, message_id, plan, is_final=False)
+
+    async def send_progress(
+        self, chat_id: str, message_id: str, step: str, total_steps: int, current_step: int
+    ) -> None:
+        """Send progress update."""
+        user_id, session_id = self._parse_chat_id(chat_id)
+        channel = f"wc:{user_id}:{session_id}"
+        await self._publish(channel, {
+            "type": "msg_update",
+            "message_id": message_id,
+            "text": f"[{current_step}/{total_steps}] {step}",
+        })
+
+    async def send_summary(
+        self, chat_id: str, message_id: str, task_id: str, summary: str, diff_summary: str
+    ) -> None:
+        """Web: send completion summary as plain text — no PR/Discard buttons needed."""
+        text = f"{summary}\n\n**Changes:**\n{diff_summary}"
+        await self.edit_message(chat_id, message_id, text, is_final=True)
+
+    async def send_diff_preview(
+        self, chat_id: str, message_id: str, task_id: str, diff_summary: str
+    ) -> None:
+        """Web: send diff as plain text — no approve/reject buttons needed."""
+        await self.edit_message(chat_id, message_id, diff_summary, is_final=False)
+
+    async def send_pr_created(
+        self, chat_id: str, message_id: str, task_id: str, pr_url: str
+    ) -> None:
+        """Send PR created notification."""
+        user_id, session_id = self._parse_chat_id(chat_id)
+        channel = f"wc:{user_id}:{session_id}"
+        await self._publish(channel, {
+            "type": "msg_final",
+            "message_id": message_id,
+            "text": f"✅ PR created: {pr_url}",
+            "pr_url": pr_url,
+        })
+
+    async def send_error(self, chat_id: str, message_id: str | None, text: str) -> None:
+        """Send error message."""
+        user_id, session_id = self._parse_chat_id(chat_id)
+        channel = f"wc:{user_id}:{session_id}"
+        await self._publish(channel, {
+            "type": "msg_error",
+            "message_id": message_id,
+            "text": f"❌ {text}",
+        })
+
+    async def send_terminal_message(self, chat_id: str, message_id: str | None, text: str) -> None:
+        """Send a terminal-state message."""
+        user_id, session_id = self._parse_chat_id(chat_id)
+        channel = f"wc:{user_id}:{session_id}"
+        await self._publish(channel, {
+            "type": "msg_final",
+            "message_id": message_id,
+            "text": text,
+        })
+
+    def _keyboard_to_buttons(self, keyboard: "ActionKeyboard | None") -> list | None:
+        """Convert ActionKeyboard to JSON-serializable button rows."""
+        if not keyboard:
+            return None
+        buttons = []
+        for row in keyboard.rows:
+            row_buttons = []
+            for btn in row.buttons:
+                row_buttons.append({
+                    "label": btn.label,
+                    "action_id": btn.action_id,
+                    "url": btn.url,
+                    "style": btn.style,
+                })
+            buttons.append(row_buttons)
+        return buttons or None
 
     # ── No-ops for web (request-driven, not polling) ──
 

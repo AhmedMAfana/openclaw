@@ -36,6 +36,10 @@ def _mcp_docker() -> dict:
     return {"command": "python", "args": ["-m", "openclow.mcp_servers.docker_mcp"]}
 
 
+def _mcp_actions() -> dict:
+    return {"command": "python", "args": ["-m", "openclow.mcp_servers.actions_mcp"]}
+
+
 def _mcp_github() -> dict:
     return {"command": "python", "args": ["-m", "openclow.mcp_servers.github_mcp"]}
 

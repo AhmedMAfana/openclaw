@@ -6,6 +6,7 @@ from openclow.api.web_auth import web_user_dep
 from openclow.models.user import User
 from openclow.models.base import async_session
 from openclow.models.web_chat import WebChatSession, WebChatMessage
+from openclow.models.project import Project
 from openclow.utils.logging import get_logger
 
 log = get_logger()
@@ -44,6 +45,7 @@ async def list_threads(user: User = Depends(web_user_dep)):
                 "remoteId": str(s.id),
                 "title": s.title,
                 "status": "regular",
+                "projectId": s.project_id,
             }
             for s in sessions
         ]
@@ -96,6 +98,25 @@ async def rename_thread(thread_id: int, body: dict, user: User = Depends(web_use
         await session.commit()
 
     return {"status": "ok"}
+
+
+@router.put("/threads/{thread_id}/project")
+async def set_thread_project(thread_id: int, body: dict, user: User = Depends(web_user_dep)):
+    """Assign (or clear) a project on a session."""
+    async with async_session() as session:
+        result = await session.get(WebChatSession, thread_id)
+        if not result or result.user_id != user.id:
+            raise HTTPException(404, "Thread not found")
+
+        project_id = body.get("project_id")  # int or None
+        if project_id is not None:
+            proj = await session.get(Project, int(project_id))
+            if not proj:
+                raise HTTPException(404, "Project not found")
+        result.project_id = project_id
+        await session.commit()
+
+    return {"status": "ok", "project_id": project_id}
 
 
 @router.post("/threads/{thread_id}/archive")
@@ -174,5 +195,30 @@ async def get_thread_messages(thread_id: int, user: User = Depends(web_user_dep)
                 "createdAt": m.created_at.isoformat(),
             }
             for m in messages
+        ]
+    }
+
+
+# ── Current user (for WebSocket URL construction) ────────────
+
+@router.get("/me")
+async def get_me(user: User = Depends(web_user_dep)):
+    """Return the authenticated user's id, email, and admin flag."""
+    return {"id": user.id, "email": getattr(user, "email", None), "is_admin": user.is_admin}
+
+
+# ── Projects list (for project selector UI) ──────────────────
+
+@router.get("/projects")
+async def list_projects(user: User = Depends(web_user_dep)):
+    """Return accessible projects for the project selector (filtered by user access)."""
+    from openclow.services.access_service import get_accessible_projects_for_mcp
+    accessible, _ = await get_accessible_projects_for_mcp(user.id, user.is_admin)
+    # Only show active projects in the selector
+    active = [p for p in accessible if p.status == "active"]
+    return {
+        "projects": [
+            {"id": p.id, "name": p.name, "techStack": p.tech_stack}
+            for p in active
         ]
     }

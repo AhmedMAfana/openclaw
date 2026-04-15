@@ -1,12 +1,15 @@
 # Dev overrides — auto-loaded by docker compose
+# Rules:
+#  - No hardcoded paths anywhere.
+#  - api/bot run as the image's USER so Claude CLI auth works correctly.
+#  - worker needs root only to fix docker.sock perms, then drops back to openclow via su -l.
+
 services:
   bot:
     command: >
       bash -c "
-        pip install -e /app --quiet 2>&1 | tail -1;
         exec watchfiles --ignore-paths __pycache__,*.egg-info,.pytest_cache --grace-period 3 'python -m openclow.bot.main' src/
       "
-    user: root
     volumes:
       - ./src:/app/src:cached
     environment:
@@ -14,11 +17,7 @@ services:
 
   api:
     command: >
-      bash -c "
-        pip install -e /app --quiet 2>&1 | tail -1;
-        exec uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000 --reload
-      "
-    user: root
+      uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ./src:/app/src:cached
     environment:
@@ -28,10 +27,7 @@ services:
     command: >
       bash -c "
         chmod 666 /var/run/docker.sock 2>/dev/null || true;
-        cp /home/openclow/.claude/.claude.json.persistent /home/openclow/.claude.json 2>/dev/null || echo '{}' > /home/openclow/.claude.json;
-        echo '[worker] Claude auth:';
-        claude auth status 2>/dev/null | grep loggedIn || echo 'not logged in';
-        exec su openclow -c 'arq openclow.worker.arq_app.WorkerSettings'
+        exec su -l openclow -c 'arq openclow.worker.arq_app.WorkerSettings'
       "
     user: root
     volumes:

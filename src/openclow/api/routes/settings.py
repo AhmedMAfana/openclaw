@@ -652,6 +652,18 @@ async def delete_user(user_id: int):
     return {"status": "ok", "message": "User deleted"}
 
 
+@router.patch("/users/{user_id}/allow")
+async def toggle_user_allowed(user_id: int, body: dict):
+    """Set is_allowed flag for a user."""
+    async with async_session() as session:
+        user = await session.get(User, user_id)
+        if not user:
+            raise HTTPException(404, "User not found")
+        user.is_allowed = bool(body.get("is_allowed", False))
+        await session.commit()
+    return {"status": "ok", "is_allowed": user.is_allowed}
+
+
 # ---------------------------------------------------------------------------
 # Slack workspace discovery (members + channels)
 # ---------------------------------------------------------------------------
@@ -816,7 +828,20 @@ async def link_channel(body: dict):
     channel_name = body.get("channel_name", channel_id)
     await set_channel_project(channel_id, project_id, project.name, provider_type=provider_type, channel_name=channel_name)
 
-    # Return HTML row for HTMX swap
+    # JSON response for React frontend
+    if not request.headers.get("HX-Request"):
+        return {
+            "status": "ok",
+            "binding": {
+                "channel_id": channel_id,
+                "channel_name": channel_name or channel_id,
+                "project_id": project_id,
+                "project_name": project.name,
+                "provider_type": provider_type,
+            },
+        }
+
+    # HTML row for HTMX swap (legacy dashboard)
     display_name = channel_name or channel_id
     prefix = "#" if provider_type == "slack" else "@"
     html = (
@@ -854,6 +879,36 @@ async def active_task_count():
         )
         counts = {row[0]: row[1] for row in result.all()}
     return counts
+
+
+# ---------------------------------------------------------------------------
+# New JSON-only endpoints for React settings panel
+# ---------------------------------------------------------------------------
+
+@router.get("/system-info")
+async def system_info():
+    """Return masked system configuration values for display."""
+    def mask_url(url: str) -> str:
+        if url and "@" in url:
+            scheme, rest = (url.split("://", 1) + [""])[:2]
+            host_part = rest.rsplit("@", 1)[-1]
+            return f"{scheme}://****@{host_part}"
+        return url or ""
+
+    return {
+        "database_url": mask_url(settings.database_url or ""),
+        "redis_url": mask_url(settings.redis_url or ""),
+        "workspace_base_path": settings.workspace_base_path or "",
+        "log_level": settings.log_level or "INFO",
+        "activity_log": settings.activity_log if hasattr(settings, "activity_log") else False,
+    }
+
+
+@router.get("/channel-bindings")
+async def list_channel_bindings():
+    """Return all channel-to-project bindings as JSON."""
+    from openclow.services.channel_service import get_all_channel_bindings
+    return await get_all_channel_bindings()
 
 
 # ---------------------------------------------------------------------------

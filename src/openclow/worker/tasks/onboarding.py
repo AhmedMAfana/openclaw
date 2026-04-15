@@ -108,9 +108,15 @@ async def onboard_project(ctx: dict, repo_url: str, chat_id: str, message_id: st
         import json
         import redis.asyncio as aioredis
         r = aioredis.from_url(settings.redis_url)
-        pending_key = f"openclow:pending_project:{config.name}"
-        await r.set(pending_key, json.dumps({
-            "name": config.name,
+        # Always key by repo name (predictable), also store repo_name alias key
+        # config.name = AI-detected app name (can differ from repo slug)
+        # project_name = last segment of GitHub repo URL (always matches what agent searches)
+        # Key by repo slug (predictable — matches what agent and user call the project).
+        # Also write under AI-detected name as alias so Telegram/Slack button callbacks work.
+        pending_key = f"openclow:pending_project:{project_name}"
+        alt_key = f"openclow:pending_project:{config.name}"
+        payload = json.dumps({
+            "name": project_name,
             "github_repo": repo,
             "tech_stack": config.tech_stack,
             "docker_compose_file": config.docker_compose,
@@ -119,7 +125,10 @@ async def onboard_project(ctx: dict, repo_url: str, chat_id: str, message_id: st
             "description": config.description,
             "setup_commands": config.setup_commands,
             "is_dockerized": config.is_dockerized,
-        }), ex=3600)  # expires in 1 hour
+        })
+        await r.set(pending_key, payload, ex=3600)
+        if alt_key != pending_key:
+            await r.set(alt_key, payload, ex=3600)
         await r.aclose()
 
         # Send config to user for approval
@@ -142,7 +151,7 @@ async def onboard_project(ctx: dict, repo_url: str, chat_id: str, message_id: st
             summary += f"Setup: {config.setup_commands}\n"
 
         kb = ActionKeyboard(rows=[ActionRow([
-            ActionButton("Add Project", f"confirm_project:{config.name}", style="primary"),
+            ActionButton("Add Project", f"confirm_project:{project_name}", style="primary"),
             ActionButton("Cancel", "menu:main"),
         ])])
 

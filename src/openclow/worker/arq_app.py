@@ -335,7 +335,7 @@ class WorkerSettings:
     on_shutdown = on_shutdown
     redis_settings = parse_redis_url(settings.redis_url)
     max_jobs = 2
-    job_timeout = 1800
+    job_timeout = 3600  # 1 hour — bootstrap with fresh Docker build takes ~25 min
     max_tries = 1  # stateful tasks (bootstrap, onboarding) must not auto-retry
     health_check_interval = 60
     allow_abort_jobs = True

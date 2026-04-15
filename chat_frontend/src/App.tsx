@@ -8,13 +8,22 @@ import {
 import * as Dialog from "@radix-ui/react-dialog";
 import { Thread } from "@/components/assistant-ui/thread";
 import { ThinkingContext } from "@/lib/thinking-context";
-import { PlusIcon, SettingsIcon, LogOutIcon, PencilIcon, TrashIcon, CheckIcon, XIcon } from "lucide-react";
+import { PlusIcon, SettingsIcon, LogOutIcon, PencilIcon, TrashIcon, CheckIcon, XIcon, ShieldIcon } from "lucide-react";
+import { AccessPanel } from "@/components/AccessPanel";
+import { SettingsPanel } from "@/components/SettingsPanel"; // admin-only settings
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 interface ChatThread {
   remoteId: string;
   title: string;
+  projectId?: number | null;
+}
+
+interface Project {
+  id: number;
+  name: string;
+  techStack?: string | null;
 }
 
 interface ChatMessage {
@@ -80,6 +89,19 @@ export default function App() {
   const [sidebarLoading, setSidebarLoading] = useState(true);
   const [thinkingSteps, setThinkingSteps] = useState<string[]>([]);
 
+  // Projects
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<number | null>(null);
+
+  // Current user id (for WebSocket URL)
+  const [myUserId, setMyUserId] = useState<number | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [showAccessPanel, setShowAccessPanel] = useState(false);
+  const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+
+  // WebSocket for worker progress events
+  const wsRef = useRef<WebSocket | null>(null);
+
   // Rename state
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -91,7 +113,22 @@ export default function App() {
   // Abort controller for in-progress streams
   const abortRef = useRef<AbortController | null>(null);
 
-  useEffect(() => { loadThreads(); }, []);
+  useEffect(() => { loadThreads(); loadProjects(); loadMe(); }, []);
+
+  // Open worker-progress WebSocket whenever the active thread changes
+  useEffect(() => {
+    if (!myUserId || !activeThreadId) return;
+    openWorkerSocket(myUserId, activeThreadId);
+    return () => {
+      if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [myUserId, activeThreadId]);
+
+  // Persist active thread to localStorage so reload restores it
+  useEffect(() => {
+    if (activeThreadId) localStorage.setItem("openclow_thread", activeThreadId);
+  }, [activeThreadId]);
 
   useEffect(() => {
     if (renamingId && renameInputRef.current) {
@@ -110,6 +147,71 @@ export default function App() {
     setThinkingSteps([]);
   }
 
+  async function loadMe() {
+    try {
+      const res = await fetch("/api/me", { credentials: "include" });
+      if (res.ok) {
+        const data = await res.json();
+        setMyUserId(data.id ?? null);
+        setIsAdmin(data.is_admin ?? false);
+      }
+    } catch { /* non-critical */ }
+  }
+
+  function openWorkerSocket(userId: number, sessionId: string) {
+    if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/api/ws/${userId}/${sessionId}`);
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data) as {
+          type: string;
+          text?: string;
+          message_id?: string;
+        };
+        const text = data.text ?? "";
+        const msgKey = data.message_id
+          ? `worker-msg-${data.message_id}`
+          : `worker-${sessionId}`;
+
+        if (
+          data.type === "msg_new" ||
+          data.type === "msg_update" ||
+          data.type === "msg_final" ||
+          data.type === "msg_error" ||
+          data.type === "plan_preview" ||
+          data.type === "diff_preview"
+        ) {
+          if (data.type === "msg_new") {
+            setMessages((prev) => [
+              ...prev,
+              { id: `worker-new-${Date.now()}`, role: "assistant" as const, content: text },
+            ]);
+          } else {
+            setMessages((prev) => {
+              const exists = prev.find((m) => m.id === msgKey);
+              if (exists) return prev.map((m) => m.id === msgKey ? { ...m, content: text } : m);
+              return [...prev, { id: msgKey, role: "assistant" as const, content: text }];
+            });
+          }
+
+        }
+      } catch { /* ignore malformed */ }
+    };
+    ws.onerror = () => { wsRef.current = null; };
+    wsRef.current = ws;
+  }
+
+  async function loadProjects() {
+    try {
+      const res = await fetch("/api/projects", { credentials: "include" });
+      if (res.ok) {
+        const data = await res.json();
+        setProjects(data.projects ?? []);
+      }
+    } catch { /* non-critical */ }
+  }
+
   async function loadThreads() {
     setSidebarLoading(true);
     try {
@@ -119,10 +221,34 @@ export default function App() {
         const data = await res.json();
         const list: ChatThread[] = data.threads ?? [];
         setThreads(list);
-        if (list.length > 0) await selectThread(list[0].remoteId);
+        if (list.length > 0) {
+          // Restore last active thread from localStorage, fallback to newest
+          const saved = localStorage.getItem("openclow_thread");
+          const target = (saved && list.find((t) => t.remoteId === saved))
+            ? saved
+            : list[0].remoteId;
+          await selectThread(target);
+        }
       }
     } catch { /* network error */ }
     finally { setSidebarLoading(false); }
+  }
+
+  async function selectProject(projectId: number | null, threadId: string | null) {
+    setActiveProjectId(projectId);
+    if (!threadId) return;
+    try {
+      await fetch(`/api/threads/${threadId}/project`, {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_id: projectId }),
+      });
+      // Update local thread list to reflect new project
+      setThreads((prev) => prev.map((t) =>
+        t.remoteId === threadId ? { ...t, projectId } : t
+      ));
+    } catch { /* best-effort */ }
   }
 
   async function selectThread(id: string) {
@@ -130,6 +256,9 @@ export default function App() {
     cancelStream();
     setActiveThreadId(id);
     setMessages([]);
+    // Restore project context for this thread
+    const thread = threads.find((t) => t.remoteId === id);
+    if (thread !== undefined) setActiveProjectId(thread.projectId ?? null);
     try {
       const res = await fetch(`/api/threads/${id}/messages`, { credentials: "include" });
       if (res.ok) {
@@ -402,6 +531,22 @@ export default function App() {
             <PlusIcon className="size-4" />
             New Chat
           </button>
+          {projects.length > 0 && (
+            <select
+              value={activeProjectId ?? ""}
+              onChange={(e) => {
+                const val = e.target.value;
+                selectProject(val ? Number(val) : null, activeThreadId);
+              }}
+              className="mt-2 w-full px-3 py-1.5 rounded-lg text-xs bg-secondary border border-border text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+              title="Focus agent on a project"
+            >
+              <option value="">General (no project)</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto px-2 pb-2">
@@ -433,10 +578,24 @@ export default function App() {
         </div>
 
         <div className="px-2 py-3 border-t border-border flex flex-col gap-0.5">
-          <a href="/settings" className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors">
-            <SettingsIcon className="size-4" />
-            Settings
-          </a>
+          {isAdmin && (
+            <button
+              onClick={() => setShowAccessPanel(true)}
+              className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors w-full text-left"
+            >
+              <ShieldIcon className="size-4" />
+              Access Control
+            </button>
+          )}
+          {isAdmin && (
+            <button
+              onClick={() => setShowSettingsPanel(true)}
+              className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors w-full text-left ${showSettingsPanel ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground hover:bg-accent"}`}
+            >
+              <SettingsIcon className="size-4" />
+              Settings
+            </button>
+          )}
           <a href="/chat/logout" className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors">
             <LogOutIcon className="size-4" />
             Logout
@@ -444,14 +603,21 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Chat area */}
-      <main className="flex-1 overflow-hidden bg-background">
-        <ThinkingContext.Provider value={{ steps: thinkingSteps }}>
-          <AssistantRuntimeProvider runtime={runtime}>
-            <Thread />
-          </AssistantRuntimeProvider>
-        </ThinkingContext.Provider>
-      </main>
+      {/* Chat area or settings panel */}
+      {showSettingsPanel ? (
+        <SettingsPanel onClose={() => setShowSettingsPanel(false)} />
+      ) : (
+        <main className="flex-1 overflow-hidden bg-background relative flex flex-col">
+          <ThinkingContext.Provider value={{ steps: thinkingSteps }}>
+            <AssistantRuntimeProvider runtime={runtime}>
+              <Thread />
+            </AssistantRuntimeProvider>
+          </ThinkingContext.Provider>
+        </main>
+      )}
+
+      {/* Access control panel (admin only) */}
+      <AccessPanel open={showAccessPanel} onClose={() => setShowAccessPanel(false)} />
 
       {/* Delete confirmation modal */}
       <Dialog.Root open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>

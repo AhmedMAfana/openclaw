@@ -7,7 +7,8 @@ engine = create_async_engine(
     settings.database_url,
     pool_size=5,
     max_overflow=10,
-    echo=settings.log_level == "DEBUG",
+    # Never use echo=True — SQLAlchemy adds a StreamHandler(sys.stdout) which
+    # corrupts the JSON-RPC stream when this engine is used inside MCP subprocess servers.
 )
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

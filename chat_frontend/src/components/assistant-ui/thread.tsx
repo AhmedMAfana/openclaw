@@ -199,7 +199,8 @@ const AssistantMessage: FC = () => {
     >
       <div className="wrap-break-word px-2 text-foreground leading-relaxed">
         {isRunning && isEmpty && <TinkeringIndicator />}
-        <ThinkingPanel />
+        {/* Only show thinking panel on the actively running message */}
+        {isRunning && <ThinkingPanel />}
         <MessagePrimitive.Parts>
           {({ part }) => {
             if (part.type === "text") return <MarkdownText />;

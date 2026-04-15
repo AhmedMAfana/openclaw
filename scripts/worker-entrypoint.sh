@@ -1,15 +1,18 @@
 #!/bin/bash
-# Worker entrypoint — ensures Claude credentials persist across restarts
+# Worker entrypoint — ensures Claude credentials persist across restarts.
+# HOME is resolved dynamically from the OS so no paths are hardcoded.
 
-CLAUDE_DIR="/home/openclow/.claude"
-CLAUDE_JSON="/home/openclow/.claude.json"
-CREDS_FILE="${CLAUDE_DIR}/.credentials.json"
-CONFIG_BACKUP="${CLAUDE_DIR}/.claude.json.persistent"
+# Resolve the real home dir of whoever is running this container
+export HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
+
+CLAUDE_JSON="${HOME}/.claude.json"
+CREDS_FILE="${HOME}/.claude/.credentials.json"
+CONFIG_BACKUP="${HOME}/.claude/.claude.json.persistent"
 
 # Restore .claude.json from volume if it exists
 if [ -f "$CONFIG_BACKUP" ] && [ ! -f "$CLAUDE_JSON" ]; then
     cp "$CONFIG_BACKUP" "$CLAUDE_JSON"
-    echo "[entrypoint] Restored .claude.json from volume"
+    echo "[entrypoint] Restored .claude.json from volume (user=$(id -un), home=$HOME)"
 fi
 
 # Create .claude.json if it doesn't exist at all
@@ -29,5 +32,4 @@ fi
 # Back up .claude.json to volume on every start (so it persists)
 cp "$CLAUDE_JSON" "$CONFIG_BACKUP" 2>/dev/null
 
-# Execute the actual command
 exec "$@"

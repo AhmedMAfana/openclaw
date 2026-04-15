@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from openclow.api.routes import activity, health, settings, tasks, assistant, threads, plans
+from openclow.api.routes import activity, health, settings, tasks, assistant, threads, plans, ws, actions, access
 
 app = FastAPI(title="THAG GROUP API", version="0.1.0")
 
@@ -33,6 +33,9 @@ app.include_router(settings.router, prefix="/api")
 app.include_router(assistant.router)
 app.include_router(threads.router)
 app.include_router(plans.router)
+app.include_router(ws.router)
+app.include_router(actions.router)
+app.include_router(access.router)
 
 # HTML page routes (settings dashboard + web chat login)
 from openclow.api.pages import router as pages_router  # noqa: E402
