@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from openclow.api.routes import activity, health, settings, tasks
+from openclow.api.routes import activity, health, settings, tasks, assistant, threads, plans
 
 app = FastAPI(title="THAG GROUP API", version="0.1.0")
 
@@ -24,17 +24,27 @@ async def root():
     return RedirectResponse(url="/settings")
 
 
-# Mount static files
-static_dir = Path(__file__).parent / "static"
-static_dir.mkdir(exist_ok=True)
-app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-
 # JSON API routes
 app.include_router(health.router)
 app.include_router(tasks.router, prefix="/api")
 app.include_router(activity.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
+# Web chat routes
+app.include_router(assistant.router)
+app.include_router(threads.router)
+app.include_router(plans.router)
 
-# HTML page routes (settings dashboard)
+# HTML page routes (settings dashboard + web chat login)
 from openclow.api.pages import router as pages_router  # noqa: E402
 app.include_router(pages_router)
+
+# Mount static files (AFTER routes so /chat/login etc. work)
+static_dir = Path(__file__).parent / "static"
+static_dir.mkdir(exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+# Mount web chat frontend (built React app from Vite)
+# Note: This must come AFTER the pages_router so /chat/login, /chat/api etc. can be routed first
+chat_frontend_dir = Path(__file__).parent.parent.parent.parent / "chat_frontend" / "dist"
+if chat_frontend_dir.exists():
+    app.mount("/chat", StaticFiles(directory=str(chat_frontend_dir), html=True), name="chat")

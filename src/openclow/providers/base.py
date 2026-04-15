@@ -120,7 +120,7 @@ class ChatProvider(ABC):
         ...
 
     @abstractmethod
-    async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
+    async def edit_message(self, chat_id: str, message_id: str, text: str, is_final: bool = False) -> None:
         ...
 
     @abstractmethod
@@ -142,6 +142,7 @@ class ChatProvider(ABC):
         text: str,
         keyboard: ActionKeyboard | None = None,
         parse_mode: str | None = None,
+        is_final: bool = False,
     ) -> None:
         """Edit a message with optional action buttons."""
         ...

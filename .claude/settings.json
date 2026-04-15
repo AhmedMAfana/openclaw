@@ -1,4 +1,22 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(grep -c \"bg-background\\\\|\\\\.bg-\\\\|background-color\" /Users/ahmedmoh/Desktop/projects/openclow/chat_frontend/dist/assets/*.css)",
+      "Bash(grep -c \"flex\" /Users/ahmedmoh/Desktop/projects/openclow/chat_frontend/dist/assets/*.css)",
+      "Bash(grep -o \"\\\\.flex\\\\b\\\\|\\\\.h-screen\\\\|\\\\.bg-background\\\\|\\\\.w-\\\\[260px\\\\]\" /Users/ahmedmoh/Desktop/projects/openclow/chat_frontend/dist/assets/*.css)",
+      "Bash(python -m py_compile src/openclow/api/routes/assistant.py)",
+      "Bash(timeout 15 claude -p --output-format stream-json --permission-mode plan \"Say hello\")",
+      "Bash(gtimeout 10 claude -p --output-format stream-json --permission-mode plan \"Say hello\")",
+      "Bash(claude -p --output-format stream-json --permission-mode plan \"Say hello in one word\")",
+      "Bash(claude -p --output-format stream-json --verbose --permission-mode plan \"Say hello in one word\")",
+      "Bash(claude -p --output-format stream-json --include-partial-messages --verbose --permission-mode plan \"Say hello in one word\")",
+      "Bash(claude -p --output-format stream-json --include-partial-messages --verbose --permission-mode plan \"Count to five\")",
+      "Bash(claude -p --output-format stream-json --include-partial-messages --verbose --permission-mode plan \"Write a 50-word story about a cat\")",
+      "Bash(find /Users/ahmedmoh/Desktop/projects/openclow/chat_frontend/src -type f \\\\\\( -name \"*.tsx\" -o -name \"*.ts\" \\\\\\) -exec wc -l {} \\\\;)",
+      "Bash(ls -1 /Users/ahmedmoh/Desktop/projects/openclow/src/openclow/worker/tasks/*.py)",
+      "Bash(npx tsc:*)"
+    ]
+  },
   "hooks": {
     "PostToolUse": [
       {

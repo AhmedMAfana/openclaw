@@ -22,11 +22,11 @@ log = get_logger()
 # ── Job enqueuing ────────────────────────────────────────────────
 
 
-async def enqueue_job(job_name: str, *args: Any, timeout: float = 5.0) -> Any:
+async def enqueue_job(job_name: str, *args: Any, timeout: float = 5.0, **kwargs: Any) -> Any:
     """Enqueue an arq job. Returns the job object. Raises on failure."""
     from openclow.worker.arq_app import get_arq_pool
     pool = await asyncio.wait_for(get_arq_pool(), timeout=timeout)
-    return await pool.enqueue_job(job_name, *args)
+    return await pool.enqueue_job(job_name, *args, **kwargs)
 
 
 # ── Task queries ─────────────────────────────────────────────────

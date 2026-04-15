@@ -277,3 +277,73 @@ async def provider_fields_partial(request: Request, category: str, provider_type
         "config": _mask_config(config),
         "is_available": is_available,
     })
+
+
+# ---------------------------------------------------------------------------
+# Web Chat Routes (no auth)
+# ---------------------------------------------------------------------------
+
+chat_router = APIRouter(tags=["web_chat"])
+
+
+@chat_router.get("/chat/login", response_class=HTMLResponse)
+async def chat_login(request: Request):
+    """Web chat login page."""
+    return templates.TemplateResponse(request, "chat/login.html")
+
+
+@chat_router.post("/chat/login")
+async def chat_login_post(request: Request):
+    """Handle web chat login."""
+    from openclow.api.web_auth import hash_password, verify_password, create_web_token
+
+    form = await request.form()
+    username = form.get("username", "").strip()
+    password = form.get("password", "").strip()
+
+    if not username or not password:
+        return templates.TemplateResponse(
+            request, "chat/login.html",
+            {"error": "Username and password required"},
+            status_code=400
+        )
+
+    # Look up user by username
+    async with async_session() as session:
+        result = await session.execute(
+            select(User).where(User.username == username)
+        )
+        user = result.scalar_one_or_none()
+
+    if not user or not user.web_password_hash:
+        return templates.TemplateResponse(
+            request, "chat/login.html",
+            {"error": "Invalid username or password"},
+            status_code=401
+        )
+
+    # Verify password
+    if not verify_password(password, user.web_password_hash):
+        return templates.TemplateResponse(
+            request, "chat/login.html",
+            {"error": "Invalid username or password"},
+            status_code=401
+        )
+
+    # Create token and redirect
+    token = create_web_token(user.id)
+    response = RedirectResponse(url="/chat", status_code=302)
+    response.set_cookie("web_token", token, httponly=True, max_age=30*24*3600)
+    return response
+
+
+@chat_router.get("/chat/logout")
+async def chat_logout():
+    """Clear web chat session and redirect to login."""
+    response = RedirectResponse(url="/chat/login", status_code=302)
+    response.delete_cookie("web_token")
+    return response
+
+
+# Add web chat routes without auth
+router.include_router(chat_router)

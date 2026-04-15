@@ -67,6 +67,31 @@ async def _load_conversation(chat_id: str, user_id: str = "") -> list[dict]:
         return []
 
 
+async def _load_web_history(session_id: int) -> list[dict]:
+    """Load conversation history from DB for web chat (multi-device support)."""
+    try:
+        from openclow.models.base import async_session
+        from openclow.models.web_chat import WebChatMessage
+        from sqlalchemy import select
+
+        async with async_session() as session:
+            result = await session.execute(
+                select(WebChatMessage)
+                .where(WebChatMessage.session_id == session_id)
+                .order_by(WebChatMessage.created_at.asc())
+                .limit(_CONV_MAX)
+            )
+            messages = result.scalars().all()
+
+        return [
+            {"role": m.role, "text": m.content[:2000]}
+            for m in messages
+        ]
+    except Exception as e:
+        log.warning("agent_session.db_load_failed", session_id=session_id, error=str(e))
+        return []
+
+
 async def _save_message(chat_id: str, role: str, text: str, user_id: str = ""):
     """Save a message to per-user conversation history in Redis."""
     try:
@@ -117,7 +142,8 @@ def _format_response(text: str, provider: str = "telegram") -> str:
 
 
 async def agent_session(ctx: dict, user_message: str, chat_id: str, message_id: str,
-                        project_context: str = "", chat_provider_type: str = "telegram", user_id: str = ""):
+                        project_context: str = "", chat_provider_type: str = "telegram", user_id: str = "",
+                        mode: str = "quick"):
     """Run a Claude agent session for direct user interaction.
 
     The agent has full MCP tools and can do anything:
@@ -307,30 +333,63 @@ async def _build_context(chat_id: str, project_context: str, user_id: str):
 
 async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message_id: str,
                         project_context: str = "", chat_provider_type: str = "telegram", user_id: str = ""):
-    try:
-        chat = await factory.get_chat_by_type(chat_provider_type)
-    except Exception:
-        chat = await factory.get_chat()
+    if chat_provider_type == "web":
+        chat = None
+    else:
+        try:
+            chat = await factory.get_chat_by_type(chat_provider_type)
+        except Exception:
+            chat = await factory.get_chat()
 
     try:
         from claude_agent_sdk import query, ClaudeAgentOptions
-        from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
+        from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock, StreamEvent
     except ImportError:
-        await chat.edit_message(chat_id, message_id, "Agent SDK unavailable. Install claude-agent-sdk.")
+        if chat:
+            await chat.edit_message(chat_id, message_id, "Agent SDK unavailable. Install claude-agent-sdk.")
         return
+
+    # ── Load conversation: from DB for web, from Redis for Telegram/Slack ──
+    async def _get_conv_history():
+        if chat_provider_type == "web":
+            # Extract session_id from chat_id format: "web:{user_id}:{session_id}"
+            try:
+                parts = chat_id.split(":")
+                if len(parts) >= 3:
+                    session_id = int(parts[2])
+                    return await _load_web_history(session_id)
+            except (ValueError, IndexError):
+                pass
+            return []
+        else:
+            return await _load_conversation(chat_id, user_id)
 
     # ── Run all setup in parallel: auth, cleanup, context, conversation ──
     auth_result, _, (context_parts, workspace, tunnel_url, project_name, target_pid, is_admin), conv_history, _ = await asyncio.gather(
         _check_auth_cached(),
         _cleanup_old_tasks(chat_id),
         _build_context(chat_id, project_context, user_id),
-        _load_conversation(chat_id, user_id),
-        _save_message(chat_id, "user", user_message, user_id),
+        _get_conv_history(),
+        _save_message(chat_id, "user", user_message, user_id) if chat_provider_type != "web" else asyncio.sleep(0),
     )
 
     # Auth check: block only if definitively not logged in
     if auth_result is False:
         log.warning("agent_session.auth_expired", chat_id=chat_id)
+        if chat_provider_type == "web":
+            # Web: publish auth error to Redis so the frontend gets it
+            try:
+                import redis.asyncio as aioredis
+                _r = aioredis.from_url(settings.redis_url)
+                parts = chat_id.split(":")
+                if len(parts) >= 3:
+                    _uid, _sid = parts[1], parts[2]
+                    import json as _json
+                    await _r.publish(f"wc:{_uid}:{_sid}", _json.dumps({"type": "msg_final", "text": "Claude is not authenticated. Contact your administrator."}))
+                await _r.aclose()
+            except Exception:
+                pass
+            return
         try:
             from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
             kb = ActionKeyboard(rows=[
@@ -386,6 +445,18 @@ TOOLS AVAILABLE:
 Be concise. Talk like a person, not a manual.
 """
 
+    # Add plan mode instructions if requested
+    if user_message and "mode" in locals() and user_message.get("mode") == "plan":
+        system_prompt += f"""
+PLAN MODE ENABLED:
+Before making ANY code changes or running commands, you MUST:
+1. Write a detailed markdown plan to: /workspaces/_cache/{project_name or 'general'}/plans/{{timestamp}}_plan.md
+2. Output exactly: PLAN_FILE: <full_path_to_markdown>
+3. STOP and wait for user approval before executing any code.
+
+The user will review your plan, then approve or reject it.
+"""
+
     from openclow.providers.llm.claude import _mcp_playwright
 
     base_tools = [
@@ -425,6 +496,7 @@ Be concise. Talk like a person, not a manual.
         mcp_servers=mcp_servers,
         permission_mode="bypassPermissions",
         max_turns=20,
+        include_partial_messages=True,  # yields StreamEvent for token-level streaming
     )
 
     # Stream agent response
@@ -451,12 +523,52 @@ Be concise. Talk like a person, not a manual.
     async def _show_progress(display: str):
         """Update message with text + stop button."""
         nonlocal last_update
-        if display != last_update:
-            last_update = display
-            try:
-                await chat.edit_message_with_actions(chat_id, message_id, display, _stop_kb)
-            except Exception:
-                pass
+        if chat is None or display == last_update:
+            return
+        last_update = display
+        try:
+            await chat.edit_message_with_actions(chat_id, message_id, display, _stop_kb)
+        except Exception:
+            pass
+
+    # Persistent Redis connection for web streaming (reused per token — avoids per-call overhead)
+    import redis.asyncio as aioredis
+    import json as _json
+    _web_parts = chat_id.split(":") if chat_provider_type == "web" else []
+    _web_channel = f"wc:{_web_parts[1]}:{_web_parts[2]}" if len(_web_parts) >= 3 else None
+    _web_r = aioredis.from_url(settings.redis_url) if _web_channel else None
+
+    async def _web_token(delta: str):
+        """Publish a single text delta for true token-by-token streaming."""
+        if not _web_r or not delta:
+            return
+        try:
+            await _web_r.publish(_web_channel, _json.dumps({"type": "token", "delta": delta}))
+        except Exception:
+            pass
+
+    async def _web_update(text: str):
+        """Publish full-turn text update (fallback for AssistantMessage turns)."""
+        if not _web_r:
+            return
+        try:
+            await _web_r.publish(_web_channel, _json.dumps({"type": "msg_update", "text": text}))
+        except Exception:
+            pass
+
+    async def _web_tool(tool_desc: str):
+        """Publish tool use event so the Thinking panel shows it in the browser."""
+        if not _web_r:
+            return
+        try:
+            await _web_r.publish(_web_channel, _json.dumps({
+                "type": "tool_use",
+                "tool": tool_desc,
+                "input": "",
+                "status": "running",
+            }))
+        except Exception:
+            pass
 
     try:
         async for message in query(prompt=user_message, options=options):
@@ -468,29 +580,46 @@ Be concise. Talk like a person, not a manual.
                 response_text = "Stopped by user."
                 break
 
+            # Token-level streaming: extract text deltas from content_block_delta events
+            if isinstance(message, StreamEvent):
+                if chat_provider_type == "web":
+                    evt = message.event
+                    if evt.get("type") == "content_block_delta":
+                        delta = evt.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            await _web_token(delta.get("text", ""))
+                continue
+
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         response_text = block.text
                         display = response_text[:3800]
-                        if tool_lines and _using_tools:
-                            tool_ctx = " → ".join(t.split(" ", 1)[-1][:30] for t in tool_lines[-3:])
-                            display = f"{display}\n\n{_spinner()}  `{tool_ctx}`"
-                        await _show_progress(display)
+                        if chat_provider_type == "web":
+                            await _web_update(display)
+                        else:
+                            if tool_lines and _using_tools:
+                                tool_ctx = " → ".join(t.split(" ", 1)[-1][:30] for t in tool_lines[-3:])
+                                display = f"{display}\n\n{_spinner()}  `{tool_ctx}`"
+                            await _show_progress(display)
 
                     elif isinstance(block, ToolUseBlock):
                         _using_tools = True
                         from openclow.worker.tasks._agent_base import describe_tool
-                        tool_lines.append(describe_tool(block))
+                        tool_desc = describe_tool(block)
+                        tool_lines.append(tool_desc)
                         if len(tool_lines) > 5:
                             tool_lines = tool_lines[-5:]
 
-                        tool_summary = " → ".join(t.split(" ", 1)[-1][:30] for t in tool_lines[-3:])
-                        if response_text:
-                            display = f"{response_text[:3000]}\n\n{_spinner()}  `{tool_summary}`"
+                        if chat_provider_type == "web":
+                            await _web_tool(tool_desc)
                         else:
-                            display = f"{_spinner()}  `{tool_summary}`"
-                        await _show_progress(display)
+                            tool_summary = " → ".join(t.split(" ", 1)[-1][:30] for t in tool_lines[-3:])
+                            if response_text:
+                                display = f"{response_text[:3000]}\n\n{_spinner()}  `{tool_summary}`"
+                            else:
+                                display = f"{_spinner()}  `{tool_summary}`"
+                            await _show_progress(display)
 
     except asyncio.CancelledError:
         log.warning("agent_session.cancelled", chat_id=chat_id)
@@ -500,32 +629,52 @@ Be concise. Talk like a person, not a manual.
         log.error("agent_session.failed", error=str(e), traceback=traceback.format_exc())
         from openclow.worker.tasks._agent_base import is_auth_error
         if is_auth_error(e):
-            from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
-            kb = ActionKeyboard(rows=[
-                ActionRow([ActionButton("🔑 Re-authenticate", "claude_auth")]),
-                ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
-            ])
-            try:
-                await chat.edit_message_with_actions(
-                    chat_id, message_id,
-                    "🔑 Claude auth expired.\n\nTap to re-authenticate:",
-                    kb,
-                )
-            except Exception:
-                pass
-            return
+            if chat is not None:
+                from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+                kb = ActionKeyboard(rows=[
+                    ActionRow([ActionButton("🔑 Re-authenticate", "claude_auth")]),
+                    ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+                ])
+                try:
+                    await chat.edit_message_with_actions(
+                        chat_id, message_id,
+                        "🔑 Claude auth expired.\n\nTap to re-authenticate:",
+                        kb,
+                    )
+                except Exception:
+                    pass
+            response_text = "Claude auth expired. Contact your administrator."
+            if chat_provider_type != "web":
+                return
         response_text = f"Agent error: {str(e)[:300]}"
 
     if not response_text:
         response_text = "Done."
 
     # Format response for clean display
-    final_text = _format_response(response_text[:3800], chat_provider_type)
+    if chat_provider_type == "web":
+        # Web provider: raw markdown (browser renders it)
+        final_text = response_text[:3800]
+    else:
+        final_text = _format_response(response_text[:3800], chat_provider_type)
 
     # Save assistant response to per-user conversation memory
-    await _save_message(chat_id, "assistant", final_text[:1000], user_id)
+    if chat_provider_type != "web":
+        await _save_message(chat_id, "assistant", final_text[:1000], user_id)
 
     pid = target_pid  # Already extracted above
+
+    # Web provider: publish final response to Redis for FastAPI endpoint
+    if chat_provider_type == "web":
+        try:
+            if _web_r and _web_channel:
+                await _web_r.publish(_web_channel, _json.dumps({"type": "msg_final", "text": final_text}))
+        except Exception as e:
+            log.warning("agent_session.web_publish_failed", chat_id=chat_id, error=str(e))
+        finally:
+            if _web_r:
+                await _web_r.aclose()
+        return
 
     if _is_slack:
         # Rich Block Kit response for Slack

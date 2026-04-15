@@ -1,0 +1,75 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --animate-shimmer: shimmer-sweep var(--shimmer-duration, 1000ms) linear infinite both;
+  @keyframes shimmer-sweep {
+    from { background-position: 150% 0; }
+    to { background-position: -100% 0; }
+  }
+}
+
+/* Dark theme (default) */
+:root {
+  --radius: 0.625rem;
+  --background: oklch(0.08 0.005 286);
+  --foreground: oklch(0.93 0.005 286);
+  --card: oklch(0.1 0.005 286);
+  --card-foreground: oklch(0.93 0.005 286);
+  --popover: oklch(0.12 0.005 286);
+  --popover-foreground: oklch(0.93 0.005 286);
+  --primary: oklch(0.65 0.18 260);
+  --primary-foreground: oklch(0.98 0 0);
+  --secondary: oklch(0.15 0.005 286);
+  --secondary-foreground: oklch(0.93 0.005 286);
+  --muted: oklch(0.16 0.005 286);
+  --muted-foreground: oklch(0.55 0.01 286);
+  --accent: oklch(0.16 0.005 286);
+  --accent-foreground: oklch(0.93 0.005 286);
+  --destructive: oklch(0.55 0.22 27);
+  --border: oklch(0.22 0.005 286);
+  --input: oklch(0.22 0.005 286);
+  --ring: oklch(0.45 0.12 260);
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    border-color: var(--border);
+  }
+  body {
+    margin: 0;
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  #root {
+    width: 100%;
+    height: 100vh;
+  }
+}

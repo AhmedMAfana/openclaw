@@ -14,6 +14,7 @@ from openclow.providers.registry import get_chat_provider, get_git_provider, get
 # Each import is guarded — missing optional deps shouldn't crash the whole app.
 import openclow.providers.llm.claude  # noqa: F401
 import openclow.providers.chat.telegram  # noqa: F401
+import openclow.providers.chat.web  # noqa: F401
 import openclow.providers.git.github  # noqa: F401
 
 try:
