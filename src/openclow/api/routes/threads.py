@@ -1,7 +1,6 @@
 """Web chat sessions/threads endpoints — conversation list and history."""
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, desc
-from datetime import datetime
+from sqlalchemy import select, desc, delete
 
 from openclow.api.web_auth import web_user_dep
 from openclow.models.user import User
@@ -111,6 +110,40 @@ async def archive_thread(thread_id: int, user: User = Depends(web_user_dep)):
         await session.commit()
 
     return {"status": "ok"}
+
+
+# ── Truncate endpoint (used by edit flow) ────────────────────
+
+@router.post("/threads/{thread_id}/truncate")
+async def truncate_thread_messages(thread_id: int, body: dict, user: User = Depends(web_user_dep)):
+    """Keep only the first N messages, delete the rest.
+
+    Called before re-sending an edited message so DB history stays clean.
+    Body: { "keep_count": N }
+    """
+    keep_count = int(body.get("keep_count", 0))
+    async with async_session() as session:
+        ws = await session.get(WebChatSession, thread_id)
+        if not ws or ws.user_id != user.id:
+            raise HTTPException(404, "Thread not found")
+
+        # Get all message IDs ordered by created_at
+        result = await session.execute(
+            select(WebChatMessage.id)
+            .where(WebChatMessage.session_id == thread_id)
+            .order_by(WebChatMessage.created_at.asc())
+        )
+        all_ids = [row[0] for row in result.all()]
+
+        # Delete everything after the first keep_count messages
+        ids_to_delete = all_ids[keep_count:]
+        if ids_to_delete:
+            await session.execute(
+                delete(WebChatMessage).where(WebChatMessage.id.in_(ids_to_delete))
+            )
+            await session.commit()
+
+    return {"status": "ok", "deleted": len(ids_to_delete) if ids_to_delete else 0}
 
 
 # ── History endpoint (for ThreadHistoryAdapter) ──────────────

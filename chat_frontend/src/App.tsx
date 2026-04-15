@@ -298,12 +298,71 @@ export default function App() {
     }
   }, [activeThreadId, isRunning, messages]);
 
+  // ── onEdit — user edits a previous message, truncates history and re-runs ──────
+
+  const onEdit = useCallback(async (message: AppendMessage) => {
+    if (isRunning || !activeThreadId) return;
+
+    const newText = message.content
+      .filter((p) => p.type === "text")
+      .map((p) => (p as { type: "text"; text: string }).text)
+      .join(" ")
+      .trim();
+
+    if (!newText) return;
+
+    // parentId = the last message to KEEP (the one before the edited message)
+    const parentId = (message as AppendMessage & { parentId?: string | null }).parentId ?? null;
+
+    // Find how many messages to keep (everything up to and including parentId)
+    const keepUpToIdx = parentId ? messages.findIndex((m) => m.id === parentId) : -1;
+    const keepCount = keepUpToIdx >= 0 ? keepUpToIdx + 1 : 0;
+
+    // Truncate DB — best-effort so history stays clean for the agent
+    if (activeThreadId) {
+      fetch(`/api/threads/${activeThreadId}/truncate`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keep_count: keepCount }),
+      }).catch(() => {});
+    }
+
+    const newAsstId = `asst-edit-${Date.now()}`;
+    const newUserMsgId = `user-edit-${Date.now()}`;
+
+    // Update local state: keep messages up to parentId, add new user + empty assistant
+    setMessages([
+      ...messages.slice(0, keepCount),
+      { id: newUserMsgId, role: "user", content: newText },
+      { id: newAsstId, role: "assistant", content: "" },
+    ]);
+    setThinkingSteps([]);
+    setIsRunning(true);
+
+    try {
+      await streamAssistant(newAsstId, {
+        commands: [{ type: "add-message", message: { role: "user", parts: [{ type: "text", text: newText }] } }],
+        threadId: activeThreadId,
+        mode: "quick",
+      });
+    } catch (e: unknown) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      setMessages((prev) =>
+        prev.map((m) => m.id === newAsstId ? { ...m, content: `Error: ${errMsg}` } : m)
+      );
+    } finally {
+      setIsRunning(false);
+    }
+  }, [activeThreadId, isRunning, messages]);
+
   // ── Runtime ──────────────────────────────────────────────────────────────────
 
   const runtime = useExternalStoreRuntime<ChatMessage>({
     messages,
     isRunning,
     onNew,
+    onEdit,
     onReload,
     convertMessage: (msg) => ({
       id: msg.id,
