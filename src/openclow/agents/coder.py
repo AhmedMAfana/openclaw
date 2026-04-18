@@ -7,39 +7,112 @@ from openclow.utils.logging import get_logger
 
 log = get_logger()
 
-CODER_SYSTEM_PROMPT = """You are a senior developer working on "{project_name}" ({tech_stack}).
+CODER_SYSTEM_PROMPT = """You are a senior developer implementing changes to "{project_name}" ({tech_stack}).
 
 Project description: {description}
 {agent_system_prompt}
 
-RULES:
-1. Read existing code first. Follow the project's patterns and conventions.
-2. Create migrations with php artisan make:migration. Do NOT run php artisan migrate.
-3. Install packages if needed (composer require, npm install).
-4. Run npm run build to verify frontend compiles.
-5. Run php artisan test to verify tests pass.
-6. Stage all changes with git add.
-7. Do NOT commit or push — the orchestrator handles that.
-8. If tests fail, fix the issues and re-run tests.
+PLAN TO FOLLOW:
+{plan}
+
+DOCKER ENVIRONMENT:
+- App container: {app_container}
+- Full container name: {app_container_full}
+- Run commands: docker_exec("{app_container_full}", "command")
+- Check health: container_health("{app_container_full}")
+- Read logs: container_logs("{app_container_full}")
+- NEVER run docker compose up/down — containers are managed externally
+
+## Pre-Flight (Do This First)
+
+### 1. Container health check
+- Run container_health("{app_container_full}")
+- HEALTHY → proceed immediately
+- UNHEALTHY:
+  a. Read container_logs("{app_container_full}") — last 50 lines
+  b. Identify the specific error (crash, missing config, port conflict)
+  c. Apply ONE targeted fix (edit .env, fix config, restart_container)
+  d. Re-check health
+  e. Still broken → output: BLOCKED: Container {app_container_full} unhealthy — [specific error]
+
+### 2. Read existing patterns before writing code
+Before editing any file:
+- Read the files listed in the plan
+- Find 1–2 similar existing implementations (e.g. if adding an endpoint, read an existing one)
+- Follow the same naming conventions, error handling style, test patterns
+- Search for any existing implementation of what you're about to write — reuse/extend it instead of duplicating
+
+## Implementation Rules
+
+1. Follow the plan step by step, in order
+2. After each step, output on its own line:
+   STEP_DONE: [step number] - [what you changed and in which file(s)]
+3. After each file edit: Read the file to confirm the change applied correctly
+4. After all steps: run tests using the project's existing test command
+5. If tests fail: fix the failure before outputting DONE_SUMMARY
+6. Stage all changed files: git add [specific files] — never git add .
+7. Do NOT commit or push
+
+## When to Output BLOCKED
+
+Output `BLOCKED: [reason]` and stop if:
+- A required env var or secret is missing from .env and you can't create it
+- An external service required by the feature isn't configured
+- The plan references a file/resource that doesn't exist and you can't infer it
+- Container is broken and can't be fixed in one targeted attempt
+
+Do NOT use BLOCKED for: failing tests, lint errors, or anything you can fix.
+
+## Final Output
+
+After all steps complete and tests pass:
+
+DONE_SUMMARY:
+Files modified: [comma-separated every file touched]
+Tests: [PASS / FAIL / SKIPPED — reason if not passing]
+Description: [2–3 sentences: what was implemented, how to verify it]
 """
 
-FIX_PROMPT = """Fix these review issues. Verify fixes, run tests, stage with git add.
+FIX_PROMPT = """Fix the following code review issues. Be surgical — only change what is flagged.
 
-{issues}"""
+ISSUES TO FIX:
+{issues}
+
+RULES:
+- Fix CRITICAL issues first — these block the merge
+- Fix WARNING issues unless the fix is out of scope (note this explicitly)
+- Skip SUGGESTION-level items unless trivially simple (1–2 lines)
+- Do NOT refactor, rename, or clean up code that isn't directly flagged
+- After each fix: Read the file to confirm the change
+- Run tests: docker_exec to run the project's test command
+- Stage each fix: git add [file]
+
+Final output:
+
+FIX_SUMMARY:
+Fixed: [list of issues resolved]
+Skipped: [any issues not fixed, with reason]
+Tests: [PASS / FAIL / SKIPPED]
+"""
 
 MCP_GIT_VERSION = "mcp-server-git==0.6.2"
 
 
-async def run(workspace_path: str, task: Task) -> AsyncIterator:
+async def run(workspace_path: str, task: Task, plan: str = "") -> AsyncIterator:
     """Run the coder agent on the workspace."""
     from claude_agent_sdk import query, ClaudeAgentOptions
 
     project = task.project
+    app_container = project.app_container_name or "app"
+    app_container_full = f"openclow-{project.name}-{app_container}-1"
     system_prompt = CODER_SYSTEM_PROMPT.format(
         project_name=project.name,
         tech_stack=project.tech_stack or "Unknown",
         description=project.description or "",
         agent_system_prompt=project.agent_system_prompt or "",
+        plan=plan or "No specific plan — implement the task as you see fit.",
+        app_container=app_container,
+        app_container_full=app_container_full,
     )
 
     from openclow.providers.llm.claude import _mcp_docker
@@ -90,11 +163,19 @@ async def run_fix(workspace_path: str, task: Task, issues: str) -> AsyncIterator
 
     from openclow.providers.llm.claude import _mcp_docker
 
+    app_container = project.app_container_name or "app"
+    app_container_full = f"openclow-{project.name}-{app_container}-1"
+
     options = ClaudeAgentOptions(
         cwd=workspace_path,
         system_prompt=(
-            f'You are fixing code review issues in "{project.name}" ({project.tech_stack}).\n'
-            f"Fix each issue, run tests via docker_exec MCP tool, stage changes with git add. Do NOT commit."
+            f'You are fixing code review issues in "{project.name}" ({project.tech_stack or "Unknown"}).\n'
+            f"Project description: {project.description or ''}\n"
+            f"Project conventions: {project.agent_system_prompt or ''}\n\n"
+            f"Docker environment:\n"
+            f"- App container: {app_container}\n"
+            f"- Full container name: {app_container_full}\n"
+            f"- Run commands: docker_exec(\"{app_container_full}\", \"command\")\n"
         ),
         model="claude-sonnet-4-6",  # Fixes are straightforward
         allowed_tools=[

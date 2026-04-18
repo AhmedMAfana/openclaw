@@ -12,47 +12,67 @@ from openclow.utils.logging import get_logger
 log = get_logger()
 
 _SYSTEM_PROMPT = """\
-Senior DevOps engineer. You have FULL CONTROL over Docker infrastructure via MCP tools.
+You are a senior DevOps engineer with full control over Docker infrastructure and Cloudflare tunnels via MCP tools.
 
-AVAILABLE TOOLS:
-- compose_build — build images only (no start). Use when you need to rebuild after Dockerfile changes.
-- compose_up — start a stack. Set build=True to build images first then start.
-  compose_up(build=True) handles Docker-in-Docker path translation automatically.
-- compose_down/compose_ps — stop stack / list containers in stack
-- container_logs/container_health — inspect containers
-- docker_exec — run ANY command inside a running container
-- restart_container — restart specific containers
-- list_containers — see all containers
-- tunnel_start/tunnel_stop/tunnel_get_url — manage Cloudflare tunnels
-- Read/Edit/Glob/Grep — read and modify files on host
+## Available Tools
 
-CRITICAL ARCHITECTURE:
-- Project apps run inside Docker containers (managed by docker-compose).
-- Cloudflare tunnels run on the WORKER HOST, NOT inside project containers.
-- NEVER run "which cloudflared" or "cloudflared" inside containers — it does not exist there.
-- Use tunnel_start/tunnel_get_url/tunnel_stop MCP tools for tunnel management.
-- Always read container_logs BEFORE attempting fixes — understand the error first.
-- Docker-in-Docker: the worker runs in a container but uses the host Docker socket.
-  Build contexts use container paths; volume mounts use host paths. The MCP tools handle
-  this automatically — just call compose_up(build=True) or compose_build().
+- compose_build — rebuild Docker images only (no start). Use after Dockerfile changes.
+- compose_up — start a stack. Set build=True to rebuild images first.
+  Docker-in-Docker path translation is handled automatically.
+- compose_down / compose_ps — stop stack / list running containers
+- container_logs / container_health — inspect container state and logs
+- docker_exec — run any command inside a running container
+- restart_container — restart a specific container
+- list_containers — list all containers on the host
+- tunnel_start / tunnel_stop / tunnel_get_url — manage Cloudflare tunnels (on WORKER HOST)
+- Read / Edit / Glob / Grep — read and modify files on the host filesystem
 
-RULES:
-- No Bash. Use ONLY the MCP tools above.
-- When a command fails, read the error output carefully.
-- Use docker_exec to investigate: pwd, ls, cat, env (inside containers)
-- Fix the root cause, not the symptom.
-- NEVER repeat a failed approach. Always try something new.
-- NEVER say you can't fix it. You have all the tools.
-- NEVER modify docker-compose.yml image names or build contexts — they are set by the project.
-- NEVER use sed to change docker-compose.yml — use Edit tool if you must change a file.
-- If an image doesn't exist, use compose_up with build=True or compose_build.
-- If "port already allocated", find and stop the conflicting container first.
+## Critical Architecture
 
-OUTPUT FORMAT:
-- STATUS: <what you're doing now>
-- DIAGNOSIS: <what's wrong and why>
-- ACTION: <what you're fixing>
-- FIXED: <tunnel_url or summary> — when everything works
+- Project apps run inside Docker containers managed by docker-compose
+- Cloudflare tunnels run on the WORKER HOST, NOT inside project containers
+- NEVER run "cloudflared" or "which cloudflared" inside a container — it does not exist there
+- Use tunnel_start / tunnel_get_url / tunnel_stop MCP tools exclusively for tunnel management
+- Docker-in-Docker: the worker runs in a container but accesses the host Docker socket via MCP
+  Build contexts use container paths; volume mounts use host paths — MCP handles this automatically
+
+## Rules
+
+- No Bash. Use ONLY the MCP tools listed above.
+- Always read container_logs BEFORE attempting any fix — understand the error first
+- Use docker_exec to investigate inside containers: pwd, ls, cat files, check env vars
+- NEVER run 'curl --unix-socket /run/docker.sock' or any Docker API call via docker_exec — the Docker socket is NOT mounted inside project containers and will hang forever
+- Fix the root cause, not the symptom
+- NEVER repeat a failed approach — try something completely different each time
+- NEVER modify docker-compose.yml image names or build contexts — they are set by the project
+- NEVER use sed on docker-compose.yml — use the Edit tool if you must modify a file
+- If image doesn't exist: compose_up with build=True, or compose_build first
+- If "port already allocated": list_containers to find the conflict, stop it, then retry
+- If tunnel_start fails: check if another tunnel is running for the same project with tunnel_get_url first
+- NEVER GIVE UP. The word "unfixable" does not exist. If one approach fails, try a completely different one. Keep going until fixed or all turns used.
+
+## Auth / Private Packages
+
+- If auth.json exists in the workspace root: it contains Composer authentication tokens for private packages (Nova, Spark, Packagist, etc.).
+- BEFORE any composer install or Docker build that involves private packages: copy auth.json to ~/.composer/auth.json using docker_exec or the Edit tool.
+- If a Docker build fails with HTTP 401 or 403 on a package URL: this is an auth failure. Apply auth.json and rebuild with compose_up(build=True).
+- Command to apply inside a container: `cp /path/to/workspace/auth.json ~/.composer/auth.json`
+
+## Workflow for Each Fix
+
+1. Read state: container_health + container_logs — identify the specific error
+2. Fix: edit files or use docker_exec to correct config inside container
+3. Rebuild/restart: compose_up(build=True) if Dockerfile changed, restart_container otherwise
+4. Verify: wait 8–10s, then container_health to confirm recovery
+5. If tunnel needed: tunnel_get_url first — only call tunnel_start if no URL exists
+
+## Output Format
+
+Report each step with:
+STATUS: <what you're doing now>
+DIAGNOSIS: <specific root cause — not "config issue" but "missing env var DB_HOST">
+ACTION: <what fix you applied>
+FIXED: <tunnel_url or fix summary> — output this only when everything is confirmed working
 """
 
 
@@ -104,12 +124,14 @@ class RepairCard:
     async def render(self):
         if not self.chat:
             return
+        if hasattr(self.chat, "send_progress_card"):
+            await self._emit_web_card()
+            return
+        # Telegram/Slack: existing text path (unchanged)
         try:
             if self.phase == "done":
-                # Final state — no cancel button
                 await self.chat.edit_message(self.chat_id, self.message_id, self._render())
             else:
-                # Working state — show cancel button
                 from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
                 kb = ActionKeyboard(rows=[
                     ActionRow([ActionButton("⏹ Cancel", f"cancel_repair:{self.chat_id}:{self.message_id}", style="danger")]),
@@ -117,6 +139,49 @@ class RepairCard:
                 await self.chat.edit_message_with_actions(
                     self.chat_id, self.message_id, self._render(), kb,
                 )
+        except Exception:
+            pass
+
+    async def _emit_web_card(self):
+        """Publish a structured progress_card event for web chat."""
+        elapsed = int(time.time() - self.start_time)
+        # Map the 3 RepairCard phases to step list
+        checking_done = self.phase in ("repairing", "done")
+        repairing_done = self.phase == "done"
+        steps = [
+            {
+                "name": "Check containers",
+                "status": "done" if checking_done else "running",
+                "detail": "",
+            },
+            {
+                "name": "Repair",
+                "status": (
+                    "done" if repairing_done
+                    else "running" if self.phase == "repairing"
+                    else "pending"
+                ),
+                "detail": self.status if self.phase == "repairing" else "",
+            },
+            {
+                "name": "Verify",
+                "status": "done" if repairing_done else "pending",
+                "detail": self.result_url or "",
+            },
+        ]
+        attempt_str = f" (attempt {self._attempt})" if self._attempt > 1 else ""
+        try:
+            await self.chat.send_progress_card(self.chat_id, self.message_id, {
+                "title": f"{self.project_name}{attempt_str}",
+                "elapsed": elapsed,
+                "overall_status": (
+                    "done" if self.phase == "done" and self.result_url
+                    else "failed" if self.phase == "done"
+                    else "running"
+                ),
+                "steps": steps,
+                "footer": self.result_url or "",
+            })
         except Exception:
             pass
 
@@ -140,11 +205,32 @@ class _Cancelled(Exception):
 
 
 async def _is_cancelled(chat_id: str, message_id: str) -> bool:
-    """Check if user cancelled this repair via Redis flag."""
+    """Check if user cancelled this repair via Redis flag.
+
+    Checks both the message-specific key (Telegram/Slack cancel button)
+    and the session-level key set by the web Stop button.
+    """
     try:
         from openclow.models import get_redis
-        r = await get_redis()
-        return bool(await r.get(f"cancel_repair:{chat_id}:{message_id}"))
+        from openclow.settings import settings
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(settings.redis_url)
+        # Message-specific key (Telegram/Slack inline cancel)
+        val = await r.get(f"cancel_repair:{chat_id}:{message_id}")
+        if val:
+            await r.aclose()
+            return True
+        # Session-level key set by web Stop button: web:{user_id}:{session_id}
+        if chat_id.startswith("web:"):
+            parts = chat_id.split(":")
+            if len(parts) == 3:
+                session_id = parts[2]
+                val2 = await r.get(f"openclow:cancel_session:{session_id}")
+                if val2:
+                    await r.aclose()
+                    return True
+        await r.aclose()
+        return False
     except Exception:
         return False
 
@@ -264,7 +350,7 @@ async def run_repair_agent(
         system_prompt=_SYSTEM_PROMPT,
         model="claude-sonnet-4-6",
         allowed_tools=[
-            "Read", "Glob", "Grep",
+            "Read", "Write", "Edit", "Glob", "Grep",
             "mcp__docker__compose_build",
             "mcp__docker__compose_up",
             "mcp__docker__compose_ps",

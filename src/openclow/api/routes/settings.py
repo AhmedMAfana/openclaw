@@ -1,6 +1,7 @@
 """Settings API — config CRUD, connection tests, project/user management."""
 from __future__ import annotations
 
+import html as _html
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -799,7 +800,7 @@ async def slack_channels_select():
             )
             return HTMLResponse(html)
     except Exception as e:
-        return HTMLResponse(f'<p class="text-xs text-red-500">Error: {str(e)[:100]}</p>')
+        return HTMLResponse(f'<p class="text-xs text-red-500">Error: {_html.escape(str(e)[:100])}</p>')
 
 
 @router.post("/channels")

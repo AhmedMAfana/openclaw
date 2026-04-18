@@ -46,6 +46,7 @@ async def list_threads(user: User = Depends(web_user_dep)):
                 "title": s.title,
                 "status": "regular",
                 "projectId": s.project_id,
+                "lastMessageAt": s.last_message_at.isoformat() if s.last_message_at else s.created_at.isoformat(),
             }
             for s in sessions
         ]
@@ -214,11 +215,111 @@ async def list_projects(user: User = Depends(web_user_dep)):
     """Return accessible projects for the project selector (filtered by user access)."""
     from openclow.services.access_service import get_accessible_projects_for_mcp
     accessible, _ = await get_accessible_projects_for_mcp(user.id, user.is_admin)
-    # Only show active projects in the selector
-    active = [p for p in accessible if p.status == "active"]
     return {
         "projects": [
-            {"id": p.id, "name": p.name, "techStack": p.tech_stack}
-            for p in active
+            {"id": p.id, "name": p.name, "techStack": p.tech_stack, "status": p.status}
+            for p in accessible
         ]
     }
+
+
+# ── Session job cancellation ─────────────────────────────────
+
+@router.post("/threads/{session_id}/cancel")
+async def cancel_session_jobs(session_id: int, user: User = Depends(web_user_dep)):
+    """Abort all arq jobs enqueued during this session. Called when user clicks Stop."""
+    import json as _json
+    chat_id = f"web:{user.id}:{session_id}"
+    key = f"openclow:session_jobs:{chat_id}"
+
+    try:
+        import redis.asyncio as aioredis
+        from openclow.settings import settings
+        from arq import create_pool
+        from openclow.worker.arq_app import parse_redis_url
+
+        r = aioredis.from_url(settings.redis_url)
+        job_ids = await r.lrange(key, 0, -1)
+        await r.delete(key)
+        # Set session-level cancel flag so running worker tasks (coder, repair, bootstrap)
+        # bail out cleanly on their next iteration — survives even if arq abort races
+        await r.set(f"openclow:cancel_session:{session_id}", "1", ex=600)
+        await r.aclose()
+
+        # ── Immediately mark in-progress progress cards as cancelled in DB ──
+        # Only touches __PROGRESS_CARD__ messages — never plain text stubs.
+        # __LOADING__ stubs (send_message("") placeholders) are deleted so they
+        # don't show stray "Cancelled" text in the chat.
+        try:
+            import sqlalchemy as _sa
+            from openclow.models.base import async_session as _db_session
+            from openclow.models.web_chat import WebChatMessage
+
+            async with _db_session() as db:
+                result = await db.execute(
+                    _sa.select(WebChatMessage).where(
+                        WebChatMessage.session_id == session_id,
+                        WebChatMessage.role == "assistant",
+                        WebChatMessage.is_complete == False,  # noqa: E712
+                    ).order_by(WebChatMessage.created_at.desc()).limit(10)
+                )
+                msgs = result.scalars().all()
+                updated_cards = []
+                for msg in msgs:
+                    if msg.content.startswith("__PROGRESS_CARD__"):
+                        try:
+                            card = _json.loads(msg.content[len("__PROGRESS_CARD__"):])
+                            if card.get("overall_status") == "running":
+                                for step in card.get("steps", []):
+                                    if step.get("status") == "running":
+                                        step["status"] = "failed"
+                                        step["detail"] = "cancelled"
+                                card["overall_status"] = "failed"
+                                card["footer"] = "Cancelled by user"
+                                msg.content = f"__PROGRESS_CARD__{_json.dumps(card)}"
+                                msg.is_complete = True
+                                updated_cards.append((msg.id, card))
+                        except Exception:
+                            pass
+                    elif msg.content in ("", "__LOADING__"):
+                        # Delete stub messages — they have no content worth keeping
+                        await db.delete(msg)
+                await db.commit()
+
+            # Publish updated cards via WebSocket so connected clients update instantly
+            if updated_cards:
+                r2 = aioredis.from_url(settings.redis_url)
+                channel = f"wc:{user.id}:{session_id}"
+                try:
+                    for msg_id, card in updated_cards:
+                        await r2.publish(channel, _json.dumps({
+                            "type": "progress_card",
+                            "message_id": str(msg_id),
+                            "card": card,
+                        }))
+                finally:
+                    await r2.aclose()
+        except Exception as e:
+            log.warning("session.cancel_card_update_failed", error=str(e))
+
+        if not job_ids:
+            return {"cancelled": 0}
+
+        pool = await create_pool(parse_redis_url(settings.redis_url))
+        cancelled = 0
+        for jid in job_ids:
+            jid_str = jid.decode() if isinstance(jid, bytes) else jid
+            try:
+                job = pool.job(jid_str)
+                await job.abort(timeout=2)
+                cancelled += 1
+            except Exception:
+                pass
+        await pool.aclose()
+
+        log.info("session.cancelled", session_id=session_id, user_id=user.id, jobs=cancelled)
+        return {"cancelled": cancelled}
+
+    except Exception as e:
+        log.warning("session.cancel_failed", error=str(e))
+        return {"cancelled": 0, "error": str(e)}

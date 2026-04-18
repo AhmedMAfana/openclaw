@@ -22,6 +22,37 @@ from sqlalchemy import select
 mcp = FastMCP("actions")
 
 
+async def _fresh_web_message_id(chat_id: str, existing_message_id: str) -> str:
+    """For web chat: create a NEW message for worker cards instead of reusing the
+    agent's placeholder. This prevents the card from overwriting the agent's text
+    response on page refresh (card wins in DB because send_progress_card persists it).
+    For non-web providers, returns existing_message_id unchanged."""
+    if not chat_id.startswith("web:"):
+        return existing_message_id
+    try:
+        from openclow.providers import factory
+        web_chat = await factory.get_chat_by_type("web")
+        return await web_chat.send_message(chat_id, "")
+    except Exception:
+        return existing_message_id
+
+
+async def _track_job(chat_id: str, job_id: str) -> None:
+    """Store enqueued job ID in Redis so the session cancel endpoint can abort it."""
+    if not chat_id.startswith("web:"):
+        return
+    try:
+        import redis.asyncio as aioredis
+        from openclow.settings import settings
+        r = aioredis.from_url(settings.redis_url)
+        key = f"openclow:session_jobs:{chat_id}"
+        await r.lpush(key, job_id)
+        await r.expire(key, 7200)  # 2h TTL — jobs finish long before this
+        await r.aclose()
+    except Exception:
+        pass
+
+
 def _provider_type(chat_id: str) -> str:
     """Detect chat provider type from chat_id prefix.
 
@@ -160,7 +191,7 @@ async def system_status() -> str:
         from openclow.settings import settings
         r = aioredis.from_url(settings.redis_url)
         await r.ping()
-        queue_len = await r.llen("arq:queue")
+        queue_len = await r.zcard("arq:queue")
         checks.append(f"Redis: healthy | queue: {queue_len} jobs")
         await r.aclose()
     except Exception as e:
@@ -195,9 +226,142 @@ async def system_status() -> str:
 
 
 @mcp.tool()
-async def trigger_task(project_name: str, description: str, chat_id: str) -> str:
-    """Create a development task and start processing. Goes through:
-    plan → user approves → code → review → PR.
+async def project_health(project_name: str, auto_fix: bool = True) -> str:
+    """Health check for a project: DB status, live tunnel verify, container state.
+
+    Verifies the tunnel URL actually responds (HTTP check) — not just what's in the DB.
+    If auto_fix=True (default): automatically restarts a dead tunnel and re-syncs app config.
+    Returns full health summary including the verified live URL.
+
+    IMPORTANT — what to do with the result:
+    - If "containers: none running" → call docker_up() IMMEDIATELY. Do not report this to the user without fixing it first.
+    - If "tunnel: dead" but containers are running → auto_fix already tried to restart. If it failed, call docker_up() to re-verify everything.
+    - If "containers: none running" AND tunnel is dead → call docker_up() which will fix both.
+    - A tunnel URL shown alongside "containers: none running" is a broken URL — do NOT show it to the user.
+    - Only report a live, serving URL — one where containers are up AND tunnel responds.
+    """
+    from sqlalchemy import select
+    from openclow.models import Project, async_session
+    import asyncio
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Project).where(Project.name == project_name)
+        )
+        proj = result.scalar_one_or_none()
+
+    if not proj:
+        return f"Project '{project_name}' not found in DB."
+
+    # Tunnel URL is stored in PlatformConfig, not on Project model
+    from openclow.services.tunnel_service import get_tunnel_url, start_tunnel
+    stored_url = await get_tunnel_url(project_name)
+    compose_project = f"openclow-{project_name}"
+
+    # ── Step 1: check containers first — ground truth ──────────────────────
+    containers = ""
+    containers_running = False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "ps",
+            "--filter", f"label=com.docker.compose.project={compose_project}",
+            "--format", "{{.Names}}: {{.Status}}",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        containers = stdout.decode().strip()
+        containers_running = bool(containers)
+    except Exception:
+        pass
+
+    # ── Step 2: check tunnel HTTP — but only trust it if containers are up ──
+    tunnel_status = "none"
+    tunnel_alive = False
+    if stored_url:
+        try:
+            import httpx
+            async with httpx.AsyncClient(follow_redirects=True, timeout=8) as http:
+                resp = await http.get(stored_url)
+                if resp.status_code < 502 and containers_running:
+                    # Tunnel alive AND containers up — genuine healthy state
+                    tunnel_status = f"alive: {stored_url}"
+                    tunnel_alive = True
+                elif resp.status_code < 502 and not containers_running:
+                    # Tunnel "responds" but containers are gone — stale/broken state
+                    tunnel_status = f"stale (responds HTTP {resp.status_code} but NO containers running)"
+                    tunnel_alive = False  # force auto-fix
+                else:
+                    tunnel_status = f"dead (HTTP {resp.status_code})"
+        except Exception:
+            tunnel_status = "dead (no response)"
+
+    # ── Step 3: auto-fix — fires when tunnel dead/stale OR containers down ──
+    if auto_fix and proj.status == "active" and (not tunnel_alive or not containers_running):
+        try:
+            from openclow.settings import settings
+            import os
+
+            workspace = os.path.join(settings.workspace_base_path, "_cache", project_name)
+            service_name = proj.app_container_name or "app"
+
+            # Find container IP for tunnel target
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "ps",
+                "--filter", f"label=com.docker.compose.project={compose_project}",
+                "--filter", f"label=com.docker.compose.service={service_name}",
+                "--format", "{{.Names}}",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+            container_name = stdout.decode().strip().splitlines()[0] if stdout.decode().strip() else ""
+
+            container_ip = ""
+            if container_name:
+                proc2 = await asyncio.create_subprocess_exec(
+                    "docker", "inspect",
+                    "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                    container_name,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                )
+                out2, _ = await proc2.communicate()
+                container_ip = out2.decode().strip()
+
+            port = proj.app_port or 80
+            target = f"http://{container_ip}:{port}" if container_ip else None
+
+            if target:
+                new_url = await start_tunnel(project_name, target)
+                if new_url:
+                    if os.path.exists(workspace):
+                        from openclow.worker.tasks.bootstrap import _configure_app_for_tunnel
+                        await _configure_app_for_tunnel(workspace, new_url, compose_project)
+                    tunnel_status = f"restarted: {new_url} (config synced)"
+                    tunnel_alive = True
+                else:
+                    tunnel_status = "dead — tunnel restart failed"
+            else:
+                if not containers_running:
+                    tunnel_status = "dead — no containers running (call docker_up to start them)"
+                else:
+                    tunnel_status = "dead — no app container found to tunnel to"
+        except Exception as e:
+            tunnel_status = f"dead — auto-fix failed: {str(e)[:80]}"
+
+    lines = [
+        f"status: {proj.status}",
+        f"tunnel: {tunnel_status}",
+        f"stack: {proj.tech_stack or 'unknown'}",
+        f"containers:\n{containers}" if containers_running else "containers: none running",
+    ]
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def trigger_task(project_name: str, description: str, chat_id: str, skip_planning: bool = False) -> str:
+    """Create a development task and start processing.
+    skip_planning=False (default): plan → user approves → code → review → PR.
+    skip_planning=True (quick mode): skip plan step, go straight to coding.
     chat_id is the chat to send updates to."""
     from openclow.services.access_service import is_tool_allowed
     user_id, is_admin, accessible_ids, effective_role = await _get_web_access_context(chat_id)
@@ -238,8 +402,12 @@ async def trigger_task(project_name: str, description: str, chat_id: str) -> str
 
     from openclow.worker.arq_app import get_arq_pool
     pool = await asyncio.wait_for(get_arq_pool(), timeout=5)
-    await pool.enqueue_job("execute_task", str(task_id))
+    job = await pool.enqueue_job("execute_task", str(task_id), skip_planning)
+    if job:
+        await _track_job(chat_id, job.job_id)
 
+    if skip_planning:
+        return f"Task created ({str(task_id)[:8]}). Starting immediately — no plan step. I'll notify you when coding is complete."
     return f"Task created ({str(task_id)[:8]}). I'll analyze the codebase and send you a plan to approve."
 
 
@@ -255,7 +423,10 @@ async def trigger_addproject(repo_url: str, chat_id: str, message_id: str) -> st
 
     from openclow.worker.arq_app import get_arq_pool
     pool = await asyncio.wait_for(get_arq_pool(), timeout=5)
-    await pool.enqueue_job("onboard_project", repo_url, chat_id, message_id, _provider_type(chat_id))
+    card_msg_id = await _fresh_web_message_id(chat_id, message_id)
+    job = await pool.enqueue_job("onboard_project", repo_url, chat_id, card_msg_id, _provider_type(chat_id))
+    if job:
+        await _track_job(chat_id, job.job_id)
     return f"Onboarding started for {repo_url}. I'm cloning and analyzing the project structure."
 
 
@@ -285,7 +456,10 @@ async def unlink_project(project_name: str, chat_id: str, message_id: str) -> st
 
     from openclow.worker.arq_app import get_arq_pool
     pool = await asyncio.wait_for(get_arq_pool(), timeout=5)
-    await pool.enqueue_job("unlink_project_task", project_id, chat_id, message_id, _provider_type(chat_id))
+    card_msg_id = await _fresh_web_message_id(chat_id, message_id)
+    job = await pool.enqueue_job("unlink_project_task", project_id, chat_id, card_msg_id, _provider_type(chat_id))
+    if job:
+        await _track_job(chat_id, job.job_id)
     return f"Unlinking {project_name}. Stopping Docker and tunnel..."
 
 
@@ -312,7 +486,10 @@ async def remove_project(project_name: str, chat_id: str, message_id: str) -> st
 
     from openclow.worker.arq_app import get_arq_pool
     pool = await asyncio.wait_for(get_arq_pool(), timeout=5)
-    await pool.enqueue_job("remove_project_task", project_id, chat_id, message_id, _provider_type(chat_id))
+    card_msg_id = await _fresh_web_message_id(chat_id, message_id)
+    job = await pool.enqueue_job("remove_project_task", project_id, chat_id, card_msg_id, _provider_type(chat_id))
+    if job:
+        await _track_job(chat_id, job.job_id)
     return f"Removing {project_name} completely. This will delete everything."
 
 
@@ -344,7 +521,10 @@ async def relink_project(project_name: str, chat_id: str, message_id: str) -> st
 
     from openclow.worker.arq_app import get_arq_pool
     pool = await asyncio.wait_for(get_arq_pool(), timeout=5)
-    await pool.enqueue_job("bootstrap_project", project_id, chat_id, message_id, _provider_type(chat_id))
+    card_msg_id = await _fresh_web_message_id(chat_id, message_id)
+    job = await pool.enqueue_job("bootstrap_project", project_id, chat_id, card_msg_id, _provider_type(chat_id))
+    if job:
+        await _track_job(chat_id, job.job_id)
     return f"Re-linking {project_name}. Running full bootstrap setup..."
 
 
@@ -367,10 +547,23 @@ async def docker_up(project_name: str, chat_id: str, message_id: str) -> str:
         if accessible_ids is not None and project.id not in accessible_ids:
             return f"Access denied: you don't have access to project '{project_name}'."
         project_id = project.id
+        project_status = project.status
+
+    # Guard: don't start a docker_up job while bootstrap is already running —
+    # both would compete for the same containers and create two progress cards.
+    if project_status == "bootstrapping":
+        return (
+            f"Bootstrap is already running for '{project_name}'. "
+            f"Do NOT call docker_up — the bootstrap job handles Docker startup itself. "
+            f"Use poll_project_ready('{project_name}') to track progress."
+        )
 
     from openclow.worker.arq_app import get_arq_pool
     pool = await asyncio.wait_for(get_arq_pool(), timeout=5)
-    await pool.enqueue_job("docker_up_task", project_id, chat_id, message_id, _provider_type(chat_id))
+    card_msg_id = await _fresh_web_message_id(chat_id, message_id)
+    job = await pool.enqueue_job("docker_up_task", project_id, chat_id, card_msg_id, _provider_type(chat_id))
+    if job:
+        await _track_job(chat_id, job.job_id)
     return f"Starting Docker for {project_name}..."
 
 
@@ -396,7 +589,10 @@ async def docker_down(project_name: str, chat_id: str, message_id: str) -> str:
 
     from openclow.worker.arq_app import get_arq_pool
     pool = await asyncio.wait_for(get_arq_pool(), timeout=5)
-    await pool.enqueue_job("docker_down_task", project_id, chat_id, message_id, _provider_type(chat_id))
+    card_msg_id = await _fresh_web_message_id(chat_id, message_id)
+    job = await pool.enqueue_job("docker_down_task", project_id, chat_id, card_msg_id, _provider_type(chat_id))
+    if job:
+        await _track_job(chat_id, job.job_id)
     return f"Stopping Docker for {project_name}..."
 
 
@@ -437,7 +633,10 @@ async def bootstrap(project_name: str, chat_id: str, message_id: str) -> str:
 
     from openclow.worker.arq_app import get_arq_pool
     pool = await asyncio.wait_for(get_arq_pool(), timeout=5)
-    await pool.enqueue_job("bootstrap_project", project_id, chat_id, message_id, _provider_type(chat_id))
+    card_msg_id = await _fresh_web_message_id(chat_id, message_id)
+    job = await pool.enqueue_job("bootstrap_project", project_id, chat_id, card_msg_id, _provider_type(chat_id))
+    if job:
+        await _track_job(chat_id, job.job_id)
     return f"Bootstrapping {project_name}. Full setup starting..."
 
 
@@ -452,66 +651,95 @@ async def run_qa(chat_id: str, message_id: str, scope: str = "smoke") -> str:
     """
     from openclow.worker.arq_app import get_arq_pool
     pool = await asyncio.wait_for(get_arq_pool(), timeout=5)
-    await pool.enqueue_job("run_qa_tests", chat_id, message_id, scope, _provider_type(chat_id))
+    job = await pool.enqueue_job("run_qa_tests", chat_id, message_id, scope, _provider_type(chat_id))
+    if job:
+        await _track_job(chat_id, job.job_id)
     return f"QA tests ({scope}) started. Results will appear in {chat_id.split(':')[0] if ':' in chat_id else 'Telegram'}."
 
 
 @mcp.tool()
-async def check_pending_project(project_name: str, wait_seconds: int = 90) -> str:
-    """Wait for the onboarding worker to finish analyzing a project, then return its config.
+async def check_pending_project(project_name: str) -> str:
+    """Check if the onboarding worker has finished analyzing a project.
 
-    Call this AFTER trigger_addproject. It polls Redis until the analysis is done
-    (up to wait_seconds). Returns the config when ready, or a timeout message.
-    Use this to get the config so you can call confirm_project next.
+    Non-blocking — returns current state immediately.
+    Call this every 5-10s after trigger_addproject until you see READY.
+
+    Returns:
+      "READY — call confirm_project(...)"   — analysis done, config available
+      "PENDING — call again in 10s"         — worker still analyzing
     """
     import json
     import redis.asyncio as aioredis
     from openclow.settings import settings
 
     pending_key = f"openclow:pending_project:{project_name}"
-    waited = 0
-    poll_interval = 3
-
     r = aioredis.from_url(settings.redis_url)
     try:
-        while waited < wait_seconds:
-            # Try exact key first, then scan all pending keys (handles name mismatch)
-            data_raw = await r.get(pending_key)
-            if not data_raw:
-                all_keys = await r.keys("openclow:pending_project:*")
-                for k in all_keys:
-                    val = await r.get(k)
-                    if val:
-                        candidate = json.loads(val)
-                        # Match by github_repo slug or any key containing project_name
-                        repo_slug = candidate.get("github_repo", "").split("/")[-1].lower()
-                        if (repo_slug == project_name.lower()
-                                or project_name.lower() in repo_slug
-                                or repo_slug in project_name.lower()):
-                            data_raw = val
-                            break
-            if data_raw:
-                data = json.loads(data_raw)
-                actual_name = data.get("name", project_name)
-                return (
-                    f"Analysis complete for '{actual_name}' (repo: {data.get('github_repo', '')}):\n"
-                    f"Tech: {data.get('tech_stack', 'unknown')}\n"
-                    f"Docker: {'Yes' if data.get('is_dockerized') else 'No'}\n"
-                    f"Compose: {data.get('docker_compose_file', 'N/A')}\n"
-                    f"Container: {data.get('app_container_name', 'N/A')}:{data.get('app_port', 'N/A')}\n"
-                    f"Description: {data.get('description', 'N/A')}\n"
-                    f"READY — call confirm_project('{actual_name}', chat_id, message_id) to save and bootstrap."
-                )
-            await asyncio.sleep(poll_interval)
-            waited += poll_interval
+        data_raw = await r.get(pending_key)
+        if not data_raw:
+            # Fuzzy match — worker may have slugified the name differently
+            all_keys = await r.keys("openclow:pending_project:*")
+            for k in all_keys:
+                val = await r.get(k)
+                if val:
+                    candidate = json.loads(val)
+                    repo_slug = candidate.get("github_repo", "").split("/")[-1].lower()
+                    if (repo_slug == project_name.lower()
+                            or project_name.lower() in repo_slug
+                            or repo_slug in project_name.lower()):
+                        data_raw = val
+                        break
     finally:
         await r.aclose()
 
+    if not data_raw:
+        return (
+            f"PENDING — analysis not ready yet for '{project_name}'. "
+            "Call check_pending_project again in 10s, or list_tasks(status='active') to see queue."
+        )
+
+    data = json.loads(data_raw)
+    actual_name = data.get("name", project_name)
     return (
-        f"Timeout after {wait_seconds}s waiting for '{project_name}' analysis. "
-        "The worker may still be running — call check_pending_project again to keep waiting, "
-        "or call list_tasks(status='active') to see queue status."
+        f"READY — analysis complete for '{actual_name}' (repo: {data.get('github_repo', '')}):\n"
+        f"Tech: {data.get('tech_stack', 'unknown')}\n"
+        f"Docker: {'Yes' if data.get('is_dockerized') else 'No'}\n"
+        f"Compose: {data.get('docker_compose_file', 'N/A')}\n"
+        f"Container: {data.get('app_container_name', 'N/A')}:{data.get('app_port', 'N/A')}\n"
+        f"Description: {data.get('description', 'N/A')}\n"
+        f"Call confirm_project('{actual_name}', chat_id, message_id) to save and bootstrap."
     )
+
+
+@mcp.tool()
+async def poll_project_ready(project_name: str) -> str:
+    """Check if a project has finished bootstrapping and is live.
+
+    Non-blocking — returns the current status immediately.
+    Call this every 10-15s after bootstrap() until you see LIVE or FAILED.
+
+    Returns:
+      "LIVE: <url>"      — project is up, tunnel is live
+      "FAILED"           — bootstrap crashed, report to user and ask if they want to retry
+      "BUILDING: ..."    — still in progress, call again in 10-15s
+    """
+    from sqlalchemy import select
+    from openclow.models import Project, async_session
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Project).where(Project.name == project_name)
+        )
+        proj = result.scalar_one_or_none()
+
+    if not proj:
+        return f"Project '{project_name}' not found in DB."
+    if proj.status == "active" and proj.tunnel_url:
+        return f"LIVE: {proj.tunnel_url}"
+    if proj.status == "failed":
+        return "FAILED — bootstrap did not complete. Report this to the user and ask them whether to retry."
+
+    return f"BUILDING — status: {proj.status}. Call poll_project_ready('{project_name}') again in 15s."
 
 
 @mcp.tool()
@@ -537,9 +765,12 @@ async def confirm_project(project_name: str, chat_id: str, message_id: str) -> s
 
     r = aioredis.from_url(settings.redis_url)
     pending_key = f"openclow:pending_project:{project_name}"
-    data_raw = await r.get(pending_key)
-    if not data_raw:
-        # Scan all pending keys — handles name mismatch between repo slug and detected app name
+
+    async def _scan_pending() -> tuple[bytes | None, str]:
+        """Try exact key then fuzzy-match all pending keys. Returns (data_raw, key)."""
+        raw = await r.get(pending_key)
+        if raw:
+            return raw, pending_key
         all_keys = await r.keys("openclow:pending_project:*")
         for k in all_keys:
             val = await r.get(k)
@@ -549,25 +780,27 @@ async def confirm_project(project_name: str, chat_id: str, message_id: str) -> s
                 if (repo_slug == project_name.lower()
                         or project_name.lower() in repo_slug
                         or repo_slug in project_name.lower()):
-                    data_raw = val
-                    pending_key = k.decode() if isinstance(k, bytes) else k
-                    break
+                    return val, (k.decode() if isinstance(k, bytes) else k)
+        return None, pending_key
+
+    data_raw, pending_key = await _scan_pending()
+
     if data_raw:
         await r.delete(pending_key)
     await r.aclose()
 
     if not data_raw:
-        # Already confirmed or expired — check if project exists in DB
+        # Not ready yet or already confirmed — check if project exists in DB
         async with async_session() as session:
             result = await session.execute(select(Project).where(Project.name == project_name))
             existing = result.scalar_one_or_none()
         if existing:
-            # Already in DB — just bootstrap it
             project_id = existing.id
         else:
             return (
-                f"No pending config for '{project_name}' (expired or not found). "
-                "Call trigger_addproject again to restart onboarding."
+                f"No pending config for '{project_name}' — analysis may not be done yet. "
+                "Call check_pending_project first. If PENDING, wait and retry. "
+                "If still missing, call trigger_addproject again."
             )
     else:
         data = json.loads(data_raw)
@@ -603,7 +836,9 @@ async def confirm_project(project_name: str, chat_id: str, message_id: str) -> s
     # Queue bootstrap immediately
     from openclow.worker.arq_app import get_arq_pool
     pool = await asyncio.wait_for(get_arq_pool(), timeout=5)
-    await pool.enqueue_job("bootstrap_project", project_id, chat_id, message_id, _provider_type(chat_id))
+    job = await pool.enqueue_job("bootstrap_project", project_id, chat_id, message_id, _provider_type(chat_id))
+    if job:
+        await _track_job(chat_id, job.job_id)
 
     return (
         f"Project '{project_name}' saved (id={project_id}) and bootstrap queued. "

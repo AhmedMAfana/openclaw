@@ -45,12 +45,12 @@ async def web_action(body: WebActionRequest, user: User = Depends(web_user_dep))
     # ── approve_plan:{task_id} — approve a coding plan ───────────────────────
     if action.startswith("approve_plan:"):
         task_id = action.split(":", 1)[1]
-        return await _enqueue("approve_task", task_id)
+        return await _enqueue("execute_plan", task_id)  # plan_review → execute_plan
 
     # ── reject_plan:{task_id} ────────────────────────────────────────────────
     if action.startswith("reject_plan:"):
         task_id = action.split(":", 1)[1]
-        return await _enqueue("reject_task", task_id)
+        return await _enqueue("discard_task", task_id)  # plan_review → discard_task
 
     # ── approve_diff:{task_id} ───────────────────────────────────────────────
     if action.startswith("approve_diff:"):
@@ -107,9 +107,11 @@ async def _confirm_and_bootstrap(project_name: str, chat_id: str, message_id: st
     # Read pending config from Redis
     r = aioredis.from_url(settings.redis_url)
     pending_key = f"openclow:pending_project:{project_name}"
-    data_raw = await r.get(pending_key)
-    await r.delete(pending_key)
-    await r.aclose()
+    try:
+        data_raw = await r.get(pending_key)
+        await r.delete(pending_key)
+    finally:
+        await r.aclose()
 
     if not data_raw:
         raise HTTPException(404, f"No pending config for '{project_name}'. Onboarding may have expired (1h TTL). Re-run addproject.")

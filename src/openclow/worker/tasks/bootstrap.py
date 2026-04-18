@@ -17,6 +17,9 @@ import os
 import re
 import shutil
 
+from openclow.utils.docker_path import get_docker_env
+import time
+
 from sqlalchemy import select
 
 from openclow.models import Project, async_session
@@ -25,6 +28,14 @@ from openclow.settings import settings
 from openclow.utils.logging import get_logger
 
 log = get_logger()
+
+# Appended to every sub-agent system prompt — prevents the single most common hang.
+_NO_DOCKER_SOCKET = (
+    " NEVER run 'curl --unix-socket /run/docker.sock' or any raw Docker API call"
+    " via docker_exec inside a project container — the socket is NOT mounted there"
+    " and the call hangs forever. Use ONLY MCP tools (compose_ps, compose_up,"
+    " container_logs, docker_exec for app commands) for all Docker operations."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -54,34 +65,49 @@ DOCKER-COMPOSE CONTENTS:
 YOUR MISSION — execute these steps IN ORDER:
 
 STEP 2 — INSTALL DEPENDENCIES:
-- Read the project to understand the package manager (composer, npm, pip, etc.)
-- For DOCKERIZED projects: usually SKIP — Docker handles deps at build time
-- For non-dockerized: run the install command
-- Verify deps exist (vendor/, node_modules/, .venv/, etc.)
-- Output: STEP_DONE: 2 <short result> OR STEP_SKIP: 2 <reason>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE: If docker-compose.yml OR docker-compose.yaml EXISTS in the workspace →
+      output STEP_SKIP: 2 docker-handles-deps IMMEDIATELY. No reading package.json.
+      No running npm/composer/pip. Docker build handles all dependencies.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For non-dockerized projects ONLY: run the install command on the host.
+Output: STEP_DONE: 2 <short result> OR STEP_SKIP: 2 <reason>
 
 STEP 3 — BUILD FRONTEND:
-- If package.json exists with a build script, check if assets already compiled
-- If the Dockerfile or docker-compose handles the build: SKIP
-- If no frontend or assets already built: SKIP
-- ONLY build on host if no Docker build step AND no compiled assets exist
-- Output: STEP_DONE: 3 <short result> OR STEP_SKIP: 3 <reason>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE: If docker-compose.yml EXISTS → output STEP_SKIP: 3 docker-handles-build IMMEDIATELY.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For non-dockerized projects ONLY: check if assets need building and build them.
+Output: STEP_DONE: 3 <short result> OR STEP_SKIP: 3 <reason>
 
 STEP 4 — START DOCKER CONTAINERS:
-- Use compose_up(build=True) for the first attempt — it handles build + start automatically.
-  compose_up with build=True runs 'compose build' then 'compose up -d' as separate steps,
-  which correctly handles Docker-in-Docker path translation (build contexts use container
-  paths, volume mounts use host paths).
-- You also have compose_build() if you need to build images separately before starting.
-- If it FAILS — THIS IS CRITICAL:
-  * Read the error output carefully
-  * DIAGNOSE the root cause (missing env vars? ARM image issue? port conflict? build failure?)
-  * Output DIAGNOSIS: <your analysis>
-  * FIX IT (edit docker-compose.yml, .env, Dockerfile — whatever is needed)
-  * Output ACTION: <what you're fixing>
-  * Retry compose_up (or compose_build then compose_up if the build step is what failed)
-  * You get up to 3 fix attempts
-- After containers start, verify ALL are running via Docker MCP list_containers
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MANDATORY: Always call compose_build() FIRST, then compose_up().
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4a. Build images:
+    STATUS: Building Docker images — this may take 5-20 minutes, please wait...
+    → compose_build("{compose}", "{compose_project}", "{workspace}")
+
+    compose_build responses:
+    - "DONE ..." → build succeeded, proceed to 4b immediately
+    - "FAILED ..." → read the error, fix the Dockerfile/.env/docker-compose.yml, retry once
+    - "BUILDING ..." → build is running in the background (ARM builds take 5-20min).
+      YOU MUST poll with compose_build_status("{compose_project}") every 30s.
+      Keep polling until it returns "DONE" or "FAILED". Output STATUS: Building... each poll.
+      Do NOT call compose_up until compose_build_status returns "DONE".
+      Do NOT output STEP_DONE: 4 until containers are actually confirmed running.
+
+4b. Start containers (fast, <30s):
+    STATUS: Starting containers...
+    → compose_up("{compose}", "{compose_project}", "{workspace}")
+
+4c. Verify all containers are running:
+    → compose_ps("{compose_project}")
+    → list_containers("{compose_project}")
+    For any container NOT running: read container_logs, diagnose, fix.
+    You get up to 3 fix attempts total.
+
 - Output: STEP_DONE: 4 <X/Y containers running>
 
 STEP 5 — DATABASE MIGRATIONS:
@@ -196,7 +222,7 @@ async def _run(*args: str, cwd: str = None, timeout: int = 300,
             cwd=cwd, timeout=docker_timeout,
         )
 
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    env = get_docker_env({**os.environ, "GIT_TERMINAL_PROMPT": "0"})
     try:
         from openclow.services.config_service import get_config
         config = await get_config("git", "provider")
@@ -236,7 +262,7 @@ async def _run(*args: str, cwd: str = None, timeout: int = 300,
 
 async def _run_shell(cmd: str, cwd: str = None, timeout: int = 300) -> tuple[int, str]:
     """Run a shell command string."""
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    env = get_docker_env({**os.environ, "GIT_TERMINAL_PROMPT": "0"})
     try:
         from openclow.services.config_service import get_config
         config = await get_config("git", "provider")
@@ -333,7 +359,7 @@ def _ensure_restart_policy(workspace: str) -> None:
     # Read service names from the compose file
     result = subprocess.run(
         ["docker", "compose", "-f", compose_path, "config", "--services"],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, env=get_docker_env(),
     )
     if result.returncode != 0:
         return
@@ -375,7 +401,7 @@ def _patch_sail_dockerfile_if_needed(workspace: str) -> None:
     # Skip if the shared sail image already exists — no rebuild will happen
     check = subprocess.run(
         ["docker", "image", "inspect", "sail-8.4/app"],
-        capture_output=True, timeout=5,
+        capture_output=True, timeout=5, env=get_docker_env(),
     )
     if check.returncode == 0:
         return  # Image cached — Dockerfile won't be executed
@@ -419,10 +445,11 @@ async def _preflight(project, workspace: str, compose: str, compose_project: str
     import subprocess
 
     # 1. Verify Docker daemon is accessible
+    _denv = get_docker_env()
     try:
         result = subprocess.run(
             ["docker", "info", "--format", "{{.ServerVersion}}"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, env=_denv,
         )
         if result.returncode != 0:
             log.error("preflight.docker_unavailable", stderr=result.stderr[:200])
@@ -447,7 +474,7 @@ async def _preflight(project, workspace: str, compose: str, compose_project: str
         result = subprocess.run(
             ["docker", "ps", "-a", "--filter", f"name=openclow-{project.name}-",
              "--format", "{{.Names}}"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, env=_denv,
         )
         orphans = set()
         for name in result.stdout.strip().split("\n"):
@@ -464,7 +491,7 @@ async def _preflight(project, workspace: str, compose: str, compose_project: str
             log.warning("preflight.cleaning_orphan", stack=orphan)
             subprocess.run(
                 ["docker", "compose", "-p", orphan, "down", "--remove-orphans"],
-                capture_output=True, timeout=30,
+                capture_output=True, timeout=30, env=_denv,
             )
     except Exception:
         pass
@@ -473,7 +500,7 @@ async def _preflight(project, workspace: str, compose: str, compose_project: str
     try:
         subprocess.run(
             ["docker", "network", "prune", "-f"],
-            capture_output=True, timeout=10,
+            capture_output=True, timeout=10, env=_denv,
         )
     except Exception:
         pass
@@ -511,14 +538,14 @@ async def _preflight(project, workspace: str, compose: str, compose_project: str
         try:
             result = subprocess.run(
                 ["docker", "ps", "--filter", f"publish={app_port}", "--format", "{{.Names}}"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=5, env=_denv,
             )
             for container in result.stdout.strip().split("\n"):
                 container = container.strip()
                 if container and container != f"{compose_project}-{project.app_container_name or 'app'}-1":
                     subprocess.run(
                         ["docker", "stop", container],
-                        capture_output=True, timeout=10,
+                        capture_output=True, timeout=10, env=_denv,
                     )
                     log.info("preflight.stopped_port_conflict", container=container, port=app_port)
         except Exception:
@@ -988,7 +1015,7 @@ RULES:
 
     options = ClaudeAgentOptions(
         cwd=workspace,
-        system_prompt="Senior DevOps engineer. 2 steps: deps + build. Skip what exists. Use docker_exec MCP tool for container commands. Be fast.",
+        system_prompt="Senior DevOps engineer. 2 steps: deps + build. Skip what exists. Use docker_exec MCP tool for container commands. Be fast." + _NO_DOCKER_SOCKET,
         model="claude-sonnet-4-6",
         allowed_tools=[
             "Read", "Glob", "Grep", "Edit", "Write",
@@ -1068,11 +1095,8 @@ RULES:
                 elif isinstance(block, ToolUseBlock):
                     cl_idx = STEP_MAP.get(current_agent_step)
                     if cl_idx is not None:
-                        cmd = ""
-                        if hasattr(block, "input") and isinstance(block.input, dict):
-                            cmd = str(block.input.get("command", block.input.get("file_path", "")))[:60]
-                        if cmd:
-                            await checklist.update_step(cl_idx, cmd)
+                        from openclow.worker.tasks._agent_base import describe_tool
+                        await checklist.update_step(cl_idx, describe_tool(block))
 
     except Exception as e:
         log.error("bootstrap.agent_failed", error=str(e))
@@ -1160,7 +1184,7 @@ RULES:
 
     options = ClaudeAgentOptions(
         cwd=workspace,
-        system_prompt=f"Docker expert. Diagnose and fix docker compose failures. Host arch: {arch}. Use docker MCP tools (compose_up, docker_exec, etc.) instead of Bash. Be fast and surgical.",
+        system_prompt=f"Docker expert. Diagnose and fix docker compose failures. Host arch: {arch}. Use docker MCP tools (compose_up, docker_exec, etc.) instead of Bash. Be fast and surgical." + _NO_DOCKER_SOCKET,
         model="claude-sonnet-4-6",
         allowed_tools=[
             "Read", "Glob", "Grep", "Write", "Edit",
@@ -1207,11 +1231,8 @@ RULES:
                                 await checklist.update_step(step_idx, f"cannot fix: {detail}")
                             return False
                 elif isinstance(block, ToolUseBlock) and checklist:
-                    cmd = ""
-                    if hasattr(block, "input") and isinstance(block.input, dict):
-                        cmd = str(block.input.get("command", block.input.get("file_path", "")))[:60]
-                    if cmd:
-                        await checklist.update_step(step_idx, cmd)
+                    from openclow.worker.tasks._agent_base import describe_tool
+                    await checklist.update_step(step_idx, describe_tool(block))
         return True  # Agent finished without explicit signal — assume it tried
     except Exception as e:
         log.error("bootstrap.agent_fix_docker_failed", error=str(e))
@@ -1298,7 +1319,7 @@ RULES:
 
     options = ClaudeAgentOptions(
         cwd=workspace,
-        system_prompt="Database migration specialist. Run migrations via docker_exec MCP tool. Always specify the working directory. Be fast.",
+        system_prompt="Database migration specialist. Run migrations via docker_exec MCP tool. Always specify the working directory. Be fast." + _NO_DOCKER_SOCKET,
         model="claude-sonnet-4-6",
         allowed_tools=[
             "Read", "Glob", "Grep",
@@ -1345,11 +1366,8 @@ RULES:
                             if detail:
                                 await checklist.update_step(5, detail)
                 elif isinstance(block, ToolUseBlock):
-                    cmd = ""
-                    if hasattr(block, "input") and isinstance(block.input, dict):
-                        cmd = str(block.input.get("command", ""))[:60]
-                    if cmd:
-                        await checklist.update_step(5, cmd)
+                    from openclow.worker.tasks._agent_base import describe_tool
+                    await checklist.update_step(5, describe_tool(block))
 
         # Agent finished without explicit DONE/SKIP/FAIL
         await checklist.complete_step(5, "agent finished")
@@ -1366,8 +1384,15 @@ async def _run_master_agent(
     max_step: int = 6,
     complete_keyword: str = "BOOTSTRAP_COMPLETE",
     failed_keyword: str = "BOOTSTRAP_FAILED",
+    timeout: int = 1800,  # kept for signature compat — ignored, idle_timeout used instead
+    idle_timeout: int = 1800,  # 30 min — covers docker build (up to 30 min) + compose_build blocks
 ) -> bool:
     """Agentic master agent with ChecklistReporter streaming.
+
+    Uses an idle-based timeout instead of a flat wall-clock timeout.
+    The agent can run as long as it keeps making tool calls or producing text.
+    It is only killed if it goes `idle_timeout` seconds with zero activity
+    (i.e. it is truly stuck — hung MCP call, infinite wait, etc.).
 
     Reusable for bootstrap (steps 2-6) and repair (steps 0-4).
     Pass prompt_override + start_step + max_step to customize.
@@ -1420,8 +1445,23 @@ async def _run_master_agent(
     options = ClaudeAgentOptions(
         cwd=workspace,
         system_prompt=(
-            f"Senior DevOps engineer setting up {project.name}. "
-            f"Host: {arch}. Be fast, be decisive, fix errors yourself."
+            f"You are a senior DevOps engineer. Your only job: get {project.name} running. Host: {arch}.\n\n"
+            f"DIAGNOSTIC MINDSET — before every action:\n"
+            f"1. Read the error literally. What exactly failed, and at what layer?\n"
+            f"2. Check actual state with compose_ps or container_logs — don't assume.\n"
+            f"3. Form one hypothesis. Act on it. Verify with a tool call.\n"
+            f"4. If it didn't work: new hypothesis, different approach. Never repeat a failed action.\n\n"
+            f"TOOL FAILURES ARE DATA, NOT DEAD ENDS:\n"
+            f"- 'connection closed' = MCP transport hiccup. Call compose_ps IMMEDIATELY — Docker "
+            f"may have succeeded before the connection dropped. If containers are up, continue.\n"
+            f"- 'BLOCKED' = security guard rejected the command. Read the reason, find an alternative.\n"
+            f"- 'TIMEOUT' = operation took too long. Check compose_ps — it may have finished anyway.\n"
+            f"- Any other error: read it. Understand it. Fix the root cause, not the symptom.\n\n"
+            f"NEVER GIVE UP: The only valid reason to output REPAIR_FAILED or BOOTSTRAP_FAILED is if "
+            f"you have genuinely tried multiple different approaches and each one has a specific, "
+            f"documented reason why it cannot work. 'The tool kept failing' is not a reason — "
+            f"that means you need to understand WHY the tool is failing and fix that first."
+            + _NO_DOCKER_SOCKET
         ),
         model="claude-sonnet-4-6",
         allowed_tools=[
@@ -1429,7 +1469,8 @@ async def _run_master_agent(
             # gracefully instead of crashing the SDK on non-zero exit codes.
             "Read", "Write", "Edit", "Glob", "Grep",
             # Docker MCP — the agent's ONLY interface for containers & commands
-            "mcp__docker__compose_build",
+            "mcp__docker__compose_build",        # starts build; may return BUILDING after 30s
+            "mcp__docker__compose_build_status", # REQUIRED: poll every 30s when compose_build returns BUILDING
             "mcp__docker__compose_up",
             "mcp__docker__compose_down",
             "mcp__docker__compose_ps",
@@ -1456,17 +1497,85 @@ async def _run_master_agent(
     docker_fix_attempts = 0
     max_docker_fixes = 3
     
-    try:
+    # Extract chat_id/session for web cancel checking
+    _cancel_chat_id = getattr(checklist, "_chat_id", "") or ""
+    _cancel_session_id = _cancel_chat_id.split(":")[2] if _cancel_chat_id.startswith("web:") and len(_cancel_chat_id.split(":")) == 3 else ""
+
+    async def _web_cancelled() -> bool:
+        """Check if web Stop was pressed for this session."""
+        if not _cancel_session_id:
+            return False
+        try:
+            import redis.asyncio as aioredis
+            from openclow.settings import settings
+            r = aioredis.from_url(settings.redis_url)
+            val = await r.get(f"openclow:cancel_session:{_cancel_session_id}")
+            await r.aclose()
+            return val is not None
+        except Exception:
+            return False
+
+    # Activity tracker: reset on every token/tool call — idle watchdog uses this
+    _last_activity: list[float] = [time.monotonic()]
+
+    def _bump_activity() -> None:
+        _last_activity[0] = time.monotonic()
+
+    # Heartbeat task: polls cancel flag every 5s and interrupts the stream
+    _stream_task: asyncio.Task | None = None
+
+    async def _cancel_heartbeat():
+        nonlocal _stream_task
+        while True:
+            await asyncio.sleep(5)
+            if await _web_cancelled():
+                log.info("bootstrap.cancelled_by_web", project=project.name)
+                if _stream_task and not _stream_task.done():
+                    _stream_task.cancel()
+
+    _hb_task = asyncio.create_task(_cancel_heartbeat())
+
+    # Idle watchdog: kills the stream only when the agent goes idle_timeout seconds
+    # with zero activity. An actively working agent is never killed by this.
+    async def _idle_watchdog():
+        nonlocal _stream_task
+        while True:
+            await asyncio.sleep(10)
+            idle_secs = time.monotonic() - _last_activity[0]
+            if idle_secs >= idle_timeout:
+                log.warning(
+                    "master_agent.idle_timeout",
+                    project=project.name,
+                    idle_secs=int(idle_secs),
+                    idle_timeout=idle_timeout,
+                )
+                if _stream_task and not _stream_task.done():
+                    _stream_task.cancel()
+                return
+
+    _wd_task = asyncio.create_task(_idle_watchdog())
+
+    async def _run_stream():
+        nonlocal success, current_step, docker_fix_attempts
         async for message in query(prompt=prompt, options=options):
             if not isinstance(message, AssistantMessage):
                 continue
             for block in message.content:
                 if isinstance(block, TextBlock):
+                    _bump_activity()
+                    # Stream raw agent text to web frontend in real-time
+                    if block.text.strip() and hasattr(checklist._chat, "send_agent_token"):
+                        try:
+                            await checklist._chat.send_agent_token(
+                                checklist._chat_id, checklist._message_id, block.text
+                            )
+                        except Exception:
+                            pass
                     for line in block.text.split("\n"):
                         line = line.strip()
                         if not line:
                             continue
-                        
+
                         # STATUS: Show what agent is doing
                         if line.startswith("STATUS:"):
                             detail = line[7:].strip()[:60]
@@ -1484,13 +1593,15 @@ async def _run_master_agent(
                             detail = line[7:].strip()[:60]
                             if current_step <= max_step:
                                 await checklist.update_step(current_step, f"🔧 {detail}")
-                            # Track Docker fix attempts
+                            # Track Docker fix attempts — break agent loop if exhausted
                             if current_step == 4:
                                 docker_fix_attempts += 1
                                 if docker_fix_attempts > max_docker_fixes:
-                                    log.warning("bootstrap.docker_fixes_exhausted", 
-                                                project=project.name, 
+                                    log.warning("bootstrap.docker_fixes_exhausted",
+                                                project=project.name,
                                                 attempts=docker_fix_attempts)
+                                    success = False
+                                    break
                         
                         # STEP_DONE: Complete a step and move to next
                         elif line.startswith("STEP_DONE:"):
@@ -1544,22 +1655,44 @@ async def _run_master_agent(
                             success = False
                 
                 elif isinstance(block, ToolUseBlock):
+                    _bump_activity()
                     # Show tool usage in checklist for transparency
                     if current_step <= max_step:
-                        cmd = ""
-                        if hasattr(block, "input") and isinstance(block.input, dict):
-                            cmd = str(block.input.get("command",
-                                       block.input.get("file_path",
-                                       block.name)))[:60]
-                        if cmd:
-                            await checklist.update_step(current_step, cmd)
-    
+                        from openclow.worker.tasks._agent_base import describe_tool
+                        desc = describe_tool(block)
+                        await checklist.update_step(current_step, desc)
+
+    # Run the stream as a Task so heartbeat/watchdog can cancel it mid-MCP-call.
+    # No flat wall-clock timeout — the idle watchdog handles stuck agents instead.
+    _stream_task = asyncio.create_task(_run_stream())
+    try:
+        await _stream_task
     except asyncio.CancelledError:
-        raise
+        idle_secs = int(time.monotonic() - _last_activity[0])
+        if idle_secs >= idle_timeout:
+            # Killed by idle watchdog — report as timeout
+            log.warning("master_agent.idle_timeout_fired", project=project.name,
+                        idle_secs=idle_secs)
+            if current_step <= max_step:
+                await checklist.fail_step(
+                    current_step,
+                    f"agent stuck (no activity for {idle_secs}s)",
+                )
+        else:
+            # Cancelled by web Stop button or worker shutdown — propagate
+            raise
     except Exception as e:
         log.error("bootstrap.master_agent_failed", error=str(e))
-        return False
-    
+        if current_step <= max_step:
+            await checklist.fail_step(current_step, str(e)[:60])
+    finally:
+        _hb_task.cancel()
+        _wd_task.cancel()
+        try:
+            await asyncio.gather(_hb_task, _wd_task, return_exceptions=True)
+        except Exception:
+            pass
+
     return success
 
 
@@ -1866,6 +1999,21 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
 
     await _set_project_status(project_id, "bootstrapping")
 
+    # Clear any stale cancel flag — a previous Stop click sets this key (600s TTL) and the
+    # cancel heartbeat inside _run_master_agent would kill this bootstrap within 5 seconds.
+    # Telegram/Slack don't have this mechanism; web does, so we must wipe it on fresh starts.
+    if chat_id.startswith("web:"):
+        try:
+            _parts = chat_id.split(":")
+            if len(_parts) == 3:
+                import redis.asyncio as _aioredis
+                _rc = _aioredis.from_url(settings.redis_url)
+                await _rc.delete(f"openclow:cancel_session:{_parts[2]}")
+                await _rc.aclose()
+                log.info("bootstrap.cleared_cancel_flag", session=_parts[2])
+        except Exception:
+            pass
+
     workspace = os.path.join(settings.workspace_base_path, "_cache", project.name)
     compose = project.docker_compose_file or "docker-compose.yml"
     compose_project = f"openclow-{project.name}"
@@ -2109,7 +2257,7 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
                     from openclow.providers.llm.claude import _mcp_docker
                     post_opts = ClaudeAgentOptions(
                         cwd=workspace,
-                        system_prompt="DevOps engineer. Rebuild frontend assets and clear caches after tunnel URL change. Use Docker MCP tools only.",
+                        system_prompt="DevOps engineer. Rebuild frontend assets and clear caches after tunnel URL change. Use Docker MCP tools only." + _NO_DOCKER_SOCKET,
                         model="claude-sonnet-4-6",
                         allowed_tools=[
                             "Read", "Glob", "Grep",

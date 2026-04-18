@@ -6,25 +6,50 @@ from openclow.utils.logging import get_logger
 
 log = get_logger()
 
-ONBOARDING_PROMPT = """Analyze this repository and extract project configuration.
+ONBOARDING_PROMPT = """Analyze this repository and extract the project configuration needed to run it.
 
-Look for:
-1. Docker setup: find docker-compose.yml (check root, infra/, docker/, .docker/, etc.)
-2. App service: identify the main application service name and its port
-3. Tech stack: detect from files (package.json, composer.json, requirements.txt, Gemfile, go.mod, etc.)
-4. Description: read README.md for a short project description
-5. Conventions: read CLAUDE.md if it exists
-6. Setup commands: any needed setup (cp .env.example .env, etc.)
+## What to Read
 
-Output in this EXACT format (no extra text before or after):
+1. Find the Docker Compose file — check these locations in order:
+   docker-compose.yml, docker-compose.yaml, infra/docker-compose.yml, docker/docker-compose.yml,
+   .docker/docker-compose.yml, docker-compose.prod.yml
+   Use the first one found. Prefer a file with an "app" or "web" service.
+
+2. Identify the main application service in the compose file:
+   - Look for a service named: app, web, api, server, backend, laravel, django, rails, node
+   - Read its "ports" to find the host-mapped port (e.g. "8000:8000" → port 8000)
+   - Record the service name exactly as it appears in the compose file
+
+3. Detect tech stack from files present:
+   - composer.json → PHP/Laravel (or Symfony, Slim, etc.)
+   - package.json → Node.js/Express or Next.js/Vue/React (check "dependencies" for framework)
+   - requirements.txt or pyproject.toml → Python (check for django, fastapi, flask, etc.)
+   - Gemfile → Ruby on Rails
+   - go.mod → Go
+   - pom.xml → Java/Spring
+   List the primary language + framework, e.g. "PHP/Laravel", "Python/FastAPI", "Node.js/Express"
+
+4. Read README.md — extract a one-sentence description of what the project does
+
+5. Check for CLAUDE.md — if present, extract any developer conventions or setup requirements
+
+6. Identify setup commands needed before `docker compose up`:
+   - .env.example present → "cp .env.example .env"
+   - Any seed or key generation steps mentioned in README? Include them.
+   Separate multiple commands with semicolons.
+
+## Output Format
+
+Output ONLY this block — no text before or after:
+
 PROJECT_CONFIG_START
-PROJECT_NAME: <name derived from repo>
-TECH_STACK: <comma-separated list>
-DOCKER_COMPOSE: <relative path to docker-compose.yml, or "none">
-APP_CONTAINER: <main app service name from docker-compose, or "none">
-APP_PORT: <port the app runs on, or "none">
-DESCRIPTION: <one-line description>
-SETUP_COMMANDS: <semicolon-separated commands, or "none">
+PROJECT_NAME: <slug name derived from repo folder or git remote — lowercase, underscores>
+TECH_STACK: <primary language/framework, e.g. PHP/Laravel>
+DOCKER_COMPOSE: <relative path to docker-compose file, or "none">
+APP_CONTAINER: <exact service name from compose file, or "none">
+APP_PORT: <port number the app listens on inside compose, or "none">
+DESCRIPTION: <one sentence describing what this project does>
+SETUP_COMMANDS: <semicolon-separated setup commands, or "none">
 IS_DOCKERIZED: <true or false>
 PROJECT_CONFIG_END
 """

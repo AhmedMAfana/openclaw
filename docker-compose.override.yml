@@ -17,7 +17,18 @@ services:
 
   api:
     command: >
-      uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000 --reload
+      bash -c "
+        if [ -z \"$$WEB_CHAT_JWT_SECRET\" ]; then
+          JWT_FILE=/home/openclow/.claude/.jwt_secret;
+          [ -f $$JWT_FILE ] || openssl rand -hex 32 > $$JWT_FILE;
+          export WEB_CHAT_JWT_SECRET=$$(cat $$JWT_FILE);
+          echo '[api] WEB_CHAT_JWT_SECRET loaded from volume';
+        fi;
+        exec uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000 --reload
+          --reload-exclude '*/worker/tasks/*'
+          --reload-exclude '*/worker/arq_app*'
+          --timeout-graceful-shutdown 5
+      "
     volumes:
       - ./src:/app/src:cached
     environment:
@@ -36,6 +47,10 @@ services:
       - claude_auth:/home/openclow/.claude
     environment:
       - LOG_LEVEL=DEBUG
+      # Explicit Docker binary path — su -l openclow resets PATH and may drop /usr/bin.
+      # get_docker_bin() checks DOCKER_BIN first so subprocess calls always find docker
+      # regardless of the user's login shell PATH. Adjust if docker is elsewhere on your host.
+      - DOCKER_BIN=/usr/bin/docker
 
   postgres:
     ports:

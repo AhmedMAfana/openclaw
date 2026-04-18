@@ -27,6 +27,47 @@ from openclow.worker.tasks import git_ops
 log = get_logger()
 
 
+async def _make_cancel_watcher(chat_id: str) -> "asyncio.Task | None":
+    """Spawn a background task that watches the Redis cancel key for web sessions.
+
+    When the user clicks Stop, the cancel endpoint sets
+    openclow:cancel_session:{session_id}. This watcher detects it every 5s
+    and cancels the current arq task, which raises CancelledError into the
+    orchestrator's main coroutine (caught by existing except handlers).
+
+    Returns the watcher Task (caller should cancel it in finally).
+    Returns None for non-web chat_ids.
+    """
+    if not chat_id or not chat_id.startswith("web:"):
+        return None
+    parts = chat_id.split(":")
+    if len(parts) != 3:
+        return None
+    session_id = parts[2]
+    outer_task = asyncio.current_task()
+
+    async def _watcher():
+        try:
+            import redis.asyncio as aioredis
+            from openclow.settings import settings as _s
+            while True:
+                await asyncio.sleep(5)
+                try:
+                    r = aioredis.from_url(_s.redis_url)
+                    val = await r.get(f"openclow:cancel_session:{session_id}")
+                    await r.aclose()
+                    if val is not None and outer_task and not outer_task.done():
+                        log.info("orchestrator.cancel_detected", session_id=session_id)
+                        outer_task.cancel()
+                        return
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            pass  # watcher itself was cancelled in finally block
+
+    return asyncio.create_task(_watcher())
+
+
 async def _check_claude_auth() -> bool:
     """Check if Claude is authenticated. Returns True if OK."""
     try:
@@ -141,38 +182,56 @@ async def _run_deploy_agent(task, workspace_path: str, diff_summary: str, tunnel
     app_container_full = f"{compose_project}-{app_container}-1"
     project_workspace = os.path.join(settings.workspace_base_path, "_cache", task.project.name)
 
-    prompt = f"""You just finished coding changes to {task.project.name}. Here's the diff:
+    prompt = f"""Deploy the changes for {task.project.name} to the running app.
+
+## Changed Files (diff summary)
 
 {diff_summary}
 
-PROJECT: {task.project.name}
-TECH STACK: {task.project.tech_stack or 'Unknown'}
-APP CONTAINER: {app_container_full}
-COMPOSE PROJECT: {compose_project}
-PROJECT WORKSPACE: {project_workspace}
-TUNNEL URL: {tunnel_url or 'none'}
+## Environment
 
-YOUR JOB: Look at the changes and do whatever is needed to deploy them to the running app:
+Project: {task.project.name} ({task.project.tech_stack or 'Unknown'})
+App container: {app_container_full}
+Compose project: {compose_project}
+Task workspace (source): {workspace_path}
+Project workspace (destination): {project_workspace}
+Tunnel URL: {tunnel_url or 'none'}
 
-1. SYNC changed files from the task workspace ({workspace_path}) to the project workspace ({project_workspace})
-2. Based on what changed, decide what actions to run:
-   - Frontend files (.vue, .jsx, .tsx, .css, .scss, .blade.php)? → rebuild frontend (npm run build in project workspace)
-   - Migration files? → run migrations via docker_exec
-   - Config files (.env, config/)? → clear config cache via docker_exec
-   - Seeder files? → run seeders via docker_exec
-   - Backend PHP/Python files? → may need container restart
-   - Nothing actionable? → just sync files, done
-3. Verify the app still works — docker_exec curl localhost on the app container
-4. If tunnel exists, verify it's reachable
+## Steps
 
-OUTPUT just one line at the end:
-DEPLOY_RESULT: <what you did>
+### Step 1: Sync files
+Copy changed files from task workspace ({workspace_path}) to project workspace ({project_workspace}).
+Only copy files that appear in the diff — do not overwrite unrelated files.
 
-Be fast. Don't overthink. Just deploy."""
+### Step 2: Run post-deploy actions based on what changed
+
+| Changed files include... | Action |
+|---|---|
+| database/migrations/ or alembic/versions/ or *_migration.* | Run migrations via docker_exec |
+| resources/js/ or resources/css/ or *.vue or *.tsx or *.jsx | npm run build in project workspace |
+| config/ or .env (non-secret keys only) | Clear config/route cache via docker_exec |
+| database/seeders/ | Run seeders only if idempotent (--force or equivalent) |
+| Only backend PHP/Python/Go files | Check container_health; restart_container if unhealthy |
+| Nothing actionable | Sync is enough — skip post-deploy steps |
+
+### Step 3: Verify the app works
+docker_exec("{app_container_full}", "curl -s -o /dev/null -w '%{{http_code}}' http://localhost:{task.project.app_port or 80}")
+- 200–399: success
+- 500: app crashed — read container_logs and fix if possible
+- Connection refused: restart_container, wait 5s, re-verify
+
+### Step 4: Report
+
+End with one of:
+DEPLOY_RESULT: [what you did — e.g. "synced 3 files, ran migrations, verified 200 OK"]
+DEPLOY_BLOCKED: [what failed and why — e.g. "migration failed: duplicate column"]"""
 
     options = ClaudeAgentOptions(
         cwd=workspace_path,
-        system_prompt=f"Deploy specialist for {task.project.name}. Sync files, rebuild, migrate, verify. Be fast.",
+        system_prompt=(
+            f"You are a deploy specialist for {task.project.name}. Sync changed files, run required post-deploy steps based on what changed, verify the app responds. Be fast and surgical."
+            " NEVER run 'curl --unix-socket /run/docker.sock' or any raw Docker API call via docker_exec inside a project container — the socket is NOT mounted there and will hang forever. Use ONLY MCP tools for all Docker operations."
+        ),
         model="claude-sonnet-4-6",
         allowed_tools=[
             "Read", "Write", "Edit", "Glob", "Grep",
@@ -228,38 +287,48 @@ def _retry_keyboard(project_id: int | None = None):
     return ActionKeyboard(rows=rows)
 
 
-HEALTH_GUARD_PROMPT = """You are a DevOps health guard for project "{project_name}".
-Your job: make sure ALL containers are running and the app is responding BEFORE the developer starts coding.
+HEALTH_GUARD_PROMPT = """You are a DevOps health guard for "{project_name}". Your job: ensure all containers are running and the app is responding before the coder starts work.
 
 Project: {project_name} ({tech_stack})
-Compose project prefix: openclow-{project_name}
+Compose project: openclow-{project_name}
 App container pattern: *{app_container}*
-Expected app port: {app_port}
+App port: {app_port}
 Workspace: {workspace}
 
-DO THIS:
-1. list_containers — find all containers for this project
-2. container_health on the app container — is it running?
-3. If container is down/unhealthy:
-   - container_logs to see WHY
-   - Fix the root cause (wrong paths, missing binaries, bad config, etc.)
-   - docker_exec to apply fixes inside the container
-   - restart_container if needed
-   - Verify with container_health again
-4. docker_exec a curl to localhost:{app_port} inside the app container to verify HTTP works
-5. If HTTP fails (500, connection refused):
-   - Read logs again, diagnose, fix
-   - Common issues: PHP not found, supervisor misconfigured, missing .env, DB not ready
-6. Check if tunnel is alive: tunnel_get_url("{project_name}")
-   - If no tunnel or tunnel dead: tunnel_start("{project_name}", "http://<container_ip>:{app_port}")
-   - Get container IP via docker_exec on any container: hostname -i
+## Workflow
 
-RULES:
-- Be fast — this runs before every task, don't waste turns on unnecessary checks
-- If everything is healthy on first check, just say HEALTHY and stop (1-2 turns max)
+### Fast path (do this first)
+1. container_health on the app container
+2. If HEALTHY: tunnel_get_url("{project_name}") — get the URL
+3. End immediately: HEALTHY: <tunnel_url or "no tunnel">
+
+### Slow path (only if something is broken)
+If container is down or unhealthy:
+a. container_logs — read the last 50 lines, identify the specific error
+b. Apply ONE targeted fix (edit .env, fix config, restart_container)
+c. container_health again to verify recovery
+d. If still broken: compose_up to rebuild and restart the service
+e. Verify HTTP: docker_exec on app container: curl -s -o /dev/null -w '%{{http_code}}' localhost:{app_port}
+
+If HTTP returns 500:
+- Read container_logs again — app may have crashed after start
+- Common causes: missing .env key, DB not ready, supervisor not started
+- docker_exec to diagnose: check supervisord, check process list (ps aux)
+- Fix root cause and restart
+
+If no tunnel or tunnel is dead:
+- tunnel_get_url("{project_name}") first — don't create a duplicate
+- If none found: tunnel_start("{project_name}", "http://localhost:{app_port}")
+
+## Rules
+
+- If healthy on first check: respond in 1–2 turns max, don't do unnecessary work
 - Only dig deeper if something is actually broken
-- Never give up — when a fix fails, try a completely different approach
-- End with: HEALTHY: <tunnel_url or "no tunnel"> or UNHEALTHY: <what's still broken>
+- Never give up — try a different approach when a fix fails
+- End with:
+  HEALTHY: <tunnel_url or "no tunnel">
+  or
+  UNHEALTHY: <specific error still blocking>
 """
 
 
@@ -286,7 +355,10 @@ async def _ensure_project_healthy(task, reporter, task_id_str: str) -> tuple[boo
 
         options = ClaudeAgentOptions(
             cwd=workspace,
-            system_prompt="You are a fast DevOps health guard. Check containers, fix if broken, ensure tunnel works. Be quick — skip unnecessary steps if healthy.",
+            system_prompt=(
+                "You are a DevOps health guard. Check container health first — if healthy, get tunnel URL and stop immediately. Only investigate further if something is broken. Fix root causes, not symptoms."
+                " NEVER run 'curl --unix-socket /run/docker.sock' or any raw Docker API call via docker_exec inside a project container — the socket is NOT mounted there and will hang forever. Use ONLY MCP tools for all Docker operations."
+            ),
             model="claude-sonnet-4-6",
             allowed_tools=[
                 "mcp__docker__list_containers",
@@ -385,6 +457,9 @@ async def execute_task(ctx: dict, task_id: str, skip_planning: bool = False):
         return
     ws = WorkspaceService()
 
+    # ── Web cancel watcher — detects Stop button and cancels this task ──
+    _cancel_watcher = await _make_cancel_watcher(task.chat_id or "")
+
     # ── Acquire project lock (prevent concurrent tasks on same repo) ──
     from openclow.services.project_lock import acquire_project_lock, get_lock_holder
     lock = await acquire_project_lock(task.project_id, task_id=task_id_str, wait=10)
@@ -422,34 +497,39 @@ async def execute_task(ctx: dict, task_id: str, skip_planning: bool = False):
 
     log.info("orchestrator.started", task_id=task_id_str, project=task.project.name)
 
-    from openclow.services.status_reporter import StatusReporter
-    reporter = StatusReporter(chat, task.chat_id, task.chat_message_id,
-                              title=f"Planning: {task.description[:40]}",
-                              task_id=task_id_str)
+    # Web tasks created via trigger_task MCP have no chat_message_id — create one now
+    chat_message_id = task.chat_message_id
+    if not chat_message_id:
+        chat_message_id = await chat.send_message(task.chat_id, "")
+        await _update_task(task_id_str, chat_message_id=chat_message_id)
+
+    from openclow.services.checklist_reporter import ChecklistReporter
+    reporter = ChecklistReporter(chat, task.chat_id, chat_message_id,
+                                 title=task.description[:50])
+    reporter.set_steps(["Prepare workspace", "Quick mode" if skip_planning else "Create plan"])
     await reporter.start()
 
     try:
-        # ── Step 1: Prepare workspace ──
+        # ── Step 0: Prepare workspace ──
         await _update_task(task_id_str, status="preparing")
-        await reporter.stage("Preparing workspace", step=1, total=3)
+        await reporter.start_step(0)
 
         workspace = await ws.prepare(task.project, task_id_str)
-        await reporter.log(f"Workspace ready")
 
         # Create branch
         branch_slug = slugify(task.description, max_length=50)
         branch_name = f"openclow/{task_id_str[:8]}-{branch_slug}"
         await git_ops.create_branch(workspace.path, branch_name)
         await _update_task(task_id_str, branch_name=branch_name)
-        await reporter.log(f"Branch: {branch_name[:30]}")
+        await reporter.complete_step(0, f"branch: {branch_name[:30]}")
 
         await _log_to_db(task_id_str, "system", "info", f"Branch: {branch_name}")
 
         if skip_planning:
             # ── Quick mode: skip planning, go straight to coding ──
-            await reporter.stage("Quick mode — skipping plan", step=2, total=3)
-            await reporter.log("Dispatching to coder directly")
+            await reporter.start_step(1)
             await _update_task(task_id_str, status="coding")
+            await reporter.complete_step(1, "dispatching to coder")
             await reporter.stop()
 
             # Auto-dispatch execute_plan immediately
@@ -460,7 +540,7 @@ async def execute_task(ctx: dict, task_id: str, skip_planning: bool = False):
         else:
             # ── Full mode: Analyze and create plan ──
             await _update_task(task_id_str, status="planning")
-            await reporter.stage("Analyzing project + creating plan", step=2, total=3)
+            await reporter.start_step(1)
 
             plan_text = await llm.run_planner(
                 workspace_path=workspace.path,
@@ -470,7 +550,7 @@ async def execute_task(ctx: dict, task_id: str, skip_planning: bool = False):
                 description=task.project.description or "",
                 agent_system_prompt=task.project.agent_system_prompt or "",
             )
-            await reporter.log("Plan created")
+            await reporter.complete_step(1, "plan ready")
 
             await _log_to_db(task_id_str, "planner", "info", "Plan created", {
                 "plan": plan_text[:3000],
@@ -491,7 +571,10 @@ async def execute_task(ctx: dict, task_id: str, skip_planning: bool = False):
                            error_message=error_msg,
                            duration_seconds=int(time.time() - start_time))
         try:
-            await reporter.error(f"{error_msg}. You can retry.", keyboard=_retry_keyboard(task.project_id if task else None))
+            running_idx = next((i for i, s in enumerate(reporter.steps) if s["status"] == "running"), 0)
+            await reporter.fail_step(running_idx, error_msg[:40])
+            reporter._footer = f"{error_msg}. You can retry."
+            await reporter._force_render(keyboard=_retry_keyboard(task.project_id if task else None))
         except Exception:
             pass
         try:
@@ -503,12 +586,20 @@ async def execute_task(ctx: dict, task_id: str, skip_planning: bool = False):
         log.error("orchestrator.planning_failed", task_id=task_id_str, error=str(e))
         await _update_task(task_id_str, status="failed",
                            error_message=str(e), duration_seconds=duration)
-        await reporter.error(str(e)[:500], keyboard=_main_menu_keyboard())
+        try:
+            running_idx = next((i for i, s in enumerate(reporter.steps) if s["status"] == "running"), 0)
+            await reporter.fail_step(running_idx, str(e)[:40])
+            reporter._footer = str(e)[:200]
+            await reporter._force_render(keyboard=_main_menu_keyboard())
+        except Exception:
+            pass
         try:
             await ws.cleanup(task_id_str)
         except Exception as cleanup_err:
             log.error("orchestrator.cleanup_failed", task_id=task_id_str, error=str(cleanup_err))
     finally:
+        if _cancel_watcher and not _cancel_watcher.done():
+            _cancel_watcher.cancel()
         await reporter.stop()
         # Release lock — user is now reviewing the plan (no repo access needed)
         if lock:
@@ -561,6 +652,9 @@ async def execute_plan(ctx: dict, task_id: str):
         return
     ws = WorkspaceService()
 
+    # ── Web cancel watcher — detects Stop button and cancels this task ──
+    _cancel_watcher = await _make_cancel_watcher(task.chat_id or "")
+
     # Re-acquire project lock for coding phase — wait with backoff
     from openclow.services.project_lock import acquire_project_lock, get_lock_holder
     lock = None
@@ -595,26 +689,57 @@ async def execute_plan(ctx: dict, task_id: str):
         if plan_log and plan_log.metadata_:
             plan_text = plan_log.metadata_.get("plan", "")
 
-    plan_steps = _parse_plan_steps(plan_text)
-    total_steps = len(plan_steps) or 5
+    # Ensure we have a real message_id (web tasks may still be None here)
+    chat_message_id = task.chat_message_id
+    if not chat_message_id:
+        chat_message_id = await chat.send_message(task.chat_id, "")
+        await _update_task(task_id_str, chat_message_id=chat_message_id)
 
-    from openclow.services.status_reporter import StatusReporter
-    reporter = StatusReporter(chat, task.chat_id, task.chat_message_id,
-                              title=f"Coding: {task.description[:40]}",
-                              task_id=task_id_str)
+    from openclow.services.checklist_reporter import ChecklistReporter
+    reporter = ChecklistReporter(chat, task.chat_id, chat_message_id,
+                                 title=task.description[:50])
+    reporter.set_steps(["Check health", "Implement", "Review", "Deploy"])
     await reporter.start()
 
     try:
+        # ── Fast container guard — catch dead projects before the LLM health agent ──
+        # The LLM health guard repairs unhealthy containers but CANNOT bootstrap from scratch.
+        # If there are zero containers, save 2-3 minutes of wasted agent turns and tell
+        # the user to bootstrap first.
+        if task.project.is_dockerized:
+            from openclow.services.health_service import find_project_containers
+            _existing = await find_project_containers(task.project.name)
+            if not _existing:
+                await reporter.start_step(0)
+                await reporter.fail_step(0, "no containers")
+                for _i in [1, 2, 3]:
+                    await reporter.skip_step(_i, "skipped")
+                await _update_task(
+                    task_id_str, status="failed",
+                    error_message="No containers running — bootstrap the project first",
+                )
+                from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+                kb = ActionKeyboard(rows=[
+                    ActionRow([ActionButton("🔄 Bootstrap Project", f"project_bootstrap:{task.project_id}")]),
+                    ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+                ])
+                reporter._footer = "❌ No containers — bootstrap the project first, then retry this task"
+                await reporter._force_render(keyboard=kb)
+                log.warning("orchestrator.no_containers_abort",
+                            task_id=task_id_str, project=task.project.name)
+                return
+
         # ── Pre-flight: smart health check + repair + tunnel ──
         await _update_task(task_id_str, status="coding")
-        await reporter.stage("Checking project health", step=1, total=total_steps)
+        await reporter.start_step(0)
 
         _healthy, tunnel_url_for_display = await _ensure_project_healthy(
             task, reporter, task_id_str,
         )
+        await reporter.complete_step(0, "healthy" if _healthy else "proceeding")
 
         # ── Step 1: Run Coder Agent with plan ──
-        await reporter.stage("Implementing plan", step=1, total=total_steps)
+        await reporter.start_step(1)
 
         turn_count = 0
         current_step = 0
@@ -638,29 +763,19 @@ async def execute_plan(ctx: dict, task_id: str):
         ):
             turn_count += 1
 
-            # Track agent text output for step detection
+            # Track agent text output for STEP_DONE markers
             from claude_agent_sdk.types import AssistantMessage, TextBlock
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         full_output += block.text
-                        # Detect STEP_DONE markers
-                        if "STEP_DONE:" in block.text:
-                            current_step += 1
-                            step_desc = block.text.split("STEP_DONE:", 1)[1].strip().split("\n")[0]
-                            await reporter.stage(
-                                step_desc[:50],
-                                step=min(current_step, total_steps),
-                                total=total_steps,
-                            )
 
-            # Tool use progress — rich logging
+            # Tool use progress — show active tool in the Implement step detail
             tool_name = llm.is_tool_use(message)
             if tool_name:
                 last_tool_turn = turn_count
                 if tool_name in ("Edit", "Write"):
                     write_tool_seen = True
-                # Rich tool logging — show what the tool is doing
                 from openclow.worker.tasks._agent_base import describe_tool
                 tool_desc = tool_name
                 if hasattr(message, 'content'):
@@ -668,7 +783,7 @@ async def execute_plan(ctx: dict, task_id: str):
                         if hasattr(block, 'name') and hasattr(block, 'input'):
                             tool_desc = describe_tool(block)
                             break
-                await reporter.log(tool_desc)
+                await reporter.update_step(1, tool_desc[:50])
 
             # Stall detection — tracks tool activity, not just git diff
             # Check every 10 turns starting at turn 20 (catch stalls earlier)
@@ -707,13 +822,14 @@ async def execute_plan(ctx: dict, task_id: str):
             if result_turns is not None:
                 turn_count = result_turns
 
+        await reporter.complete_step(1, f"{turn_count} turns")
         await _log_to_db(task_id_str, "coder", "info",
                          f"Coding complete. Turns: {turn_count}")
         await _update_task(task_id_str, agent_turns=turn_count)
 
         # ── Step 2: Run Reviewer ──
         await _update_task(task_id_str, status="reviewing")
-        await reporter.stage("Reviewing changes for quality & security")
+        await reporter.start_step(2)
 
         review_result = await llm.run_reviewer(
             workspace_path=workspace_path,
@@ -730,7 +846,7 @@ async def execute_plan(ctx: dict, task_id: str):
         # Fix loop
         if review_result.has_issues:
             for retry in range(2):
-                await reporter.stage(f"Fixing review issues (attempt {retry + 1})")
+                await reporter.update_step(2, f"fixing issues (attempt {retry + 1})")
                 async for _ in llm.run_coder_fix(
                     workspace_path=workspace_path,
                     task_description=task.description,
@@ -755,6 +871,7 @@ async def execute_plan(ctx: dict, task_id: str):
                 )
                 if not review_result.has_issues:
                     break
+        await reporter.complete_step(2, "approved" if not review_result.has_issues else "fixed")
 
         # ── Step 3: Stage changes + send summary ──
         await git_ops.add_all(workspace_path)
@@ -765,7 +882,8 @@ async def execute_plan(ctx: dict, task_id: str):
             task._empty_diff_retried = True
             log.warning("orchestrator.no_changes_retrying", task_id=task_id_str,
                        turns=turn_count, output_length=len(full_output))
-            await reporter.stage("No changes detected — retrying with stronger prompt")
+            await reporter.start_step(1)
+            await reporter.update_step(1, "retrying — no changes detected")
 
             # Reset git state for clean retry
             await git_ops.reset_hard(workspace_path)
@@ -797,7 +915,7 @@ async def execute_plan(ctx: dict, task_id: str):
                             if hasattr(block, 'name') and hasattr(block, 'input'):
                                 tool_desc = describe_tool(block)
                                 break
-                    await reporter.log(tool_desc)
+                    await reporter.update_step(1, tool_desc[:50])
                 retry_turn_count += 1
 
             # Re-check diff after retry
@@ -827,16 +945,14 @@ async def execute_plan(ctx: dict, task_id: str):
             )
             return
 
-        # ── Step 3b: Agent-driven deploy — let the LLM decide what to do ──
-        await reporter.stage("Deploying changes to live app")
+        # ── Step 3: Agent-driven deploy — let the LLM decide what to do ──
+        await reporter.start_step(3)
         # Use tunnel URL from pre-flight health check (already verified)
         tunnel_url = tunnel_url_for_display
 
         deploy_result = await _run_deploy_agent(
             task, workspace_path, diff_summary, tunnel_url,
         )
-        if deploy_result:
-            await reporter.log(f"Deploy: {deploy_result[:80]}")
 
         # Refresh tunnel URL (deploy agent may have restarted it)
         try:
@@ -847,8 +963,7 @@ async def execute_plan(ctx: dict, task_id: str):
         except Exception:
             pass
 
-        if tunnel_url:
-            await reporter.log(f"🌐 Live: {tunnel_url}")
+        await reporter.complete_step(3, deploy_result[:40] if deploy_result else "done")
 
         duration = int(time.time() - start_time)
         await _update_task(task_id_str, status="diff_preview", duration_seconds=duration)
@@ -886,46 +1001,44 @@ async def execute_plan(ctx: dict, task_id: str):
                            error_message=error_msg,
                            duration_seconds=int(time.time() - start_time))
         try:
-            await reporter.error(f"{error_msg}. You can retry.", keyboard=_retry_keyboard(task.project_id if task else None))
+            running_idx = next((i for i, s in enumerate(reporter.steps) if s["status"] == "running"), 0)
+            await reporter.fail_step(running_idx, error_msg[:40])
+            reporter._footer = f"{error_msg}. You can retry."
+            await reporter._force_render(keyboard=_retry_keyboard(task.project_id if task else None))
         except Exception:
             pass
     except Exception as e:
         error_str = str(e).lower()
 
-        # Check if this is an auth error
         from openclow.worker.tasks._agent_base import is_auth_error
+        running_idx = next((i for i, s in enumerate(reporter.steps) if s["status"] == "running"), 0)
+
         if is_auth_error(e):
             from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
             kb = ActionKeyboard(rows=[
                 ActionRow([ActionButton("🔑 Authenticate Claude", "claude_auth")]),
                 ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
             ])
-            await reporter.error(
-                "🔑 Claude Authentication Required\n\n"
-                "Your Claude session has expired. Please authenticate to continue.",
-                keyboard=kb
-            )
+            await reporter.fail_step(running_idx, "auth expired")
+            reporter._footer = "🔑 Claude session expired. Please authenticate to continue."
+            await reporter._force_render(keyboard=kb)
             await _update_task(task_id_str, status="failed",
                                error_message="Claude auth expired - re-authentication required")
-        
-        # Check if this is a stall error
+
         elif "stalled" in error_str or "no progress" in error_str:
             from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
             kb = ActionKeyboard(rows=[
                 ActionRow([ActionButton("🔄 Retry Task", "menu:task")]),
                 ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
             ])
-            await reporter.error(
-                "⏱️ Agent Stalled\n\n"
-                "The agent stopped making progress. Try rephrasing the task with more specific details.",
-                keyboard=kb
-            )
+            await reporter.fail_step(running_idx, "stalled")
+            reporter._footer = "Agent stopped making progress. Try rephrasing the task."
+            await reporter._force_render(keyboard=kb)
             await _update_task(task_id_str, status="failed",
                                error_message=str(e), duration_seconds=int(time.time() - start_time))
-        
+
         else:
             duration = int(time.time() - start_time)
-            # Extract meaningful error from ProcessError (Claude CLI crashes)
             raw = str(e)
             if "exit code" in raw and "Check stderr" in raw:
                 stderr = getattr(e, "stderr", None) or getattr(e, "output", None)
@@ -936,7 +1049,9 @@ async def execute_plan(ctx: dict, task_id: str):
             log.error("orchestrator.coding_failed", task_id=task_id_str, error=str(e))
             await _update_task(task_id_str, status="failed",
                                error_message=raw, duration_seconds=duration)
-            await reporter.error(raw[:500], keyboard=_retry_keyboard(task.project_id if task else None))
+            await reporter.fail_step(running_idx, raw[:40])
+            reporter._footer = raw[:200]
+            await reporter._force_render(keyboard=_retry_keyboard(task.project_id if task else None))
         try:
             git_status = await git_ops.status(workspace_path)
             await _log_to_db(task_id_str, "system", "error", str(e),
@@ -948,6 +1063,8 @@ async def execute_plan(ctx: dict, task_id: str):
         except Exception as cleanup_err:
             log.error("orchestrator.cleanup_failed", task_id=task_id_str, error=str(cleanup_err))
     finally:
+        if _cancel_watcher and not _cancel_watcher.done():
+            _cancel_watcher.cancel()
         await reporter.stop()
         if lock:
             await lock.release()

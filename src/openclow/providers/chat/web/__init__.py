@@ -64,6 +64,10 @@ class WebChatProvider(ChatProvider):
         channel = f"wc:{user_id}:{session_id}"
 
         # Create DB row so the worker can edit it later via edit_message(is_final=True)
+        # Use a non-empty placeholder so the message survives the frontend filter
+        # (.filter(m => m.role !== "assistant" || m.content.trim() !== ""))
+        # on page refresh — the real content arrives via send_progress_card heartbeat.
+        _stored_content = text if text.strip() else "__LOADING__"
         msg_id = "web_msg"
         if user_id and session_id:
             try:
@@ -74,7 +78,7 @@ class WebChatProvider(ChatProvider):
                         session_id=session_id,
                         user_id=user_id,
                         role="assistant",
-                        content=text,
+                        content=_stored_content,
                         is_complete=False,
                     )
                     db.add(msg)
@@ -172,11 +176,65 @@ class WebChatProvider(ChatProvider):
         """Web: buttons stripped — web is conversational, no button clicks needed."""
         return await self.send_message(chat_id, text)
 
+    async def send_agent_token(self, chat_id: str, message_id: str, text: str) -> None:
+        """Stream a raw agent text block to the frontend (no DB persist — ephemeral).
+
+        Called once per agent turn (TextBlock), not per character. The frontend
+        accumulates tokens into a scrolling log inside the progress card.
+        """
+        user_id, session_id = self._parse_chat_id(chat_id)
+        channel = f"wc:{user_id}:{session_id}"
+        await self._publish(channel, {
+            "type": "agent_token",
+            "message_id": message_id,
+            "text": text,
+        })
+
+    async def send_progress_card(
+        self, chat_id: str, message_id: str, card: dict
+    ) -> None:
+        """Publish a structured progress card event (web-only).
+        Callers check hasattr(chat, 'send_progress_card') before calling."""
+        user_id, session_id = self._parse_chat_id(chat_id)
+        channel = f"wc:{user_id}:{session_id}"
+        await self._publish(channel, {
+            "type": "progress_card",
+            "message_id": message_id,
+            "card": card,
+        })
+        # Persist to DB so the card survives page refresh.
+        # Also embed session_id into the stored card so the Stop button works after refresh.
+        if message_id and str(message_id).isdigit():
+            try:
+                from openclow.models.base import async_session
+                from openclow.models.web_chat import WebChatMessage
+                # Inject session_id so frontend can render the Stop button after page refresh
+                card_to_store = dict(card)
+                if "session_id" not in card_to_store and session_id:
+                    card_to_store["session_id"] = str(session_id)
+                content = f"__PROGRESS_CARD__{json.dumps(card_to_store)}"
+                async with async_session() as db:
+                    msg = await db.get(WebChatMessage, int(message_id))
+                    if msg:
+                        msg.content = content
+                        if card.get("overall_status") in ("done", "failed"):
+                            msg.is_complete = True
+                        await db.commit()
+            except Exception as e:
+                log.warning("web_provider.progress_card_persist_failed", message_id=message_id, error=str(e))
+
     async def send_plan_preview(
         self, chat_id: str, message_id: str, task_id: str, plan: str
     ) -> None:
-        """Web: send plan as plain text — no approve/reject buttons needed."""
-        await self.edit_message(chat_id, message_id, plan, is_final=False)
+        """Web: publish plan_preview event with task_id so UI can show Approve/Reject buttons."""
+        user_id, session_id = self._parse_chat_id(chat_id)
+        channel = f"wc:{user_id}:{session_id}"
+        await self._publish(channel, {
+            "type": "plan_preview",
+            "message_id": message_id,
+            "task_id": task_id,
+            "text": plan,
+        })
 
     async def send_progress(
         self, chat_id: str, message_id: str, step: str, total_steps: int, current_step: int

@@ -68,21 +68,22 @@ async def onboard_project(ctx: dict, repo_url: str, chat_id: str, message_id: st
     # ── No cache — full clone + analyze ──
     temp_path = os.path.join(settings.workspace_base_path, f"_onboard-{uuid.uuid4().hex[:8]}")
 
-    from openclow.services.status_reporter import StatusReporter
-    reporter = StatusReporter(chat, chat_id, message_id, title=f"Onboarding: {project_name}")
+    from openclow.services.checklist_reporter import ChecklistReporter
+    reporter = ChecklistReporter(chat, chat_id, message_id, title=f"Adding {project_name}")
+    reporter.set_steps(["Clone repository", "Scan files", "Detect tech stack", "Review config", "Confirm"])
     await reporter.start()
 
     try:
-        await reporter.stage("Cloning repository", step=1, total=5)
+        await reporter.start_step(0)
 
         # Clone
         await git.clone_repo(repo, temp_path)
-        await reporter.log("Repository cloned")
+        await reporter.complete_step(0, "cloned")
 
-        await reporter.stage("Scanning files", step=2, total=5)
-        await reporter.log("Looking for docker-compose, package.json, Dockerfile...")
+        await reporter.start_step(1)
+        await reporter.update_step(1, "looking for docker-compose, package.json...")
 
-        await reporter.stage("Detecting tech stack", step=3, total=5)
+        await reporter.start_step(2)
 
         # Analyze with Claude (streams progress via callback)
         async def on_analysis_progress(msg: str):
@@ -91,17 +92,17 @@ async def onboard_project(ctx: dict, repo_url: str, chat_id: str, message_id: st
         config = await analyze_repo(temp_path, on_progress=on_analysis_progress)
 
         if not config:
-            await reporter.error("Failed to analyze project. Check the repo URL.")
+            await reporter.fail_step(2, "analysis failed")
+            reporter._footer = "Failed to analyze project. Check the repo URL."
+            await reporter._force_render()
             return
 
-        await reporter.stage("Config detected", step=4, total=5)
-        await reporter.log(f"Stack: {config.tech_stack}")
-        if config.docker_compose:
-            await reporter.log(f"Docker: {config.docker_compose}")
-        if config.app_container:
-            await reporter.log(f"Container: {config.app_container}:{config.app_port}")
-
-        await reporter.stage("Ready for approval", step=5, total=5)
+        await reporter.complete_step(2, config.tech_stack or "detected")
+        await reporter.start_step(3)
+        detail = config.app_container or config.docker_compose or ""
+        await reporter.complete_step(3, detail[:40] if detail else "reviewed")
+        await reporter.start_step(4)
+        await reporter.complete_step(4, "ready")
 
         # Store config temporarily for approval
         # We'll use Redis to store pending config
@@ -161,11 +162,17 @@ async def onboard_project(ctx: dict, repo_url: str, chat_id: str, message_id: st
         log.info("onboarding.preview_sent", project=config.name)
 
     except asyncio.CancelledError:
-        await reporter.error("⏹ Onboarding cancelled.")
+        running_idx = next((i for i, s in enumerate(reporter.steps) if s["status"] == "running"), 0)
+        await reporter.fail_step(running_idx, "cancelled")
+        reporter._footer = "Onboarding cancelled."
+        await reporter._force_render()
         raise
     except Exception as e:
         log.error("onboarding.failed", error=str(e), repo=repo)
-        await reporter.error(f"Onboarding failed: {str(e)[:200]}")
+        running_idx = next((i for i, s in enumerate(reporter.steps) if s["status"] == "running"), 0)
+        await reporter.fail_step(running_idx, str(e)[:40])
+        reporter._footer = f"Failed: {str(e)[:200]}"
+        await reporter._force_render()
     finally:
         await reporter.stop()
         # Cleanup temp clone

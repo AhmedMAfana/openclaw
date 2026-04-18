@@ -5,6 +5,7 @@ from arq import create_pool
 from arq.connections import RedisSettings
 
 from openclow.settings import settings
+from openclow.utils.docker_path import get_docker_env
 from openclow.utils.logging import get_logger
 
 log = get_logger()
@@ -81,10 +82,11 @@ async def on_startup(ctx: dict):
             result = await session.execute(sa_select3(Project.name))
             known_projects = {row[0] for row in result.all()}
 
+        _denv = get_docker_env()
         result = subprocess.run(
             ["docker", "ps", "-a", "--filter", "label=com.docker.compose.project",
              "--format", "{{.Labels}}"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, env=_denv,
         )
         # Build set of legitimate stack names: "openclow-{project_name}"
         legitimate = {"openclow"} | {f"openclow-{name}" for name in known_projects}
@@ -109,7 +111,7 @@ async def on_startup(ctx: dict):
             log.warning("worker.cleaning_orphan_stack", project=orphan_proj)
             subprocess.run(
                 ["docker", "compose", "-p", orphan_proj, "down", "--remove-orphans"],
-                capture_output=True, timeout=30,
+                capture_output=True, timeout=30, env=_denv,
             )
     except Exception as e:
         log.warning("worker.orphan_cleanup_failed", error=str(e))

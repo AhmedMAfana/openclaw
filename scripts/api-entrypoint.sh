@@ -27,4 +27,21 @@ else
     echo "[api-entrypoint]   Fix: docker exec -it openclow-worker-1 claude login"
 fi
 
+# ── JWT secret — auto-generate once, persist across restarts ──────────────
+# If WEB_CHAT_JWT_SECRET is already set (e.g. via .env or CI), use it as-is.
+# Otherwise generate a strong random secret and store it in a volume file so
+# the same secret survives container restarts. A new volume = a new secret,
+# which correctly invalidates all existing tokens on a fresh deployment.
+if [ -z "$WEB_CHAT_JWT_SECRET" ]; then
+    SECRET_FILE="${HOME}/.openclow/jwt_secret"
+    mkdir -p "$(dirname "$SECRET_FILE")"
+    if [ ! -f "$SECRET_FILE" ]; then
+        openssl rand -hex 32 > "$SECRET_FILE"
+        echo "[api-entrypoint] Generated new WEB_CHAT_JWT_SECRET (stored in volume)"
+    else
+        echo "[api-entrypoint] Loaded WEB_CHAT_JWT_SECRET from volume"
+    fi
+    export WEB_CHAT_JWT_SECRET="$(cat "$SECRET_FILE")"
+fi
+
 exec "$@"

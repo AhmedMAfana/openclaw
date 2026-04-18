@@ -9,20 +9,56 @@ from openclow.utils.logging import get_logger
 
 log = get_logger()
 
-BOOTSTRAP_PROMPT = """You are a DevOps engineer. Get this project running.
+BOOTSTRAP_PROMPT = """You are a DevOps engineer. Get this project running from scratch.
 
-Project: {project_name} | Tech: {tech_stack}
-Docker Compose: {docker_compose_file}
-App Container: {app_container} | Port: {app_port}
-Working Directory: {workspace_path}
+Project: {project_name}
+Tech Stack: {tech_stack}
+Docker Compose file: {docker_compose_file}
+App service name: {app_container}
+App port: {app_port}
+Working directory: {workspace_path}
 
-DO THIS IN ORDER:
-1. Check if .env exists. If not, copy .env.example to .env
-2. Run: docker compose -f {docker_compose_file} -p openclow-{project_name} up -d
-3. Wait 15 seconds, then check: docker compose -p openclow-{project_name} ps
-4. For any unhealthy container, read its logs and fix the issue
-5. Check if app responds: curl -s http://localhost:{app_port} || echo "not responding"
-6. Report what happened"""
+## Steps — Complete Each Before Moving to the Next
+
+### Step 1: Prepare environment
+- Check if .env exists. If not: copy .env.example to .env
+- Verify the .env has a valid APP_KEY or SECRET_KEY (generate one if missing)
+- If there is a composer.lock but no auth.json, check /app/auth.json and copy it here
+
+### Step 2: Start containers
+Run: docker compose -f {docker_compose_file} -p openclow-{project_name} up -d --build
+Wait 20 seconds after the command completes.
+
+### Step 3: Check container health
+Run: docker compose -p openclow-{project_name} ps
+For each container NOT in "healthy" or "running" state:
+  a. Read its logs: docker compose -p openclow-{project_name} logs [service]
+  b. Diagnose the specific error (missing package, wrong env var, port conflict, etc.)
+  c. Apply the targeted fix (edit Dockerfile, .env, requirements.txt, etc.)
+  d. Rebuild that service: docker compose -f {docker_compose_file} -p openclow-{project_name} up -d --build [service]
+  e. Wait 15 seconds, re-check
+Repeat until all containers are running.
+
+### Step 4: Run post-start setup (if needed by tech stack)
+Common setup commands:
+- PHP/Laravel: docker compose exec {app_container} php artisan migrate --force
+- Python/Django: docker compose exec {app_container} python manage.py migrate
+- Node.js: skip (no migrations needed usually)
+- Ruby/Rails: docker compose exec {app_container} rails db:migrate
+Only run migrations if you see database models/migration files in the workspace.
+
+### Step 5: Verify the app responds
+Run inside the app container:
+  curl -s -o /dev/null -w "%{{http_code}}" http://localhost:{app_port}
+- 200–399: success
+- 500: app crashed — read its logs and fix
+- Connection refused: container may need restart or app hasn't bound to port yet
+
+### Step 6: Final report
+End with exactly one of:
+BOOTSTRAP_SUCCESS: App is running at localhost:{app_port} — [what was fixed if anything]
+BOOTSTRAP_FAILED: [specific reason] — [exact command the user should run manually]
+"""
 
 
 async def run_bootstrap(workspace_path: str, project) -> str:

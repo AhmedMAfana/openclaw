@@ -17,6 +17,7 @@ import subprocess
 import time
 
 from openclow.settings import settings
+from openclow.utils.docker_path import get_docker_env
 from openclow.utils.logging import get_logger
 
 log = get_logger()
@@ -48,10 +49,11 @@ async def cleanup_orphan_containers():
         # Legitimate compose project names
         legitimate = {"openclow"} | {f"openclow-{name}" for name in known_projects}
 
+        _denv = get_docker_env()
         result = subprocess.run(
             ["docker", "ps", "-a", "--filter", "label=com.docker.compose.project",
              "--format", "{{.Label \"com.docker.compose.project\"}}"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, env=_denv,
         )
 
         orphan_stacks = set()
@@ -71,7 +73,7 @@ async def cleanup_orphan_containers():
             log.info("maintenance.removing_orphan_stack", project=orphan)
             subprocess.run(
                 ["docker", "compose", "-p", orphan, "down", "--remove-orphans"],
-                capture_output=True, timeout=60,
+                capture_output=True, timeout=60, env=_denv,
             )
             removed += 1
 
@@ -83,7 +85,7 @@ async def cleanup_orphan_containers():
         try:
             vol_result = subprocess.run(
                 ["docker", "volume", "prune", "-f"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=30, env=_denv,
             )
             if "Total reclaimed space" in vol_result.stdout and "0B" not in vol_result.stdout:
                 log.info("maintenance.volumes_pruned", output=vol_result.stdout.strip())
@@ -132,7 +134,7 @@ async def cleanup_stale_workspaces(max_age_hours: int = 12):
             compose_project = f"openclow-task-{task_id}"
             subprocess.run(
                 ["docker", "compose", "-p", compose_project, "down", "--remove-orphans"],
-                capture_output=True, timeout=30,
+                capture_output=True, timeout=30, env=get_docker_env(),
             )
 
             # Remove git worktree reference first
@@ -180,16 +182,57 @@ async def _is_task_active(task_id_prefix: str) -> bool:
 # 3. Docker disk usage management
 # ─────────────────────────────────────────────────
 
+def _docker_daemon_uptime_seconds() -> float | None:
+    """Return how many seconds ago Docker daemon started. None if unknown."""
+    try:
+        _denv = get_docker_env()
+        result = subprocess.run(
+            # ServerVersion is always present; Swarm.Error shows restart reason
+            ["docker", "info", "--format",
+             "{{.ContainersRunning}} {{.ContainersStopped}} {{.ContainersPaused}}"],
+            capture_output=True, text=True, timeout=5, env=_denv,
+        )
+        if result.returncode != 0:
+            return None
+        # Docker exposes the daemon start time via /proc on Linux, not via 'docker info'.
+        # Best proxy: check if any openclow containers were running very recently.
+        # We rely on a separate approach: check 'docker system events' for daemon start.
+        events = subprocess.run(
+            ["docker", "system", "events", "--since", "3m", "--until", "now",
+             "--filter", "type=daemon", "--format", "{{.Status}}"],
+            capture_output=True, text=True, timeout=5, env=_denv,
+        )
+        lines = [l.strip() for l in events.stdout.strip().split("\n") if l.strip()]
+        # If any daemon 'reload' or 'start' event in last 3 minutes → Docker just restarted
+        if any(s in ("reload", "start") for s in lines):
+            return 0.0  # Treat as "just restarted" (< DOCKER_RESTART_GRACE_SECONDS)
+        return None
+    except Exception:
+        return None
+
+
+# Don't prune containers if Docker daemon (re)started less than this long ago.
+# After Docker Desktop restart, containers are stopped but auto-recover with unless-stopped.
+# Pruning them before recovery is the root cause of the health-check → rebuild loop.
+DOCKER_RESTART_GRACE_SECONDS = 300  # 5 minutes
+
+
 async def prune_docker_if_needed(threshold_gb: float = 20.0):
     """Prune dangling images and build cache if Docker disk usage exceeds threshold.
 
     Runs proactively so builds never run out of space mid-run.
     Never removes named images, volumes, or running containers.
+
+    Key safety rules:
+    - Never prune containers stopped less than 2 hours ago (unless=stopped auto-recovery)
+    - Skip container prune entirely if Docker daemon just restarted (within 5 min)
+    - Never prune named/tagged images — only <none>:<none> dangling layers
     """
     try:
+        _denv = get_docker_env()
         result = subprocess.run(
             ["docker", "system", "df", "--format", "{{.Size}}"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, env=_denv,
         )
         # Parse total size — Docker outputs like "38.26GB" or "411.1MB"
         lines = result.stdout.strip().split("\n")
@@ -214,25 +257,39 @@ async def prune_docker_if_needed(threshold_gb: float = 20.0):
 
         log.info("maintenance.docker_prune_starting", usage_gb=round(total_gb, 1), threshold_gb=threshold_gb)
 
-        # Remove dangling images (safe — only untagged/unreferenced)
+        # Check if Docker daemon just restarted — if so, skip container prune entirely.
+        # After a Docker Desktop restart, project containers are in "Exited" state but
+        # will auto-recover via unless-stopped. Pruning them now would destroy the
+        # container instances Docker is trying to restart, causing a 20-30 min rebuild.
+        daemon_uptime = _docker_daemon_uptime_seconds()
+        docker_just_restarted = daemon_uptime is not None and daemon_uptime < DOCKER_RESTART_GRACE_SECONDS
+
+        if docker_just_restarted:
+            log.info("maintenance.docker_prune_skipped_restart_grace",
+                     reason="Docker daemon restarted recently — skipping container prune to allow auto-recovery")
+        else:
+            # Only prune containers stopped for more than 2 hours.
+            # The --filter "until=2h" ensures containers that just stopped
+            # (Docker restart, manual stop) are NOT removed — they recover on their own.
+            subprocess.run(
+                ["docker", "container", "prune", "-f", "--filter", "until=2h"],
+                capture_output=True, timeout=30, env=_denv,
+            )
+
+        # Remove dangling images (safe — only untagged/unreferenced <none>:<none> layers)
+        # Named images like sail-8.4/app:latest are NEVER removed by this.
         subprocess.run(
             ["docker", "image", "prune", "-f"],
-            capture_output=True, timeout=60,
+            capture_output=True, timeout=60, env=_denv,
         )
 
         # Remove build cache older than 1h (aggressive — saves disk proactively)
         subprocess.run(
             ["docker", "builder", "prune", "-f", "--filter", "until=1h"],
-            capture_output=True, timeout=120,
+            capture_output=True, timeout=120, env=_denv,
         )
 
-        # Remove stopped containers (never running, safe to remove)
-        subprocess.run(
-            ["docker", "container", "prune", "-f"],
-            capture_output=True, timeout=30,
-        )
-
-        log.info("maintenance.docker_pruned")
+        log.info("maintenance.docker_pruned", skipped_container_prune=docker_just_restarted)
     except Exception as e:
         log.warning("maintenance.docker_prune_failed", error=str(e))
 
@@ -361,32 +418,57 @@ def rotate_activity_log(max_size_mb: float = 50.0):
 # ─────────────────────────────────────────────────
 
 async def release_orphan_locks(max_stuck_minutes: int = 40):
-    """Force-release project locks whose projects have been stuck in 'bootstrapping'
-    for longer than max_stuck_minutes. Catches bootstrap jobs that were killed
-    mid-run and never released their lock.
+    """Force-release project locks that have been held too long.
+
+    Strategy: check Redis lock TTL directly. The lock is set with a 3900s TTL.
+    If remaining TTL < (3900 - max_stuck_minutes*60), the lock has been held
+    for at least max_stuck_minutes → orphan → force-release it.
+
+    Also marks stuck 'bootstrapping' projects as 'failed'.
+    Uses lock TTL instead of Project.updated_at (which doesn't exist on the model).
     """
-    from datetime import datetime, timedelta
+    import redis.asyncio as aioredis
     from sqlalchemy import select as sa_select, update as sa_update
     from openclow.models import Project, async_session
     from openclow.services.project_lock import force_release
+    from openclow.settings import settings
 
     try:
-        cutoff = datetime.utcnow() - timedelta(minutes=max_stuck_minutes)
-
+        # Find all projects currently in bootstrapping state
         async with async_session() as session:
             result = await session.execute(
-                sa_select(Project.id, Project.name, Project.updated_at).where(
+                sa_select(Project.id, Project.name).where(
                     Project.status == "bootstrapping",
-                    Project.updated_at < cutoff,
                 )
             )
-            stuck_projects = result.all()
+            bootstrapping = result.all()
 
-        if not stuck_projects:
+        if not bootstrapping:
             return
 
+        # Check each lock's remaining TTL — if held for >max_stuck_minutes, it's an orphan
+        _DEFAULT_TTL = 3900
+        threshold_remaining = _DEFAULT_TTL - (max_stuck_minutes * 60)
+
+        r = aioredis.from_url(settings.redis_url)
+        stuck = []
+        try:
+            for project_id, project_name in bootstrapping:
+                key = f"openclow:project_lock:{project_id}"
+                ttl = await r.ttl(key)
+                # ttl == -2: key gone (lock already released — status stuck at bootstrapping)
+                # ttl < threshold_remaining: lock held for > max_stuck_minutes
+                if ttl == -2 or ttl < threshold_remaining:
+                    age_min = round((_DEFAULT_TTL - ttl) / 60) if ttl >= 0 else "unknown"
+                    stuck.append((project_id, project_name, age_min))
+        finally:
+            await r.aclose()
+
+        if not stuck:
+            return
+
+        stuck_ids = [row[0] for row in stuck]
         async with async_session() as session:
-            stuck_ids = [row[0] for row in stuck_projects]
             await session.execute(
                 sa_update(Project)
                 .where(Project.id.in_(stuck_ids))
@@ -394,13 +476,12 @@ async def release_orphan_locks(max_stuck_minutes: int = 40):
             )
             await session.commit()
 
-        for row in stuck_projects:
-            age = round((datetime.utcnow() - row[2]).total_seconds() / 60)
+        for project_id, project_name, age_min in stuck:
             log.warning("maintenance.orphan_lock_released",
-                        project_id=row[0], project_name=row[1], age_minutes=age)
-            await force_release(row[0])
+                        project_id=project_id, project_name=project_name, age_minutes=age_min)
+            await force_release(project_id)
 
-        log.info("maintenance.orphan_locks_released", count=len(stuck_projects))
+        log.info("maintenance.orphan_locks_released", count=len(stuck))
     except Exception as e:
         log.warning("maintenance.orphan_lock_cleanup_failed", error=str(e))
 

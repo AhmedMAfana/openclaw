@@ -9,11 +9,13 @@ NOT a status reporter. This is a self-healing loop:
 """
 import asyncio
 import os
+import subprocess
 
 from openclow.services.health_service import (
     HealthReport, run_full_health_check, find_project_containers,
 )
 from openclow.services.tunnel_service import stop_tunnel as _stop_tunnel
+from openclow.utils.docker_path import get_docker_env
 from openclow.utils.logging import get_logger
 
 log = get_logger()
@@ -129,6 +131,97 @@ def _find_problems(report: HealthReport) -> list[dict]:
 # The agentic repair loop
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Lightweight repair preflight — does NOT kill containers
+# ---------------------------------------------------------------------------
+
+async def _repair_preflight(project, workspace: str, compose: str, compose_project: str) -> dict:
+    """Lightweight preflight for the repair path.
+
+    Critically different from bootstrap._preflight:
+    - Does NOT run compose_down — containers may be temporarily stopped (Docker restart)
+      killing them forces a full compose_up that may need a rebuild (20-30 min)
+    - Does NOT stop the tunnel — it may still be reachable
+    - Does NOT prune networks — unnecessary for repair
+    - Does NOT run orphan stack cleanup — that's maintenance's job
+
+    Does:
+    1. Verify Docker daemon is accessible (hard requirement)
+    2. Write port env vars into .env (port isolation)
+    3. Verify compose file exists (agent needs it)
+    4. Detect container state: stopped vs missing vs mixed
+       Returns this as "container_state" so the agent knows whether
+       to just compose_up (stopped) or possibly compose_build (missing).
+
+    Raises RuntimeError if Docker is inaccessible.
+    Returns dict: {"container_state": "stopped"|"missing"|"mixed", "app_port": str}
+    """
+    from openclow.services.port_allocator import get_port_env_vars
+
+    _denv = get_docker_env()
+
+    # 1. Verify Docker daemon is accessible
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True, text=True, timeout=5, env=_denv,
+        )
+        if result.returncode != 0:
+            log.error("repair_preflight.docker_unavailable", stderr=result.stderr[:200])
+            raise RuntimeError("Docker daemon is not running or not accessible")
+    except FileNotFoundError:
+        raise RuntimeError("Docker CLI not found")
+
+    # 2. Write port env vars directly into .env (needed for port isolation)
+    port_vars = get_port_env_vars(project.id)
+    env_path = os.path.join(workspace, ".env")
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            env_content = f.read()
+        lines = [line for line in env_content.split("\n")
+                 if not any(line.startswith(f"{k}=") for k in port_vars)]
+        lines.append("\n# OpenClow port isolation (auto-generated)")
+        for k, v in port_vars.items():
+            lines.append(f"{k}={v}")
+        with open(env_path, "w") as f:
+            f.write("\n".join(lines))
+
+    # 3. Verify compose file exists
+    compose_path = os.path.join(workspace, compose)
+    if not os.path.exists(compose_path):
+        raise RuntimeError(f"Compose file not found: {compose_path}")
+
+    # 4. Detect container state — tells agent what action is needed
+    container_state = "unknown"
+    try:
+        ps_result = subprocess.run(
+            ["docker", "ps", "-a",
+             "--filter", f"label=com.docker.compose.project={compose_project}",
+             "--format", "{{.Status}}"],
+            capture_output=True, text=True, timeout=5, env=_denv,
+        )
+        statuses = [s.strip() for s in ps_result.stdout.strip().split("\n") if s.strip()]
+        if not statuses:
+            container_state = "missing"  # No containers at all → compose_up (may need build)
+        elif all("Exited" in s or "Created" in s for s in statuses):
+            container_state = "stopped"  # All stopped → just compose_up, no build needed
+        elif any("Up" in s for s in statuses) and any(
+            "Exited" in s or "Created" in s for s in statuses
+        ):
+            container_state = "mixed"    # Some up, some stopped → partial failure
+        else:
+            container_state = "running_unhealthy"  # All up but health checks failing
+    except Exception as e:
+        log.warning("repair_preflight.state_check_failed", error=str(e))
+
+    log.info("repair_preflight.done",
+             project=project.name,
+             container_state=container_state,
+             app_port=port_vars.get("APP_PORT", ""),
+             skipped=["compose_down", "tunnel_stop", "network_prune"])
+    return {"container_state": container_state, "app_port": port_vars.get("APP_PORT", "")}
+
+
 REPAIR_PROMPT = """You are fixing a running project. App already exists — focus on Docker + Verify + Tunnel.
 
 PROJECT: {project_name}
@@ -138,6 +231,13 @@ COMPOSE FILE: {compose}
 COMPOSE PROJECT: {compose_project}
 HOST ARCHITECTURE: {arch}
 ALLOCATED PORT: {port}
+
+CONTAINER STATE: {container_state}
+  stopped          = containers EXIST but are stopped (e.g. Docker Desktop restart) → just compose_up, NO compose_down first
+  missing          = no containers exist at all → compose_up; if "image not found" → compose_build first
+  mixed            = some running, some stopped → check logs on stopped ones, then compose_up
+  running_unhealthy = all up but health checks failing → skip step 1, go straight to step 2
+  unknown          = couldn't determine → treat as missing
 
 DOCKER-COMPOSE CONTENTS:
 ```yaml
@@ -158,20 +258,40 @@ PROBLEMS FOUND:
 YOUR MISSION — execute these steps IN ORDER:
 
 STEP 0 — CHECK CONTAINERS:
-- compose_ps("{compose_project}") to see current state
+- Call compose_ps("{compose_project}") — this is the ONLY tool for this step.
+- DO NOT use docker_exec here. docker inspect is a host command — it does not exist inside containers and will hang.
 - Output: STEP_DONE: 0 <X/Y containers running>
 
 STEP 1 — START DOCKER CONTAINERS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL RULE based on CONTAINER STATE:
+  • stopped → call compose_up IMMEDIATELY. Do NOT run compose_down first.
+    Containers are just temporarily stopped (e.g. Docker Desktop restart).
+    They still have their images — a compose_up is all that's needed.
+  • missing → call compose_up; if "image not found" error → compose_build first, then compose_up
+  • mixed   → call compose_up to bring up the stopped ones
+  • running_unhealthy → SKIP this step (output STEP_SKIP: 1 all running), go to step 2
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - compose_up("{compose}", "{compose_project}", "{workspace}")
-- If it FAILS:
-  * Read the error output carefully
-  * DIAGNOSIS: <your analysis>
-  * If "port already allocated": list_containers() → find orphans → compose_down
-  * If image missing: compose_up with build=True
-  * ACTION: <what you're fixing>
-  * Retry compose_up
-  * You get up to 3 fix attempts
-- After containers start, verify ALL are running via compose_ps
+- compose_up is NON-BLOCKING. Possible responses:
+  * "SUCCESS" → containers started immediately, poll compose_ps to confirm, then STEP_DONE: 1
+  * "STARTED" → docker is launching in background. Poll compose_ps every 5s (up to 10 polls = 50s)
+    until all containers show as running. If still not up after 10 polls → DIAGNOSIS
+  * "FAILED — image not found" → image is missing, you MUST build it first:
+      1. Call compose_build("{compose}", "{compose_project}", "{workspace}")
+      2. compose_build response:
+         - "DONE" → build succeeded, call compose_up again immediately
+         - "FAILED ..." → read error, fix Dockerfile/.env, retry compose_build once
+         - "BUILDING" → build is running in background (takes 2-20min on ARM).
+           You MUST call compose_build_status("{compose_project}") every 30s to poll.
+           Keep polling until status returns "DONE" or "FAILED". Do NOT proceed to
+           compose_up until build is DONE. Do NOT output STEP_DONE: 1 until containers
+           are actually running. Output STATUS: <progress> while waiting.
+  * "FAILED (exit code ...)" → read the error, fix root cause, retry once:
+    - "port already allocated": list_containers() → compose_down → retry compose_up
+    - bind-mount / file path error: Edit docker-compose.override.yml to remove bad mounts → retry
+    - Maximum 1 retry after a fix. If still failing: output REPAIR_FAILED with the error
+- After containers are confirmed running via compose_ps:
 - Output: STEP_DONE: 1 <X/Y containers running>
 
 STEP 2 — FIX ISSUES:
@@ -187,19 +307,21 @@ STEP 3 — VERIFY APP:
 - If fails: read logs, fix, retry
 - Output: STEP_DONE: 3 <HTTP status>
 
-STEP 4 — CREATE PUBLIC URL:
-- tunnel_get_url("{project_name}") — check if tunnel exists
-- If no tunnel: tunnel_start("{project_name}", "http://<app_container_ip>:{port}")
-- Output: STEP_DONE: 4 <tunnel_url>
+STEP 4 — VERIFY APP IS SERVING:
+- Find the app container (laravel.test, app, web — NOT mysql/redis)
+- docker_exec("<app_container>", "curl -sf http://localhost:{port}/ -o /dev/null -w %{{http_code}}")
+- Expected: 200, 301, or 302 — anything else means the app isn't ready
+- If fails: read container_logs, diagnose, fix (wrong port? app not started? .env missing?)
+- Max 2 fix attempts, then output STEP_FAIL: 4 <reason>
+- If passes: output STEP_DONE: 4 <HTTP status> → REPAIR_COMPLETE
+- The tunnel will be established automatically by the system after you finish — do NOT call tunnel_start
 
 RULES:
 - Output STATUS: <message> BEFORE every action
 - Output DIAGNOSIS: <analysis> when something fails
 - Output ACTION: <what you're fixing> when fixing
 - Output REPAIR_COMPLETE when all steps done
-- Be FAST — act decisively
 - NEVER modify docker-compose.yml image names or build contexts
-- Use compose_up(build=True) if image is missing
 
 CRITICAL — TOOL USAGE:
 - No Bash. Use ONLY Docker MCP tools for container operations.
@@ -207,10 +329,49 @@ CRITICAL — TOOL USAGE:
 - Read/Edit/Glob for host workspace files
 - Tunnels run on HOST, NOT in containers — use tunnel_start/tunnel_get_url
 
-CRITICAL — SELF-HEALING:
-- When ANY command fails, investigate before giving up
-- Fix the root cause, retry with the fix
-- NEVER give up after one failure — try at least 2 approaches
+CRITICAL — DIAGNOSE BEFORE GIVING UP:
+When a tool call fails, your first move is ALWAYS to check actual state, not to report failure.
+
+  Tool returns "connection closed" or MCP error:
+    → Call compose_ps("{compose_project}") RIGHT NOW.
+    → Docker may have succeeded before the connection dropped.
+    → If containers are running: output STEP_DONE and continue — the operation worked.
+    → If not running: retry compose_up once. Still failing? Read container_logs for clues.
+
+  Tool returns "TIMEOUT":
+    → Call compose_ps — the operation may have completed before timing out.
+    → If running: continue. If not: check container_logs for the real error.
+
+  Tool returns "BLOCKED":
+    → Read the BLOCKED reason carefully.
+    → "Could not parse" = try the same operation a different way (use compose_ps, container_logs).
+    → Security block = find an alternative approach that doesn't trigger the block.
+    → Never treat BLOCKED as "impossible" without understanding WHY it was blocked.
+
+  compose_up fails repeatedly:
+    → Read the actual compose log: Read("/tmp/compose_up_{compose_project}.log")
+    → Read container_logs for the specific container that failed
+    → Check .env values, port conflicts, image availability
+    → Fix the root cause, THEN retry
+
+  compose_build returns "BUILDING":
+    → Poll compose_build_status("{compose_project}") every 30s. Keep going until DONE or FAILED.
+    → Do NOT attempt compose_up until build is confirmed DONE.
+
+REPAIR_FAILED is a last resort. Only output it when:
+  1. You have tried at least 2 different approaches
+  2. You have read the actual error output (container logs, compose logs)
+  3. You can explain SPECIFICALLY why each approach failed
+  A tool call failing once is not a reason to give up — it's a reason to investigate.
+
+- Do NOT: create alternative compose files, try different images, or experiment with configs.
+  Stick to the project's compose file. Fix the environment, not the compose definition.
+
+CRITICAL — PRIVATE PACKAGE AUTH:
+- If auth.json exists in {workspace}: it contains Composer tokens for private packages (Nova, Spark, Packagist, etc.)
+- BEFORE any composer install or Docker build: copy auth.json to ~/.composer/auth.json
+- If Docker build fails with HTTP 401 or 403: apply auth.json and rebuild with compose_up(build=True)
+- To apply inside a container: docker_exec("<container>", "cp {workspace}/auth.json ~/.composer/auth.json")
 """
 
 
@@ -223,6 +384,7 @@ async def _run_repair_loop(
     message_id: str,
     status_lines: list[str],
     card=None,
+    existing_checklist=None,
 ):
     """Agentic repair — same power as bootstrap's _run_master_agent with ChecklistReporter."""
     from openclow.settings import settings
@@ -239,29 +401,46 @@ async def _run_repair_loop(
         await _notify(chat, chat_id, message_id, "⚠️ Workspace not found — run bootstrap first")
         return report
 
-    # Preflight: same cleanup as bootstrap (kill orphans, free ports, verify Docker)
-    from openclow.worker.tasks.bootstrap import _preflight
+    # Lightweight preflight — verify Docker + port vars WITHOUT killing containers.
+    # (bootstrap._preflight runs compose_down which kills containers that may just be
+    # temporarily stopped after a Docker Desktop restart, forcing a needless full rebuild.)
     try:
-        await _preflight(project, workspace, compose, compose_project)
+        repair_ctx = await _repair_preflight(project, workspace, compose, compose_project)
     except RuntimeError as e:
-        await _notify(chat, chat_id, message_id, f"❌ Preflight failed: {e}")
+        await _notify(chat, chat_id, message_id, f"❌ Docker not accessible: {e}")
         return report
 
-    # ChecklistReporter — same beautiful UI as bootstrap
-    checklist = ChecklistReporter(
-        chat, chat_id, message_id,
-        title=f"Fixing {project.name}",
-        subtitle=project.tech_stack or "",
-    )
-    checklist.set_steps([
-        "Check containers",
-        "Start Docker",
-        "Fix issues",
-        "Verify app",
-        "Create public URL",
-    ])
-    await checklist._force_render()
-    await checklist.start()
+    # Reuse the existing checklist if provided (smooth in-place transition from
+    # "Opening" card to "Fixing" card without creating a new message).
+    if existing_checklist is not None:
+        checklist = existing_checklist
+        await existing_checklist.stop()  # stop old heartbeat
+        checklist.title = f"Fixing {project.name}"
+        checklist.steps = []
+        checklist.set_steps([
+            "Check containers",
+            "Start Docker",
+            "Fix issues",
+            "Verify app",
+            "Create public URL",
+        ])
+        await checklist._force_render()
+        await checklist.start()
+    else:
+        checklist = ChecklistReporter(
+            chat, chat_id, message_id,
+            title=f"Fixing {project.name}",
+            subtitle=project.tech_stack or "",
+        )
+        checklist.set_steps([
+            "Check containers",
+            "Start Docker",
+            "Fix issues",
+            "Verify app",
+            "Create public URL",
+        ])
+        await checklist._force_render()
+        await checklist.start()
 
     # Read compose + env for rich context (same as bootstrap)
     arch = platform.machine()
@@ -283,6 +462,7 @@ async def _run_repair_loop(
         f"- {c.name}: {c.state} {c.health}" for c in report.containers
     ) or "No containers found"
     problems_text = "\n".join(f"- {p['detail']}" for p in problems)
+    container_state = repair_ctx.get("container_state", "unknown")
 
     prompt = REPAIR_PROMPT.format(
         project_name=project.name,
@@ -296,9 +476,21 @@ async def _run_repair_loop(
         env_contents=env_contents,
         container_status=container_status,
         problems_text=problems_text,
+        container_state=container_state,
     )
 
-    # Run bootstrap's master agent with repair prompt — same streaming, same power
+    # Agent handles steps 0-3 (containers + health) only.
+    # Step 4 (tunnel) is done deterministically below — same logic as the happy path.
+    # Circuit breaker — if this project has failed repair 3+ consecutive times,
+    # warn the user that manual intervention is likely needed. Still attempt repair
+    # (don't block it) but surface the warning so they know what to expect.
+    from openclow.services.config_service import get_config as _gc, set_config as _sc
+    _fail_cfg = await _gc("repair_fails", project.name) or {}
+    _fail_count = _fail_cfg.get("count", 0)
+    if _fail_count >= 3:
+        log.warning("repair.circuit_breaker_warning", project=project.name, consecutive_fails=_fail_count)
+        await checklist.update_step(0, f"⚠️ {_fail_count} consecutive failures — manual check may be needed")
+
     await checklist.start_step(0)
     max_attempts = 2
     success = False
@@ -308,9 +500,10 @@ async def _run_repair_loop(
                 checklist, project, workspace, compose, compose_project, port,
                 prompt_override=prompt,
                 start_step=0,
-                max_step=4,
+                max_step=3,  # agent stops after "Verify app" — tunnel handled below
                 complete_keyword="REPAIR_COMPLETE",
                 failed_keyword="REPAIR_FAILED",
+                idle_timeout=600,
             )
             break
         except asyncio.CancelledError:
@@ -319,23 +512,65 @@ async def _run_repair_loop(
             log.warning("repair.agent_failed", attempt=attempt, error=str(e)[:200])
             if attempt < max_attempts:
                 resume = 0
-                for i in range(5):
+                for i in range(4):
                     if checklist.steps[i]["status"] in ("pending", "running"):
                         resume = i
                         break
                 await checklist.update_step(resume, f"retrying (attempt {attempt + 1})...")
 
-    await checklist.stop()
+    # Step 4 — tunnel setup via deterministic code.
+    # ONLY run if the agent actually fixed the containers (success=True).
+    # If the agent failed, there's nothing to tunnel to — skip and show a retry button.
+    from openclow.services.tunnel_service import refresh_tunnel
+    from openclow.worker.tasks.bootstrap import _get_tunnel_target
+    from openclow.services.port_allocator import get_app_port as _get_app_port
 
-    # Re-check health after agent
+    await checklist.start_step(4)
+    tunnel_url: str | None = None
+
+    if not success:
+        # Agent failed — no containers running, no point creating a tunnel
+        await checklist.fail_step(4, "Skipped — app not running")
+    else:
+        try:
+            # After a repair, containers may have new IPs — always refresh the tunnel.
+            # Reusing the old cloudflared process (even if alive) would point at the
+            # old IP → "origin has been unregistered from Argo Tunnel" in browser.
+            # refresh_tunnel = stop old + start fresh with updated container IP.
+            # start_tunnel → sync_project_tunnel handles .env + asset rebuild automatically.
+            await checklist.update_step(4, "Starting tunnel...")
+            target = await _get_tunnel_target(compose_project, workspace, project.id)
+            if not target:
+                target = f"http://localhost:{_get_app_port(project.id)}"
+            tunnel_url = await asyncio.wait_for(
+                refresh_tunnel(project.name, target), timeout=60,
+            )
+
+            if tunnel_url:
+                await checklist.complete_step(4, tunnel_url)
+            else:
+                await checklist.fail_step(4, "Rate limited — retry in 1-2 min")
+        except Exception as e:
+            log.warning("repair.tunnel_failed", error=str(e))
+            await checklist.fail_step(4, str(e)[:60])
+
+    # Re-check health for accurate final report
     report = await asyncio.wait_for(
         run_full_health_check(project, with_tunnel=True),
         timeout=30,
     )
+    tunnel_url = tunnel_url or report.tunnel_url
 
-    # Show final buttons — no Open App (prevents loop)
+    await checklist.finalize(footer=tunnel_url or "", success=success)
+
+    # Update circuit breaker counter: reset on success, increment on failure.
+    if success and tunnel_url:
+        await _sc("repair_fails", project.name, {"count": 0})
+    else:
+        await _sc("repair_fails", project.name, {"count": _fail_count + 1})
+
+    # Telegram/Slack: send message with action buttons (_force_render is a no-op for web)
     from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
-    tunnel_url = report.tunnel_url
     if tunnel_url:
         kb = ActionKeyboard(rows=[
             ActionRow([ActionButton("🌐 Open in Browser", "open_browser", url=tunnel_url, style="primary")]),
@@ -467,9 +702,11 @@ async def check_project_health(ctx: dict, project_id: int, chat_id: str, message
                 ])
             await checklist._force_render(keyboard=kb)
         else:
-            # Problems found — full agentic repair
+            # Problems found — hand off existing checklist so the card updates
+            # in-place instead of jumping to a brand-new card.
             report = await _run_repair_loop(
                 project, report, problems, chat, chat_id, message_id, [],
+                existing_checklist=checklist,
             )
 
         log.info("health.check_done", project=project.name, running=report.is_running,

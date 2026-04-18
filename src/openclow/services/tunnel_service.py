@@ -217,19 +217,23 @@ async def sync_project_tunnel(service_name: str, tunnel_url: str):
     container_name = project.app_container_name or "laravel.test"
     container = f"{compose_project}-{container_name}-1"
 
+    # All URL-bearing env vars — must ALL point to the new tunnel URL.
+    # Bootstrap sets these via _configure_app_for_tunnel(); sync must match.
+    _URL_KEYS = ("APP_URL", "ASSET_URL", "VITE_APP_URL", "NEXT_PUBLIC_URL", "BASE_URL")
+
     # ── 1. Update host .env ──
     env_path = os.path.join(workspace, ".env")
     if os.path.exists(env_path):
         try:
             with open(env_path) as f:
                 content = f.read()
-            # Replace all old trycloudflare URLs
+            # Replace every old trycloudflare URL in the file
             content = _re.sub(
                 r'https://[a-z0-9-]+\.trycloudflare\.com',
                 tunnel_url, content,
             )
-            # Ensure APP_URL and ASSET_URL point to HTTPS tunnel
-            for key in ("APP_URL", "ASSET_URL"):
+            # Ensure all URL vars point to the new tunnel
+            for key in _URL_KEYS:
                 if _re.search(rf'^{key}=', content, _re.MULTILINE):
                     content = _re.sub(rf'^{key}=.*$', f'{key}={tunnel_url}', content, flags=_re.MULTILINE)
                 else:
@@ -239,43 +243,77 @@ async def sync_project_tunnel(service_name: str, tunnel_url: str):
         except Exception as e:
             log.warning("tunnel.sync_host_env_failed", service=service_name, error=str(e))
 
-    # ── 2. Update container .env + inject trustedproxy + clear caches ──
+    # ── 2. Update container .env + inject trustedproxy + rebuild assets ──
     try:
         from openclow.services.docker_guard import run_docker
 
-        # Replace tunnel URLs in container .env
+        # Replace tunnel URLs in container .env and set all URL vars
         for env_loc in (".env", "/var/www/html/.env", "/app/.env"):
             await run_docker(
                 "docker", "exec", container, "sh", "-c",
                 f"[ -f {env_loc} ] && sed -i 's|https://[a-z0-9-]*\\.trycloudflare\\.com|{tunnel_url}|g' {env_loc} || true",
-                actor="tunnel_sync", timeout=10,
+                actor="tunnel_sync", timeout=30,
             )
-            # Set ASSET_URL to full HTTPS tunnel URL
-            await run_docker(
-                "docker", "exec", container, "sh", "-c",
-                f"[ -f {env_loc} ] && (grep -q '^ASSET_URL=' {env_loc} && sed -i 's|^ASSET_URL=.*|ASSET_URL={tunnel_url}|' {env_loc} || echo 'ASSET_URL={tunnel_url}' >> {env_loc}) || true",
-                actor="tunnel_sync", timeout=10,
-            )
+            # Set every URL var (ASSET_URL, VITE_APP_URL, NEXT_PUBLIC_URL, BASE_URL)
+            for key in _URL_KEYS:
+                await run_docker(
+                    "docker", "exec", container, "sh", "-c",
+                    f"[ -f {env_loc} ] && (grep -q '^{key}=' {env_loc} "
+                    f"&& sed -i 's|^{key}=.*|{key}={tunnel_url}|' {env_loc} "
+                    f"|| echo '{key}={tunnel_url}' >> {env_loc}) || true",
+                    actor="tunnel_sync", timeout=30,
+                )
 
-        # Inject config/trustedproxy.php — Laravel needs this to trust
-        # cloudflared's X-Forwarded-Proto header. Without it → mixed content.
-        # Use base64 to avoid shell quoting issues with PHP single quotes.
+        # Inject config/trustedproxy.php — Laravel trusts cloudflared's X-Forwarded-Proto.
         import base64
         trust_php = b"<?php return ['proxies' => '*', 'headers' => -1];"
         b64 = base64.b64encode(trust_php).decode()
         await run_docker(
             "docker", "exec", container, "sh", "-c",
             f"for d in . /var/www/html /app; do [ -d \"$d/config\" ] && echo {b64} | base64 -d > \"$d/config/trustedproxy.php\" && break; done || true",
-            actor="tunnel_sync", timeout=10,
+            actor="tunnel_sync", timeout=30,
         )
 
-        # Clear all framework caches
+        # Re-bake PHP config cache with fresh env values (not just clear — cache it).
+        # Must run BEFORE assets so the new APP_URL is live for any SSR or server-side
+        # requests that happen while the frontend is still rebuilding.
         await run_docker(
             "docker", "exec", container, "sh", "-c",
-            "php artisan config:clear 2>/dev/null; php artisan cache:clear 2>/dev/null; "
-            "php artisan view:clear 2>/dev/null; php artisan route:clear 2>/dev/null || true",
-            actor="tunnel_sync", timeout=10,
+            "php artisan config:cache 2>/dev/null || php artisan config:clear 2>/dev/null || true; "
+            "php artisan cache:clear 2>/dev/null; "
+            "php artisan view:clear 2>/dev/null; "
+            "php artisan route:clear 2>/dev/null || true",
+            actor="tunnel_sync", timeout=30,
         )
+
+        # Rebuild frontend assets (fire-and-forget) — Vite bakes APP_URL into JS/CSS
+        # bundles at build time, so we must rebuild after a tunnel URL change.
+        # Runs in the background so the tunnel URL is returned immediately without
+        # blocking the worker slot for up to 3 minutes.
+        _build_cmd = (
+            "PKG=$(find . /var/www/html /app -name 'package.json' "
+            "  -not -path '*/node_modules/*' -maxdepth 4 2>/dev/null | head -1); "
+            "if [ -n \"$PKG\" ]; then "
+            "  cd $(dirname $PKG) && "
+            "  (npm run build 2>&1 || npx vite build 2>&1 || true); "
+            "fi"
+        )
+
+        async def _do_rebuild():
+            try:
+                rc, out = await run_docker(
+                    "docker", "exec", container, "sh", "-c", _build_cmd,
+                    actor="tunnel_sync", timeout=180,
+                )
+                if rc == 0:
+                    log.info("tunnel.frontend_rebuilt", service=service_name)
+                else:
+                    log.warning("tunnel.frontend_rebuild_failed", service=service_name, output=out[:300])
+            except Exception as e:
+                log.warning("tunnel.frontend_rebuild_error", service=service_name, error=str(e))
+
+        task = asyncio.create_task(_do_rebuild())
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
         log.info("tunnel.project_synced", service=service_name, url=tunnel_url)
     except Exception as e:
@@ -327,11 +365,37 @@ async def get_tunnel_url(service_name: str) -> str | None:
 
 
 async def check_tunnel_health(service_name: str) -> bool:
-    """Check if a tunnel is alive (process running + URL in DB)."""
+    """Check if a tunnel is alive: process running + URL in DB + origin reachable.
+
+    The origin check catches the "containers restarted → new IP" scenario where
+    cloudflared is still running but pointing at a dead IP address, which shows
+    as "The origin has been unregistered from Argo Tunnel" in the browser.
+    """
     proc = _active_processes.get(service_name)
     if proc and proc.returncode is None:
         config = await get_config(TUNNEL_CATEGORY, service_name)
-        return bool(config and config.get("url"))
+        if not config or not config.get("url"):
+            return False
+        # TCP-connect to origin — verifies the container is actually reachable.
+        target = config.get("target", "")
+        if target:
+            try:
+                import urllib.parse as _urlparse
+                parsed = _urlparse.urlparse(target)
+                host = parsed.hostname
+                port = parsed.port or 80
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port), timeout=2
+                )
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+            except Exception:
+                log.debug("tunnel.origin_unreachable", service=service_name, target=target)
+                return False  # origin gone — cloudflared shows "origin unregistered"
+        return True
     return False
 
 

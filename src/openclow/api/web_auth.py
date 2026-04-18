@@ -11,7 +11,12 @@ from openclow.models.base import async_session
 from sqlalchemy import select
 
 # Configuration
-WEB_JWT_SECRET = os.environ.get("WEB_CHAT_JWT_SECRET", "change-me-in-production")
+WEB_JWT_SECRET = os.environ.get("WEB_CHAT_JWT_SECRET", "")
+if not WEB_JWT_SECRET or WEB_JWT_SECRET == "change-me-in-production":
+    raise RuntimeError(
+        "WEB_CHAT_JWT_SECRET environment variable is not set or uses the insecure default. "
+        "Generate a strong secret (e.g. `openssl rand -hex 32`) and set it in your environment."
+    )
 WEB_JWT_ALGORITHM = "HS256"
 WEB_JWT_EXPIRE_HOURS = 24 * 30  # 30 days
 

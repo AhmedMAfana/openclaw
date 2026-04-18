@@ -3,12 +3,15 @@
 All commands go through docker_guard for allowlist enforcement and audit logging.
 Agents cannot run destructive Docker commands (rm, prune, rmi, etc.).
 """
+import asyncio
 import json
+import os
 import shlex
 
 from mcp.server.fastmcp import FastMCP
 
 from openclow.services.docker_guard import run_docker
+from openclow.utils.docker_path import get_docker_env
 
 mcp = FastMCP("docker")
 
@@ -69,11 +72,15 @@ async def restart_container(container_name: str) -> str:
 
 @mcp.tool()
 async def docker_exec(container_name: str, command: str) -> str:
-    """Execute a command inside a running Docker container. Returns exit code and output."""
+    """Execute a command inside a running Docker container. Returns exit code and output.
+
+    Timeout: 60s. For long-running commands (migrations, npm build), use compose_build instead.
+    """
     cmd_parts = shlex.split(command)
     rc, output = await run_docker(
         "docker", "exec", container_name, *cmd_parts,
         actor="mcp_docker",
+        timeout=60,
     )
     if rc != 0:
         return f"FAILED (exit code {rc}):\n{output[-5000:]}"
@@ -82,56 +89,225 @@ async def docker_exec(container_name: str, command: str) -> str:
 
 @mcp.tool()
 async def compose_build(compose_file: str, project_name: str, working_dir: str) -> str:
-    """Build images for a Docker Compose stack (without starting containers).
+    """Build Docker images for a Compose stack.
 
-    Use this before compose_up() when the project has custom Dockerfiles.
-    This runs without --project-directory so build contexts resolve correctly
-    inside the worker container (Docker-in-Docker).
+    Non-blocking after 30s: starts the build, waits up to 30s for early failures
+    (bad Dockerfile, auth errors, etc.). If still running after 30s, returns BUILDING
+    with recent output. Call compose_build_status(project_name) to poll for completion.
+
+    After DONE: call compose_up() to start containers.
     """
-    args = ["docker", "compose", "-f", compose_file, "-p", project_name, "build"]
-    rc, output = await run_docker(*args, actor="mcp_docker", cwd=working_dir, timeout=600)
-    if rc != 0:
-        return f"FAILED (exit code {rc}):\n{output}"
-    return f"SUCCESS:\n{output}"
+    log_path = f"/tmp/docker_build_{project_name}.log"
+
+    from openclow.utils.docker_path import get_docker_bin
+    try:
+        docker_bin = get_docker_bin()
+    except FileNotFoundError as e:
+        return f"FAILED — Docker binary not found: {e}"
+
+    try:
+        log_f = open(log_path, "w")
+        proc = await asyncio.create_subprocess_exec(
+            docker_bin, "compose", "-f", compose_file, "-p", project_name, "build",
+            "--progress", "plain",
+            stdin=asyncio.subprocess.DEVNULL,   # never inherit MCP server's stdin
+            stdout=log_f,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=working_dir,
+            env=get_docker_env(),
+        )
+    except Exception as e:
+        return f"FAILED to start build: {e}"
+
+    # Write PID so compose_build_status can check if still running
+    try:
+        open(f"/tmp/docker_build_{project_name}.pid", "w").write(str(proc.pid))
+    except Exception:
+        pass
+
+    # Track exit code in background — written to .rc file when process finishes.
+    # compose_build_status reads this instead of text-matching output for reliable
+    # pass/fail detection (output may contain the word "error" in warnings even on success).
+    async def _track_build_exit(p: asyncio.subprocess.Process, name: str):
+        try:
+            await p.wait()
+            open(f"/tmp/docker_build_{name}.rc", "w").write(str(p.returncode or 0))
+        except Exception:
+            pass
+    _t = asyncio.create_task(_track_build_exit(proc, project_name))
+    _t.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+    try:
+        # Wait up to 30s — enough to catch auth errors, bad Dockerfiles, immediate failures
+        await asyncio.wait_for(proc.wait(), timeout=30)
+        log_f.close()
+        output = open(log_path).read()[-5000:].strip() if os.path.exists(log_path) else ""
+        if proc.returncode == 0:
+            return f"DONE (build succeeded):\n{output}"
+        return f"FAILED (exit code {proc.returncode}):\n{output}"
+    except asyncio.TimeoutError:
+        # Still building — return partial output so MCP connection stays alive.
+        # Agent should poll compose_build_status() every 30s.
+        log_f.close()
+        partial = ""
+        try:
+            partial = open(log_path).read()[-800:].strip()
+        except Exception:
+            pass
+        return (
+            f"BUILDING — docker build is running in the background (builds take 2-15min on ARM).\n"
+            f"Call compose_build_status('{project_name}') every 30s to check progress.\n"
+            f"Recent output:\n{partial}"
+        )
 
 
 @mcp.tool()
-async def compose_up(compose_file: str, project_name: str, working_dir: str, build: bool = False) -> str:
-    """Start a Docker Compose stack. Returns output with SUCCESS/FAILED prefix.
+async def compose_build_status(project_name: str) -> str:
+    """Check the status of a background compose_build() call.
 
-    Args:
-        build: If True, build images first then start. Handles Docker-in-Docker
-               path translation automatically (builds use container paths for
-               build contexts, up uses host paths for volume mounts).
+    Returns:
+      "DONE"      — build finished successfully, call compose_up() now
+      "FAILED"    — build failed, check the output
+      "BUILDING"  — still in progress, call again in 30s
     """
-    # When build=True, run build and up as separate steps.
-    # Build needs container filesystem paths (Docker CLI tars build context).
-    # Up needs host filesystem paths (Docker daemon resolves volume mounts).
-    # docker_guard handles this: skips --project-directory for build commands.
-    if build:
-        build_args = ["docker", "compose", "-f", compose_file, "-p", project_name, "build"]
-        rc, output = await run_docker(*build_args, actor="mcp_docker", cwd=working_dir, timeout=600)
-        if rc != 0:
-            return f"FAILED (build, exit code {rc}):\n{output}"
+    log_path = f"/tmp/docker_build_{project_name}.log"
+    pid_path = f"/tmp/docker_build_{project_name}.pid"
 
-    up_args = ["docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d"]
-    rc, output = await run_docker(*up_args, actor="mcp_docker", cwd=working_dir, timeout=300)
+    if not os.path.exists(pid_path):
+        return "No build in progress for this project (or it already finished)."
 
-    if rc != 0 and not build:
-        # Image might not exist yet — try building first then starting
-        if "pull access denied" in output or "not found" in output.lower() or "no such image" in output.lower():
-            build_args = ["docker", "compose", "-f", compose_file, "-p", project_name, "build"]
-            rc2, out2 = await run_docker(*build_args, actor="mcp_docker", cwd=working_dir, timeout=600)
-            if rc2 != 0:
-                return f"FAILED (auto-build, exit code {rc2}):\n{out2}"
-            rc3, out3 = await run_docker(*up_args, actor="mcp_docker", cwd=working_dir, timeout=300)
-            if rc3 == 0:
-                return f"SUCCESS (auto-built):\n{out3}"
-            return f"FAILED (exit code {rc3}):\n{out3}"
+    try:
+        pid = int(open(pid_path).read().strip())
+        # Check if process is still alive
+        import signal
+        try:
+            os.kill(pid, 0)  # signal 0 = check existence, no actual signal sent
+            still_running = True
+        except ProcessLookupError:
+            still_running = False
+    except Exception:
+        still_running = False
 
-    if rc != 0:
-        return f"FAILED (exit code {rc}):\n{output}"
-    return f"SUCCESS:\n{output}"
+    output = ""
+    if os.path.exists(log_path):
+        output = open(log_path).read()[-3000:].strip()
+
+    if still_running:
+        return f"BUILDING — still in progress. Call again in 30s.\nRecent output:\n{output[-500:]}"
+
+    # Process exited — use exit code (.rc file) for reliable pass/fail.
+    # Text matching is unreliable: output can contain "error" in warnings even on success.
+    os.unlink(pid_path)
+    rc_path = f"/tmp/docker_build_{project_name}.rc"
+    exit_code: int | None = None
+    if os.path.exists(rc_path):
+        try:
+            exit_code = int(open(rc_path).read().strip())
+            os.unlink(rc_path)
+        except Exception:
+            pass
+
+    if exit_code == 0:
+        return f"DONE — build complete. Call compose_up() now.\nOutput:\n{output}"
+    if exit_code is not None:
+        return f"FAILED (exit code {exit_code}):\n{output}"
+    # Fallback: .rc file not written yet (race) — use text matching
+    if "error" in output.lower() and "successfully" not in output.lower():
+        return f"FAILED — build exited with errors:\n{output}"
+    return f"DONE — build complete. Call compose_up() now.\nOutput:\n{output}"
+
+
+@mcp.tool()
+async def compose_up(compose_file: str, project_name: str, working_dir: str) -> str:
+    """Start a Docker Compose stack (containers only, no build).
+
+    Non-blocking: launches 'docker compose up -d' in the background.
+    Waits up to 20s for early failure detection (image missing, port conflict, etc.).
+    If no early failure, returns STARTED — call compose_ps() to watch containers come up.
+
+    Call compose_build() first if images don't exist yet.
+    """
+    from openclow.services.docker_guard import is_allowed, get_docker_env, _detect_host_workspace_path
+    from openclow.utils.docker_path import get_docker_bin
+    from openclow.settings import settings as _s
+
+    log_path = f"/tmp/compose_up_{project_name}.log"
+    env = get_docker_env()
+
+    # Resolve absolute docker binary — don't rely on PATH lookup in MCP subprocess env
+    try:
+        docker_bin = get_docker_bin()
+    except FileNotFoundError as e:
+        return f"FAILED — Docker binary not found: {e}"
+
+    # Build the command with --project-directory (host path resolution for Docker-in-Docker)
+    up_args = [docker_bin, "compose", "-f", compose_file, "-p", project_name]
+
+    host_path = await _detect_host_workspace_path()
+    if host_path and working_dir.startswith(_s.workspace_base_path):
+        host_cwd = working_dir.replace(_s.workspace_base_path, host_path, 1)
+        up_args += ["--project-directory", host_cwd]
+        env_file = os.path.join(working_dir, ".env")
+        if os.path.exists(env_file):
+            up_args += ["--env-file", env_file]
+
+    up_args += ["up", "-d"]
+
+    cmd_str = " ".join(up_args)
+    allowed, reason = is_allowed(cmd_str)
+    if not allowed:
+        return f"BLOCKED: {reason}"
+
+    try:
+        log_f = open(log_path, "w")
+        proc = await asyncio.create_subprocess_exec(
+            *up_args,
+            cwd=working_dir,
+            stdin=asyncio.subprocess.DEVNULL,   # never inherit MCP server's stdin
+            stdout=log_f,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
+        )
+    except Exception as e:
+        return f"FAILED to start: {e}"
+
+    # Wait up to 20s — enough to catch immediate failures (image not found, port conflict).
+    # docker compose up -d exits immediately when successful (detached mode).
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=20)
+        log_f.close()
+        output = open(log_path).read()[-3000:].strip()
+        if proc.returncode == 0:
+            return f"SUCCESS:\n{output}"
+        # Classify the failure for actionable agent decisions
+        low = output.lower()
+        if any(k in low for k in ("pull access denied", "no such image", "manifest unknown", "not found")):
+            return (
+                f"FAILED — image not found. Call compose_build('{compose_file}', "
+                f"'{project_name}', '{working_dir}') first, then retry.\n\nError: {output[-1000:]}"
+            )
+        if any(k in low for k in ("connection refused", "connection closed", "error during connect", "cannot connect to the docker daemon")):
+            return (
+                f"FAILED — Docker daemon connection error (Docker Desktop may be blocked by a "
+                f"file bind-mount or the daemon is not running).\n"
+                f"Check containers anyway with compose_ps('{project_name}') — Docker may have "
+                f"started containers before the error.\nError: {output[-1000:]}"
+            )
+        return f"FAILED (exit code {proc.returncode}):\n{output}"
+    except asyncio.TimeoutError:
+        # Process still running after 20s — that's normal for slow image pulls or health-checks.
+        # Return now so the MCP connection stays alive. Agent should poll compose_ps().
+        log_f.close()
+        partial = ""
+        try:
+            partial = open(log_path).read()[-500:].strip()
+        except Exception:
+            pass
+        return (
+            f"STARTED — docker compose up -d is running in the background.\n"
+            f"Call compose_ps('{project_name}') every 5s to watch containers come up.\n"
+            f"Recent output:\n{partial}"
+        )
 
 
 @mcp.tool()

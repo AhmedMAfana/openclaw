@@ -32,7 +32,7 @@ log = get_logger()
 # The full QA prompt — Claude Agent drives Playwright through EVERY flow
 # ---------------------------------------------------------------------------
 
-QA_PROMPT = """You are a QA tester. Open Telegram Web, go to the THAG GROUP bot, and test EVERY feature.
+QA_PROMPT = """You are a QA automation engineer. Open Telegram Web, go to the bot, and test EVERY feature systematically.
 
 BOT: @{bot_username}
 URL: https://web.telegram.org/k/#{bot_username}
@@ -292,10 +292,10 @@ async def run_qa_tests(ctx: dict, chat_id: str, message_id: str, scope: str = "s
 
         options = ClaudeAgentOptions(
             system_prompt=(
-                "You are a QA automation engineer. "
-                "Use Playwright to test a Telegram bot on web.telegram.org. "
-                "Be systematic: navigate, act, wait, snapshot, verify, report. "
-                "Output each TEST result line immediately after verifying."
+                "You are a QA automation engineer testing a Telegram bot via Playwright. "
+                "Workflow per test: navigate → act → wait 3-5s → snapshot → verify → output TEST N: PASS/FAIL result immediately. "
+                "Never batch results — output each test result right after verification. "
+                "If a button click fails, try by text content. If a step fails, mark it FAIL and move to the next test."
             ),
             model="claude-sonnet-4-6",
             allowed_tools=[

@@ -16,13 +16,30 @@ _CANCEL_KEY = "openclow:cancel:{chat_id}:{message_id}"
 
 
 async def _check_cancelled(chat_id: str, message_id: str) -> bool:
-    """Check if user requested cancellation via Redis flag."""
+    """Check if user requested cancellation via Redis flag.
+
+    Checks both the message-specific key (Telegram/Slack inline cancel)
+    and the session-level key set by the web Stop button.
+    """
     try:
         import redis.asyncio as aioredis
         r = aioredis.from_url(settings.redis_url)
+        # Message-specific cancel (Telegram/Slack)
         val = await r.get(_CANCEL_KEY.format(chat_id=chat_id, message_id=message_id))
+        if val is not None:
+            await r.aclose()
+            return True
+        # Session-level cancel set by web Stop button — extract session_id from web:{user}:{session}
+        if chat_id.startswith("web:"):
+            parts = chat_id.split(":")
+            if len(parts) == 3:
+                session_id = parts[2]
+                session_val = await r.get(f"openclow:cancel_session:{session_id}")
+                if session_val is not None:
+                    await r.aclose()
+                    return True
         await r.aclose()
-        return val is not None
+        return False
     except Exception:
         return False
 
@@ -248,9 +265,9 @@ async def _build_context(chat_id: str, project_context: str, user_id: str):
         else:
             db_user = None
 
-        # ── Projects ──
+        # ── Projects — include all non-archived statuses so LLM has full awareness ──
         result = await session.execute(
-            select(Project).where(Project.status == "active")
+            select(Project).where(Project.status != "archived")
         )
         all_projects = result.scalars().all()
 
@@ -419,30 +436,76 @@ async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message
             conv_lines.append(f"{role}: {msg['text']}")
         conv_str = "\n".join(conv_lines)
 
-    system_prompt = f"""You are THAG GROUP specialist — an AI Dev Orchestrator. You're chatting with the user in real time.
+    # Build tools description based on access level
+    _tools_desc_parts = [
+        "- Read/Write/Edit/Glob/Grep — project files in /workspaces/_cache/<project>/",
+        "- Playwright — navigate, screenshot, click, fill forms in the live app",
+    ]
+    if is_admin:
+        _tools_desc_parts += [
+            "- docker_exec, container_logs, container_health, restart_container — container management",
+            "- compose_up, compose_ps — Docker Compose stack control",
+            "- tunnel_start, tunnel_stop, tunnel_get_url — manage public URLs",
+        ]
+    _tools_desc = "\n".join(_tools_desc_parts)
+
+    system_prompt = f"""You are TAGH DevOps — senior AI DevOps engineer on-call for {project_name or 'this project'}. You are chatting with a developer in real time.
+
+## Project Context
 
 {context_str}
 
-CONVERSATION HISTORY:
-{conv_str if conv_str else "(first message)"}
+## Recent Conversation
 
-You are chatting with a developer. Read their message, understand the intent, and respond naturally.
-Use your judgment — you know when someone needs help vs just chatting.
+{conv_str if conv_str else "(this is the first message)"}
 
-When you do take action (code changes, fixes, checks), always:
-- Say what you're about to do before doing it
-- Give updates as you work
-- Verify the result (curl the app, check logs, screenshot with Playwright)
-- End with the live app link (use tunnel_get_url, or tunnel_start if none exists)
+## CORE RULE — ACT, DON'T ASK
 
-TOOLS AVAILABLE:
-- Read/Write/Edit/Glob/Grep — files in /workspaces/_cache/<project_name>/
-- docker_exec, container_logs, container_health, restart_container
-- compose_up, compose_ps — Docker Compose management
-- tunnel_start, tunnel_stop, tunnel_get_url — public URLs
-- Playwright — navigate, screenshot, click, fill forms in the live app
+You are an on-call engineer, not a dashboard. Fix problems autonomously. Never ask for permission to do obvious infrastructure work.
 
-Be concise. Talk like a person, not a manual.
+**Infrastructure problems — fix immediately, no questions:**
+- Containers down → run compose_up right now. Do NOT say "want me to bring them up?" Just bring them up.
+- Tunnel down → run tunnel_start immediately.
+- Container crashing → read logs, diagnose root cause, fix it, restart. Loop until fixed.
+- Never give up on first failure — try multiple approaches. Read the error, fix the root cause, retry.
+
+**If TUNNEL is alive but containers are DOWN → the URL is broken for users. Do NOT show it as a working link. Fix Docker first.**
+
+## How to Respond
+
+**Answer/Explain** (no tools needed)
+For: "how does X work", "what does this error mean", "explain this code"
+Just answer directly.
+
+**Fix Infra NOW** (use docker/tunnel tools immediately, no asking)
+For: containers down, app not responding, tunnel dead, health degraded, "bring it up", "start it", "fix it"
+Just run the fix. Report what you did after. Never report a problem without immediately fixing it.
+
+**Quick Action** (run tool, show result concisely)
+For: "show me the current logs", "what's the tunnel URL?", "screenshot the login page", "list recent tasks"
+Run the tool first, then show the result.
+
+**Dispatch a Task** (for code changes only — goes through plan → code → review)
+For: adding features, fixing bugs in the codebase, refactoring, migrations, UI changes
+Use trigger_task. Do NOT attempt code changes directly in a session.
+
+## Bootstrap / Auth Knowledge
+
+- If `auth.json` exists in the project workspace root: it contains Composer authentication tokens (private Packagist, Nova, Spark, etc.). Copy it to `~/.composer/auth.json` BEFORE any `composer install` or Docker build.
+- If a Docker build fails with 401 / 403 on a private package: check if auth.json exists in the workspace and copy it before retrying.
+- Never expose the contents of auth.json to the user — just confirm it was applied.
+
+## Response Style
+
+- Lead with action, not preamble. Don't narrate intent — just do it.
+- Show what you're doing before doing it: "Checking container health..." then the result.
+- Be concise — one idea per paragraph, no filler.
+- After fixing infra: confirm what's running and show the tunnel URL if live.
+- NEVER show a tunnel URL as working when containers are down — it serves nothing.
+
+## Available Tools
+
+{_tools_desc}
 """
 
     # Add plan mode instructions if requested
@@ -664,16 +727,27 @@ The user will review your plan, then approve or reject it.
 
     pid = target_pid  # Already extracted above
 
-    # Web provider: publish final response to Redis for FastAPI endpoint
+    # Web provider: publish final response to Redis AND persist to DB
     if chat_provider_type == "web":
         try:
             if _web_r and _web_channel:
-                await _web_r.publish(_web_channel, _json.dumps({"type": "msg_final", "text": final_text}))
+                # Include message_id so frontend knows which message to finalize
+                await _web_r.publish(_web_channel, _json.dumps({
+                    "type": "msg_final",
+                    "message_id": message_id,
+                    "text": final_text,
+                }))
         except Exception as e:
             log.warning("agent_session.web_publish_failed", chat_id=chat_id, error=str(e))
         finally:
             if _web_r:
                 await _web_r.aclose()
+        # Persist to DB so message survives page refresh
+        try:
+            chat = await factory.get_chat_by_type(chat_provider_type)
+            await chat.edit_message(chat_id, message_id, final_text, is_final=True)
+        except Exception as e:
+            log.warning("agent_session.web_persist_failed", message_id=message_id, error=str(e))
         return
 
     if _is_slack:

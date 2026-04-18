@@ -11,6 +11,9 @@ Allows safe operations like:
 import asyncio
 import os
 import re
+import shutil
+
+from openclow.utils.docker_path import get_docker_env
 
 import json
 import socket
@@ -51,6 +54,7 @@ async def _detect_host_workspace_path() -> str | None:
             "--format", '{{json .Mounts}}',
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=get_docker_env(),
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
         if proc.returncode != 0:
@@ -155,10 +159,12 @@ def _extract_docker_subcommand(cmd: str) -> str | None:
     cmd = cmd.strip()
     parts = cmd.split()
 
-    # Find 'docker' in the command
-    try:
-        idx = parts.index("docker")
-    except ValueError:
+    # Find 'docker' in the command — handles both "docker" and "/path/to/docker"
+    idx = next(
+        (i for i, p in enumerate(parts) if p == "docker" or p.endswith("/docker")),
+        None,
+    )
+    if idx is None:
         return None
 
     remaining = parts[idx + 1:]
@@ -251,9 +257,17 @@ async def run_docker(
         log.warning("docker_guard.blocked", command=cmd_str[:200], reason=reason)
         return -1, f"BLOCKED: {reason}"
 
-    # Run the command
-    env = {**os.environ}
+    # Run the command — resolve absolute docker binary path so subprocess exec
+    # doesn't depend on PATH lookup (MCP server subprocesses may inherit a minimal env).
+    env = get_docker_env()
     final_args = list(args)
+    from openclow.utils.docker_path import get_docker_bin
+    try:
+        docker_bin = get_docker_bin()
+        if final_args and final_args[0] == "docker":
+            final_args[0] = docker_bin
+    except FileNotFoundError as e:
+        return -1, f"Docker binary not found: {e}"
 
     # Port isolation: inject unique port env vars so projects don't conflict
     if project_id and "compose" in cmd_str:
