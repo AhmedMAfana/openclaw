@@ -13,6 +13,7 @@ import {
   MessagePrimitive,
   ThreadPrimitive,
   useAuiState,
+  useThreadRuntime,
 } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
@@ -22,6 +23,7 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   CopyIcon,
+  ExternalLinkIcon,
   PaperclipIcon,
   PencilIcon,
   RefreshCwIcon,
@@ -161,37 +163,78 @@ const ThreadScrollToBottom: FC = () => {
   );
 };
 
+const SUGGESTIONS = [
+  { icon: "🚀", label: "Deploy a project", prompt: "Help me deploy a new project to production" },
+  { icon: "🐛", label: "Debug an issue", prompt: "Help me debug a problem in my codebase" },
+  { icon: "🔍", label: "Review my code", prompt: "Review my code for issues and improvements" },
+  { icon: "⚙️", label: "Set up CI/CD", prompt: "Set up a CI/CD pipeline for my project" },
+];
+
 const ThreadWelcome: FC = () => {
+  const threadRuntime = useThreadRuntime();
+
   return (
-    <div className="mx-auto my-auto flex w-full max-w-(--thread-max-width) grow flex-col">
-      <div className="flex w-full grow flex-col items-center justify-center">
-        <div className="flex size-full flex-col justify-center px-4">
-          <h1 className="font-semibold text-2xl">Hello there!</h1>
-          <p className="text-muted-foreground text-xl">How can I help you today?</p>
-        </div>
+    <div className="mx-auto my-auto flex w-full max-w-(--thread-max-width) grow flex-col items-center justify-center px-6 pb-12">
+      {/* Avatar */}
+      <div className="mb-6 size-14 rounded-2xl flex items-center justify-center shadow-xl shadow-primary/20"
+        style={{ background: "linear-gradient(135deg, oklch(0.62 0.22 265), oklch(0.55 0.22 295))" }}>
+        <svg viewBox="0 0 24 24" fill="none" className="size-7" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2L16 10H8L12 2Z" fill="white" opacity="0.9"/>
+          <path d="M8 10L4 18H12L8 10Z" fill="white" opacity="0.6"/>
+          <path d="M16 10L20 18H12L16 10Z" fill="white" opacity="0.75"/>
+        </svg>
+      </div>
+
+      <h1 className="text-3xl font-semibold tracking-tight text-foreground mb-2">
+        How can I help you?
+      </h1>
+      <p className="text-base text-muted-foreground mb-8 text-center max-w-sm">
+        I'm your AI DevOps agent. I can build, deploy, debug, and review code end-to-end.
+      </p>
+
+      {/* Suggestion chips — use runtime API instead of DOM manipulation */}
+      <div className="grid grid-cols-2 gap-2.5 w-full max-w-md">
+        {SUGGESTIONS.map((s) => (
+          <button
+            key={s.label}
+            type="button"
+            onClick={() => {
+              threadRuntime.composer.setText(s.prompt);
+              threadRuntime.composer.send();
+            }}
+            className="group flex items-start gap-2.5 rounded-xl border border-border/60 p-3.5 text-left transition-all duration-150 hover:border-primary/40 hover:shadow-sm"
+            style={{ background: "oklch(0.12 0.008 265)" }}
+          >
+            <span className="text-base shrink-0 mt-0.5">{s.icon}</span>
+            <span className="text-xs font-medium text-foreground/80 group-hover:text-foreground leading-snug transition-colors">{s.label}</span>
+          </button>
+        ))}
       </div>
     </div>
   );
 };
 
+const AttachmentItem: FC = () => (
+  <AttachmentPrimitive.Root className="relative flex items-center gap-1.5 rounded-lg border bg-muted px-2 py-1 text-xs">
+    <AttachmentPrimitive.unstable_Thumb className="size-8 rounded object-cover" />
+    <span className="max-w-[100px] truncate text-foreground">
+      <AttachmentPrimitive.Name />
+    </span>
+    <AttachmentPrimitive.Remove asChild>
+      <button
+        type="button"
+        className="ml-1 rounded-full p-0.5 text-muted-foreground hover:bg-background hover:text-foreground"
+        aria-label="Remove attachment"
+      >
+        <XIcon className="size-3" />
+      </button>
+    </AttachmentPrimitive.Remove>
+  </AttachmentPrimitive.Root>
+);
+
 const ComposerAttachmentPreview: FC = () => (
-  <ComposerPrimitive.Attachments>
-    <ComposerPrimitive.AttachmentByIndex>
-      <AttachmentPrimitive.Root className="relative flex items-center gap-1.5 rounded-lg border bg-muted px-2 py-1 text-xs">
-        <AttachmentPrimitive.unstable_Thumb className="size-8 rounded object-cover" />
-        <AttachmentPrimitive.Name className="max-w-[100px] truncate text-foreground" />
-        <AttachmentPrimitive.Remove asChild>
-          <button
-            type="button"
-            className="ml-1 rounded-full p-0.5 text-muted-foreground hover:bg-background hover:text-foreground"
-            aria-label="Remove attachment"
-          >
-            <XIcon className="size-3" />
-          </button>
-        </AttachmentPrimitive.Remove>
-      </AttachmentPrimitive.Root>
-    </ComposerPrimitive.AttachmentByIndex>
-  </ComposerPrimitive.Attachments>
+  // eslint-disable-next-line @typescript-eslint/no-deprecated
+  <ComposerPrimitive.Attachments components={{ Attachment: AttachmentItem }} />
 );
 
 const Composer: FC = () => {
@@ -199,54 +242,56 @@ const Composer: FC = () => {
 
   return (
     <ComposerPrimitive.Root className="relative flex w-full flex-col">
-      <ComposerPrimitive.AttachmentDropzone className="relative flex w-full flex-col rounded-(--composer-radius) border bg-background transition-shadow focus-within:border-ring/75 focus-within:ring-2 focus-within:ring-ring/20 data-[drag-over]:border-blue-400 data-[drag-over]:ring-2 data-[drag-over]:ring-blue-400/30">
+      <ComposerPrimitive.AttachmentDropzone
+        className="relative flex w-full flex-col rounded-2xl border border-border/60 transition-all duration-200 focus-within:border-primary/50 focus-within:shadow-lg focus-within:shadow-primary/10 data-[drag-over]:border-primary/60 data-[drag-over]:shadow-lg data-[drag-over]:shadow-primary/20"
+        style={{ background: "oklch(0.12 0.008 265)" }}
+      >
         {/* Attachment preview strip */}
-        <div className="flex flex-wrap gap-2 px-3 pt-2 empty:hidden">
+        <div className="flex flex-wrap gap-2 px-4 pt-3 empty:hidden">
           <ComposerAttachmentPreview />
         </div>
 
         <ComposerPrimitive.Input
-          placeholder="Send a message..."
-          className="max-h-32 min-h-10 w-full resize-none bg-transparent px-3 py-2 text-sm outline-none placeholder:text-muted-foreground/80"
+          placeholder="Message TAGH DevOps..."
+          className="max-h-40 min-h-12 w-full resize-none bg-transparent px-4 py-3.5 text-sm outline-none placeholder:text-muted-foreground/50 leading-relaxed"
           rows={1}
           autoFocus
           aria-label="Message input"
         />
 
-        <div className="flex items-center justify-between px-2 pb-2">
-          {/* Mode toggle pills — left side */}
-          <div className="flex items-center gap-0.5 rounded-full border border-border bg-muted/40 p-0.5">
+        <div className="flex items-center justify-between px-3 pb-3">
+          {/* Mode toggle — left side */}
+          <div className="flex items-center gap-0.5 rounded-full border border-border/50 p-0.5" style={{ background: "oklch(0.09 0.008 265)" }}>
             <button
               type="button"
               onClick={() => setMode("quick")}
               title="Quick: start coding immediately, no approval step"
               className={cn(
-                "px-2.5 py-1 rounded-full text-xs font-medium transition-colors",
+                "px-3 py-1 rounded-full text-[11px] font-medium transition-all duration-150",
                 mode === "quick"
-                  ? "bg-background text-foreground shadow-sm"
+                  ? "bg-primary text-primary-foreground shadow-sm shadow-primary/30"
                   : "text-muted-foreground hover:text-foreground"
               )}
             >
-              ⚡ Quick
+              Quick
             </button>
             <button
               type="button"
               onClick={() => setMode("plan")}
               title="Plan: generates a plan for you to approve before coding starts"
               className={cn(
-                "px-2.5 py-1 rounded-full text-xs font-medium transition-colors",
+                "px-3 py-1 rounded-full text-[11px] font-medium transition-all duration-150",
                 mode === "plan"
-                  ? "bg-background text-foreground shadow-sm"
+                  ? "bg-primary text-primary-foreground shadow-sm shadow-primary/30"
                   : "text-muted-foreground hover:text-foreground"
               )}
             >
-              📋 Plan
+              Plan
             </button>
           </div>
 
-          {/* Right side: attach button + send/stop */}
-          <div className="flex items-center gap-1">
-            {/* Paperclip — opens file picker (images + text files) */}
+          {/* Right side: attach + send/stop */}
+          <div className="flex items-center gap-1.5">
             <ComposerPrimitive.AddAttachment asChild>
               <TooltipIconButton
                 tooltip="Attach file (images, PDF, .txt, .md)"
@@ -254,7 +299,7 @@ const Composer: FC = () => {
                 type="button"
                 variant="ghost"
                 size="icon"
-                className="size-8 rounded-full text-muted-foreground hover:text-foreground"
+                className="size-8 rounded-full text-muted-foreground/60 hover:text-foreground"
                 aria-label="Attach file"
               >
                 <PaperclipIcon className="size-4" />
@@ -263,35 +308,35 @@ const Composer: FC = () => {
 
             <AuiIf condition={(s) => !s.thread.isRunning}>
               <ComposerPrimitive.Send asChild>
-                <TooltipIconButton
-                  tooltip="Send message"
-                  side="bottom"
+                <button
                   type="button"
-                  variant="default"
-                  size="icon"
-                  className="size-8 rounded-full"
+                  className="size-8 rounded-xl flex items-center justify-center shadow-md shadow-primary/25 transition-all duration-150 hover:scale-105 hover:shadow-primary/40 disabled:opacity-40 disabled:scale-100 disabled:shadow-none"
+                  style={{ background: "linear-gradient(135deg, oklch(0.62 0.22 265), oklch(0.55 0.22 295))" }}
                   aria-label="Send message"
                 >
-                  <ArrowUpIcon className="size-4" />
-                </TooltipIconButton>
+                  <ArrowUpIcon className="size-4 text-white" />
+                </button>
               </ComposerPrimitive.Send>
             </AuiIf>
             <AuiIf condition={(s) => s.thread.isRunning}>
               <ComposerPrimitive.Cancel asChild>
-                <Button
+                <button
                   type="button"
-                  variant="default"
-                  size="icon"
-                  className="size-8 rounded-full"
+                  className="size-8 rounded-xl flex items-center justify-center shadow-md transition-all duration-150 hover:scale-105"
+                  style={{ background: "linear-gradient(135deg, oklch(0.62 0.22 265), oklch(0.55 0.22 295))" }}
                   aria-label="Stop generating"
                 >
-                  <SquareIcon className="size-3 fill-current" />
-                </Button>
+                  <SquareIcon className="size-3 fill-white text-white" />
+                </button>
               </ComposerPrimitive.Cancel>
             </AuiIf>
           </div>
         </div>
       </ComposerPrimitive.AttachmentDropzone>
+
+      <p className="mt-2 text-center text-[10px] text-muted-foreground/35 select-none">
+        TAGH DevOps can make mistakes. Review important outputs.
+      </p>
     </ComposerPrimitive.Root>
   );
 };
@@ -311,10 +356,11 @@ interface CardData {
   footer?: string;
   session_id?: string;
   stream_buffer?: string;
+  buttons?: Array<Array<{ label: string; action_id: string }>>;
 }
 
 const AgentLogPanel: FC<{ text: string; isRunning: boolean }> = ({ text, isRunning }) => {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -327,18 +373,19 @@ const AgentLogPanel: FC<{ text: string; isRunning: boolean }> = ({ text, isRunni
     <div className="mt-3 border-t border-border/50 pt-2">
       <button
         onClick={() => setExpanded((e) => !e)}
-        className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors w-full text-left"
+        className="flex items-center gap-1 text-xs text-foreground/60 hover:text-foreground/90 transition-colors w-full text-left"
       >
-        <ChevronDownIcon className={cn("size-3 transition-transform shrink-0", !expanded && "-rotate-90")} />
-        <span>Agent log</span>
-        {isRunning && expanded && (
-          <span className="ml-auto inline-block size-1.5 rounded-full bg-primary animate-pulse" />
+        {/* collapsed = right (→), expanded = down (↓) */}
+        <ChevronDownIcon className={cn("size-3 transition-transform shrink-0", !expanded && "rotate-90")} />
+        <span className="font-medium">Agent log</span>
+        {isRunning && (
+          <span className={cn("ml-1 inline-block size-1.5 rounded-full bg-primary", expanded ? "animate-pulse" : "opacity-70")} />
         )}
       </button>
       {expanded && (
         <div
           ref={scrollRef}
-          className="mt-1.5 text-xs font-mono text-foreground/80 whitespace-pre-wrap max-h-44 overflow-y-auto rounded bg-black/25 dark:bg-black/50 p-2 leading-relaxed"
+          className="mt-1.5 text-xs font-mono text-foreground/75 whitespace-pre-wrap max-h-44 overflow-y-auto rounded bg-black/25 dark:bg-black/50 p-2 leading-relaxed"
         >
           {text}
         </div>
@@ -385,19 +432,18 @@ const WorkerProgressCard: FC<{ card: CardData }> = ({ card }) => {
   const failed = card.steps.filter((s) => s.status === "failed").length;
   const pct = total > 0 ? Math.round(((done + failed) / total) * 100) : 0;
   const isDone = card.overall_status === "done";
-  // isFailed drives card styling: overall_status=failed OR user cancelled OR any step failed.
-  // NOTE: individual step failures do NOT hide the Stop button — the orchestrator keeps running
-  // after partial failures, so we must keep the Stop button visible until overall_status resolves.
-  const isFailed = card.overall_status === "failed" || localCancelled || failed > 0;
+  // isFailed only on terminal failure or user-cancelled — NOT on partial step failures while running,
+  // because the orchestrator may self-heal and keep going after a step failure.
+  const isFailed = card.overall_status === "failed" || localCancelled;
   // isStillRunning: the job hasn't reached a terminal state yet — Stop button should be visible.
   const isStillRunning = card.overall_status === "running";
 
   return (
     <div className={cn(
       "rounded-xl border p-4 text-sm my-1",
-      isDone && "border-green-500/30 bg-green-50/40 dark:bg-green-950/20",
-      isFailed && "border-destructive/30 bg-destructive/5",
-      !isDone && !isFailed && "border-border bg-muted/20",
+      isDone && "border-green-500/20",
+      isFailed && "border-destructive/20",
+      !isDone && !isFailed && "border-border",
     )}>
       {/* Header */}
       <div className="flex items-center justify-between mb-3">
@@ -417,11 +463,11 @@ const WorkerProgressCard: FC<{ card: CardData }> = ({ card }) => {
           <span className="font-semibold text-foreground">{card.title}</span>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-xs font-mono text-muted-foreground">{card.elapsed}s</span>
+          <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-muted/60 text-foreground/50">{card.elapsed}s</span>
           {isStillRunning && card.session_id && (
             <button
               onClick={handleCancel}
-              className="text-xs px-2 py-0.5 rounded border border-border text-muted-foreground hover:border-destructive hover:text-destructive transition-colors"
+              className="text-xs px-2 py-0.5 rounded border border-border text-foreground/50 hover:border-destructive hover:text-destructive transition-colors"
               title="Stop this job"
             >
               Stop
@@ -448,16 +494,27 @@ const WorkerProgressCard: FC<{ card: CardData }> = ({ card }) => {
             <StepIcon status={step.status} />
             <div className="flex-1 min-w-0">
               <span className={cn(
-                "text-sm",
-                (step.status === "done" || step.status === "skipped") && "text-foreground",
+                "text-[13px] leading-snug",
+                (step.status === "done" || step.status === "skipped") && "text-foreground/90",
                 step.status === "running" && "text-foreground font-medium",
-                step.status === "pending" && "text-muted-foreground",
+                step.status === "pending" && "text-foreground/45",
                 step.status === "failed" && "text-destructive",
               )}>
                 {step.name}
               </span>
               {step.detail && (
-                <span className="ml-2 text-xs text-muted-foreground">{step.detail}</span>
+                <div className="mt-0.5 text-[11px] text-foreground/55 leading-snug break-words">
+                  {step.detail.startsWith("https://") || step.detail.startsWith("http://") ? (
+                    <a
+                      href={step.detail}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-primary/80 hover:text-primary underline underline-offset-2 transition-colors"
+                    >
+                      {step.detail}
+                    </a>
+                  ) : step.detail}
+                </div>
               )}
             </div>
           </div>
@@ -466,7 +523,7 @@ const WorkerProgressCard: FC<{ card: CardData }> = ({ card }) => {
 
       {card.footer && (
         <div className="mt-3 pt-3 border-t border-border/50">
-          {card.footer.startsWith("https://") ? (
+          {card.footer.startsWith("https://") || card.footer.startsWith("http://") ? (
             <a
               href={card.footer}
               target="_blank"
@@ -474,7 +531,8 @@ const WorkerProgressCard: FC<{ card: CardData }> = ({ card }) => {
               onClick={(e) => e.stopPropagation()}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90 transition-colors"
             >
-              Open App ↗
+              Open App
+              <ExternalLinkIcon className="size-3" />
             </a>
           ) : (
             <span className="text-xs text-muted-foreground break-all">{card.footer}</span>
@@ -485,6 +543,53 @@ const WorkerProgressCard: FC<{ card: CardData }> = ({ card }) => {
       {card.stream_buffer && (
         <AgentLogPanel text={card.stream_buffer} isRunning={!isDone && !isFailed} />
       )}
+
+      {card.buttons && card.buttons.length > 0 && (() => {
+        // Web chat only renders task-level decision buttons. Project lifecycle
+        // actions (relink, bootstrap, docker_up/down) are reached via the agent —
+        // the user just asks in natural language. Nav buttons belong in bots.
+        const WEB_ALLOWED_PREFIXES = [
+          "retry_task:",
+          "discard_task:",
+          "approve_plan:",
+          "reject_plan:",
+          "approve_diff:",
+          "reject_diff:",
+          "create_pr:",
+        ];
+        const webButtons = card.buttons!.flat().filter((btn) =>
+          WEB_ALLOWED_PREFIXES.some((p) => btn.action_id.startsWith(p))
+        );
+        if (webButtons.length === 0) return null;
+        return (
+        <div className="mt-3 pt-3 border-t border-border/50 flex flex-wrap gap-2">
+          {webButtons.map((btn) => (
+            <button
+              key={btn.action_id}
+              onClick={async () => {
+                if (!card.session_id) return;
+                try {
+                  await fetch(`/api/threads/${card.session_id}/action`, {
+                    method: "POST",
+                    credentials: "include",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ action_id: btn.action_id }),
+                  });
+                } catch { /* best-effort */ }
+              }}
+              className={cn(
+                "px-3 py-1.5 rounded-lg text-xs font-medium transition-colors",
+                btn.action_id.includes("discard") || btn.action_id.includes("cancel")
+                  ? "border border-destructive/40 text-destructive hover:bg-destructive/10"
+                  : "border border-border/60 text-foreground/80 hover:bg-muted"
+              )}
+            >
+              {btn.label}
+            </button>
+          ))}
+        </div>
+        );
+      })()}
     </div>
   );
 };

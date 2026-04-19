@@ -35,3 +35,7 @@ Thumbs.db
 alembic/versions/__pycache__/
 *.png
 .playwright-mcp/
+
+# Vendored / reference repos — not part of this project
+assistant-ui/
+claude-code-leak/

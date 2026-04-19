@@ -438,7 +438,7 @@ async def _run_agent_session(ctx: dict, user_message: str, chat_id: str, message
 
     # Build tools description based on access level
     _tools_desc_parts = [
-        "- Read/Write/Edit/Glob/Grep — project files in /workspaces/_cache/<project>/",
+        f"- Read/Write/Edit/Glob/Grep — project files in {settings.workspace_base_path}/_cache/<project>/",
         "- Playwright — navigate, screenshot, click, fill forms in the live app",
     ]
     if is_admin:
@@ -513,7 +513,7 @@ Use trigger_task. Do NOT attempt code changes directly in a session.
         system_prompt += f"""
 PLAN MODE ENABLED:
 Before making ANY code changes or running commands, you MUST:
-1. Write a detailed markdown plan to: /workspaces/_cache/{project_name or 'general'}/plans/{{timestamp}}_plan.md
+1. Write a detailed markdown plan to: {settings.workspace_base_path}/_cache/{project_name or 'general'}/plans/{{timestamp}}_plan.md
 2. Output exactly: PLAN_FILE: <full_path_to_markdown>
 3. STOP and wait for user approval before executing any code.
 

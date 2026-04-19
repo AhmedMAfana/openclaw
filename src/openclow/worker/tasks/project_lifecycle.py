@@ -70,13 +70,24 @@ async def docker_down_task(ctx: dict, project_id: int, chat_id: str, message_id:
         else:
             await checklist.skip_step(0, "no workspace")
 
-        # Step 2: Stop tunnel
+        # Step 2: Stop tunnel — verify it's actually down afterward
         await checklist.start_step(1)
+        stop_err: Exception | None = None
         try:
             await stop_tunnel(project.name)
-            await checklist.complete_step(1, "tunnel stopped")
+        except Exception as e:
+            stop_err = e
+            log.warning("lifecycle.tunnel_stop_error", project=project.name, error=str(e))
+        # Verify no tunnel URL remains
+        try:
+            from openclow.services.tunnel_service import get_tunnel_url as _get_tunnel_url
+            still_up = await _get_tunnel_url(project.name)
         except Exception:
-            await checklist.complete_step(1, "no tunnel running")
+            still_up = None
+        if not still_up:
+            await checklist.complete_step(1, "tunnel stopped")
+        else:
+            await checklist.fail_step(1, f"still running: {still_up[:40]}")
 
         # Step 3: Verify
         await checklist.start_step(2)

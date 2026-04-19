@@ -34,38 +34,13 @@ class HealthReport:
     is_running: bool = False
 
 
-async def _run(cmd: str, timeout: int = 10) -> tuple[int, str]:
-    """Run a shell command with timeout. Returns (returncode, stdout)."""
-    from openclow.services.audit_service import log_action
+async def _run(*args: str, timeout: int = 10) -> tuple[int, str]:
+    """Run a command safely with argument list. Returns (returncode, stdout).
 
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        rc = proc.returncode
-        output = stdout.decode().strip()
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        rc, output = -1, "timeout"
-    except Exception as e:
-        rc, output = -1, str(e)
-
-    await log_action(
-        actor="health_service", action="bash", command=cmd,
-        exit_code=rc, output_summary=output[:500],
-    )
-    return rc, output
-
-
-async def _run_exec(*args: str, timeout: int = 10) -> tuple[int, str]:
-    """Run a command safely with argument list. Returns (returncode, stdout)."""
+    Delegates Docker commands to run_docker for audit + guard.
+    """
     cmd_str = " ".join(args)
 
-    # Route Docker commands through the guard
     if args and args[0] == "docker":
         from openclow.services.docker_guard import run_docker
         return await run_docker(*args, actor="health_service", timeout=timeout)
@@ -96,9 +71,13 @@ async def _run_exec(*args: str, timeout: int = 10) -> tuple[int, str]:
 
 
 async def find_project_containers(project_name: str) -> list[ContainerInfo]:
-    """Find running Docker containers for a project using compose label (not name substring)."""
-    rc, output = await _run_exec(
-        "docker", "ps",
+    """Find ALL containers (running + stopped) for a project using compose label.
+
+    Must use `ps -a` so stopped/exited services are visible — otherwise the
+    health check misreports "2/2 running" when 3 of 5 services are stopped.
+    """
+    rc, output = await _run(
+        "docker", "ps", "-a",
         "--filter", f"label=com.docker.compose.project=openclow-{project_name}",
         "--format", "json",
     )
@@ -127,15 +106,15 @@ async def find_project_containers(project_name: str) -> list[ContainerInfo]:
 async def check_http(port: int, container_ip: str | None = None) -> HealthCheck:
     """Check HTTP health — uses container IP if available, falls back to localhost."""
     if container_ip:
-        target = f"http://{container_ip}:{port}"
+        target = f"http://{container_ip}:{port}/"
     else:
-        target = f"http://localhost:{port}"
+        target = f"http://localhost:{port}/"
 
     rc, output = await _run(
-        f'curl -sf -o /dev/null -w "%{{http_code}}" {target}/ --max-time 5',
+        "curl", "-sf", "-o", "/dev/null", "-w", "%{http_code}",
+        target, "--max-time", "5",
         timeout=8,
     )
-    label = f":{port}" if not container_ip else f"{container_ip}:{port}"
     if rc == 0 and output.startswith("2"):
         return HealthCheck("HTTP", "pass", f"HTTP {output} on :{port}")
     if rc == 0 and output.startswith("3"):
@@ -156,28 +135,28 @@ async def check_database(containers: list[ContainerInfo]) -> list[HealthCheck]:
         image_base = image_lower.rsplit("/", 1)[-1]
 
         if image_base.startswith("postgres"):
-            rc, _ = await _run_exec("docker", "exec", c.name, "pg_isready", "-q", timeout=5)
+            rc, _ = await _run("docker", "exec", c.name, "pg_isready", "-q", timeout=5)
             if rc == 0:
                 checks.append(HealthCheck("PostgreSQL", "pass", "connected"))
             else:
                 checks.append(HealthCheck("PostgreSQL", "fail", "not responding"))
 
         elif image_base.startswith("mysql") or image_base.startswith("mariadb"):
-            rc, _ = await _run_exec("docker", "exec", c.name, "mysqladmin", "ping", "--silent", timeout=5)
+            rc, _ = await _run("docker", "exec", c.name, "mysqladmin", "ping", "--silent", timeout=5)
             if rc == 0:
                 checks.append(HealthCheck("MySQL", "pass", "connected"))
             else:
                 checks.append(HealthCheck("MySQL", "fail", "not responding"))
 
         elif image_base.startswith("redis") or image_base.startswith("valkey"):
-            rc, output = await _run_exec("docker", "exec", c.name, "redis-cli", "ping", timeout=5)
+            rc, output = await _run("docker", "exec", c.name, "redis-cli", "ping", timeout=5)
             if rc == 0 and "PONG" in output:
                 checks.append(HealthCheck("Redis", "pass", "connected"))
             else:
                 checks.append(HealthCheck("Redis", "fail", "not responding"))
 
         elif image_base.startswith("mongo"):
-            rc, _ = await _run_exec("docker", "exec", c.name, "mongosh", "--eval", "db.runCommand({ping:1})", "--quiet", timeout=5)
+            rc, _ = await _run("docker", "exec", c.name, "mongosh", "--eval", "db.runCommand({ping:1})", "--quiet", timeout=5)
             if rc == 0:
                 checks.append(HealthCheck("MongoDB", "pass", "connected"))
             else:
@@ -213,12 +192,42 @@ def _extract_published_port(containers: list[ContainerInfo], app_container: str 
 
 async def _get_container_ip(container_name: str) -> str | None:
     """Get the Docker network IP of a container."""
-    rc, output = await _run_exec(
+    rc, output = await _run(
         "docker", "inspect", container_name,
         "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
     )
     ip = output.strip() if rc == 0 else None
     return ip if ip else None
+
+
+async def _count_compose_services(project) -> int:
+    """Return the number of services defined in the project's compose file.
+
+    Used to detect when Docker is missing services that the compose file
+    declares (i.e. never created, not just stopped). Returns 0 if the compose
+    file can't be read — caller should treat that as "don't enforce".
+    """
+    import os
+    from openclow.settings import settings as _s
+    workspace = os.path.join(_s.workspace_base_path, "_cache", project.name)
+    compose_file = project.docker_compose_file or "docker-compose.yml"
+    if not os.path.exists(os.path.join(workspace, compose_file)):
+        return 0
+    compose_project = f"openclow-{project.name}"
+    try:
+        from openclow.services.docker_guard import run_docker
+        rc, output = await run_docker(
+            "docker", "compose", "-f", compose_file, "-p", compose_project,
+            "config", "--services",
+            actor="health_service", cwd=workspace, timeout=10,
+        )
+    except Exception as e:
+        log.warning("health.compose_services_failed", project=project.name, error=str(e))
+        return 0
+    if rc != 0:
+        return 0
+    services = [s.strip() for s in output.strip().split("\n") if s.strip()]
+    return len(services)
 
 
 async def run_full_health_check(project, with_tunnel: bool = True) -> HealthReport:
@@ -235,10 +244,27 @@ async def run_full_health_check(project, with_tunnel: bool = True) -> HealthRepo
         report.checks.append(check_config(project))
         return report
 
-    # Count running
+    # Count running vs total (total includes stopped/exited containers too)
     running = sum(1 for c in containers if c.state == "running")
     total = len(containers)
-    report.checks.append(HealthCheck("Docker", "pass", f"{running}/{total} containers running"))
+
+    # Cross-check against the compose file — if a service is defined but has
+    # no container at all (e.g. never created), `total` is smaller than expected
+    # and the happy path would falsely pass. Fail the Docker check in that case
+    # so the repair agent diagnoses why services are missing.
+    expected_services = await _count_compose_services(project)
+    if expected_services and total < expected_services:
+        report.checks.append(HealthCheck(
+            "Docker", "fail",
+            f"{running}/{total} running — but compose defines {expected_services} services "
+            f"({expected_services - total} missing)"
+        ))
+    elif running == total:
+        report.checks.append(HealthCheck("Docker", "pass", f"{running}/{total} containers running"))
+    else:
+        report.checks.append(HealthCheck(
+            "Docker", "fail", f"{running}/{total} running ({total - running} stopped)"
+        ))
 
     # 2. HTTP check — use container IP directly (worker can't reach host ports)
     app_container_full = None

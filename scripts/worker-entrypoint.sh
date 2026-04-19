@@ -2,8 +2,8 @@
 # Worker entrypoint — ensures Claude credentials persist across restarts.
 # HOME is resolved dynamically from the OS so no paths are hardcoded.
 
-# Resolve the real home dir of whoever is running this container
-export HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
+# Resolve the real home dir of the openclow user (the volume is mounted there)
+export HOME="$(getent passwd openclow | cut -d: -f6)"
 
 CLAUDE_JSON="${HOME}/.claude.json"
 CREDS_FILE="${HOME}/.claude/.credentials.json"

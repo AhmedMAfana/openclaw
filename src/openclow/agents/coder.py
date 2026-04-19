@@ -117,6 +117,30 @@ async def run(workspace_path: str, task: Task, plan: str = "") -> AsyncIterator:
 
     from openclow.providers.llm.claude import _mcp_docker
 
+    # Append tool inventory so the LLM never needs ToolSearch
+    system_prompt += """
+
+## Available Tools (use directly — do NOT search for tools)
+
+File tools: Read(file_path), Write(file_path, content), Edit(file_path, old_string, new_string), Glob(pattern), Grep(pattern, path?)
+
+Git tools (prefixed mcp__git__):
+- git_status(repo_path) — show working tree status
+- git_diff_staged(repo_path) — show staged changes
+- git_diff_unstaged(repo_path) — show unstaged changes
+- git_add(repo_path, files) — stage files
+- git_log(repo_path) — show recent commits
+
+Docker tools (prefixed mcp__docker__):
+- list_containers(project_filter?) — list running containers
+- container_logs(container_name, tail=50) — get recent logs
+- container_health(container_name) — check container status
+- docker_exec(container_name, command) — run command in container (60s timeout)
+- restart_container(container_name) — restart a container
+- compose_up(compose_file, project_name, working_dir) — start Compose stack
+- compose_ps(project_name) — list containers in stack
+"""
+
     options = ClaudeAgentOptions(
         cwd=workspace_path,
         system_prompt=system_prompt,

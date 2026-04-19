@@ -298,6 +298,82 @@ async def prune_docker_if_needed(threshold_gb: float = 20.0):
 # 4. Stuck tasks recovery
 # ─────────────────────────────────────────────────
 
+async def _finalize_web_progress_cards(stuck_rows, error_msg: str):
+    """Push final failed status to web progress cards for stuck tasks.
+
+    Without this, the progress card freezes at whatever step it was on
+    (e.g. "implement: running") instead of showing red/failed.
+    """
+    import json
+    import redis.asyncio as aioredis
+    from openclow.models.base import async_session
+    from openclow.models.web_chat import WebChatMessage
+    from openclow.models import Task
+    from sqlalchemy import select as sa_select
+
+    try:
+        # Get full task objects with chat_id and chat_message_id
+        task_ids = [row[0] for row in stuck_rows]
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select(Task.id, Task.chat_id, Task.chat_message_id)
+                .where(Task.id.in_(task_ids))
+            )
+            tasks = result.all()
+
+        r = aioredis.from_url(settings.redis_url)
+        try:
+            for task_id, chat_id, message_id in tasks:
+                if not chat_id or not chat_id.startswith("web:") or not message_id:
+                    continue
+                try:
+                    parts = chat_id.split(":")
+                    if len(parts) < 3:
+                        continue
+                    user_id, session_id = parts[1], parts[2]
+
+                    # Load the progress card from DB
+                    async with async_session() as db:
+                        msg = await db.get(WebChatMessage, int(message_id))
+                        if not msg or not msg.content.startswith("__PROGRESS_CARD__"):
+                            continue
+                        card = json.loads(msg.content[len("__PROGRESS_CARD__"):])
+
+                        # Mark overall status as failed
+                        card["overall_status"] = "failed"
+                        card["footer"] = f"{error_msg}. You can retry."
+                        # Mark any running step as failed
+                        for step in card.get("steps", []):
+                            if step.get("status") == "running":
+                                step["status"] = "failed"
+                                step["detail"] = "stalled"
+
+                        # Persist updated card
+                        card_to_store = dict(card)
+                        if "session_id" not in card_to_store:
+                            card_to_store["session_id"] = session_id
+                        msg.content = f"__PROGRESS_CARD__{json.dumps(card_to_store)}"
+                        msg.is_complete = True
+                        await db.commit()
+
+                    # Push to WebSocket so connected browsers update immediately
+                    channel = f"wc:{user_id}:{session_id}"
+                    await r.publish(channel, json.dumps({
+                        "type": "progress_card",
+                        "message_id": message_id,
+                        "card": card,
+                    }))
+                    log.info("maintenance.progress_card_finalized",
+                             task_id=str(task_id), message_id=message_id)
+                except Exception as e:
+                    log.warning("maintenance.progress_card_finalize_failed",
+                                task_id=str(task_id), error=str(e))
+        finally:
+            await r.aclose()
+    except Exception as e:
+        log.warning("maintenance.progress_cards_batch_failed", error=str(e))
+
+
 async def recover_stuck_tasks(max_stuck_minutes: int = 30):
     """Mark tasks stuck in intermediate states as failed, and release their project locks.
 
@@ -348,6 +424,9 @@ async def recover_stuck_tasks(max_stuck_minutes: int = 30):
             if row[3] and row[3] not in released_projects:
                 await force_release(row[3])
                 released_projects.add(row[3])
+
+        # Step 4: Finalize web progress cards so the UI shows red/failed
+        await _finalize_web_progress_cards(stuck, "Task stuck — auto-recovered by maintenance")
 
         log.info("maintenance.stuck_tasks_recovered", count=len(stuck),
                  locks_released=len(released_projects))

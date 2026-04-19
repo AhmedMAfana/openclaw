@@ -227,6 +227,7 @@ REPAIR_PROMPT = """You are fixing a running project. App already exists — focu
 PROJECT: {project_name}
 TECH STACK: {tech_stack}
 WORKSPACE: {workspace}
+HOST WORKSPACE: {host_workspace}
 COMPOSE FILE: {compose}
 COMPOSE PROJECT: {compose_project}
 HOST ARCHITECTURE: {arch}
@@ -464,10 +465,18 @@ async def _run_repair_loop(
     problems_text = "\n".join(f"- {p['detail']}" for p in problems)
     container_state = repair_ctx.get("container_state", "unknown")
 
+    from openclow.services.docker_guard import _detect_host_workspace_path
+    from openclow.settings import settings as _settings
+    host_path = await _detect_host_workspace_path()
+    host_workspace = workspace
+    if host_path and workspace.startswith(_settings.workspace_base_path):
+        host_workspace = workspace.replace(_settings.workspace_base_path, host_path, 1)
+
     prompt = REPAIR_PROMPT.format(
         project_name=project.name,
         tech_stack=project.tech_stack or "Unknown",
         workspace=workspace,
+        host_workspace=host_workspace,
         compose=compose,
         compose_project=compose_project,
         arch=arch,
@@ -639,16 +648,61 @@ async def check_project_health(ctx: dict, project_id: int, chat_id: str, message
         )
         problems = _find_problems(report)
 
-        if not problems:
-            await checklist.complete_step(0, f"{len(report.containers)} running")
+        # Happy path requires: all containers running AND HTTP responding.
+        # If any container is down, unhealthy, or the HTTP check fails — drop into
+        # the agentic repair loop so the user sees the detailed log of what's being
+        # fixed instead of a too-fast green checkmark with "may need time".
+        running_count = sum(1 for c in report.containers if c.state == "running")
+        total_count = len(report.containers)
+        all_containers_up = report.containers and running_count == total_count
+        http_ok = any(c.status == "pass" for c in report.checks if c.name == "HTTP")
+        critical_problems = [p for p in problems if p["type"] in
+                              ("container_down", "container_unhealthy")
+                              or (p["type"] == "check_failed" and p.get("name") == "HTTP")]
 
-            # Step 1: Verify app responds
+        if report.is_running and all_containers_up and http_ok and not critical_problems:
+            await checklist.complete_step(0, f"{running_count}/{total_count} running")
+
+            # Step 1: Verify app responds — retry a few times if the container
+            # is still warming up, then fail honestly if it never responds.
             await checklist.start_step(1)
             app_ok = any(c.status == "pass" for c in report.checks if c.name == "HTTP")
+            if not app_ok:
+                # Re-probe up to 3 times (total ~15s) before giving up
+                for attempt in range(3):
+                    await checklist.update_step(1, f"probing app ({attempt + 1}/3)...")
+                    await asyncio.sleep(5)
+                    try:
+                        retry_report = await asyncio.wait_for(
+                            run_full_health_check(project, with_tunnel=False),
+                            timeout=10,
+                        )
+                        if any(c.status == "pass" for c in retry_report.checks if c.name == "HTTP"):
+                            app_ok = True
+                            break
+                    except Exception as _probe_err:
+                        log.warning("health.probe_failed", project=project.name,
+                                    attempt=attempt + 1, error=str(_probe_err))
             if app_ok:
                 await checklist.complete_step(1, "HTTP OK")
             else:
-                await checklist.complete_step(1, "⚠️ may need time")
+                # App not responding — hand off to the agentic repair loop so
+                # a senior-engineer LLM can diagnose and fix, with the detailed
+                # live log visible to the user.
+                await checklist.update_step(1, "app down — dispatching repair agent")
+                new_problems = [{
+                    "type": "check_failed",
+                    "name": "HTTP",
+                    "detail": "app not responding after 3 probes — containers up but HTTP check fails",
+                }]
+                report = await _run_repair_loop(
+                    project, report, new_problems, chat, chat_id, message_id, [],
+                    existing_checklist=checklist,
+                )
+                log.info("health.check_done", project=project.name,
+                         running=report.is_running, problems=len(new_problems),
+                         tunnel=report.tunnel_url is not None)
+                return
 
             # Step 2: Tunnel
             await checklist.start_step(2)

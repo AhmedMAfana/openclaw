@@ -1,7 +1,6 @@
 """Git operations via subprocess — clone, branch, push, PR."""
 import asyncio
 import os
-import shlex
 
 from openclow.utils.logging import get_logger
 
@@ -47,33 +46,6 @@ async def run_exec(
     return stdout_str
 
 
-# DEPRECATED: Prefer run_exec() for new code. This function uses shell=True
-# and is only kept for backward compatibility with callers that need shell
-# features (pipes, redirects, globbing). All arguments interpolated into `cmd`
-# MUST be escaped with shlex.quote() to prevent command injection.
-async def run_cmd(cmd: str, cwd: str | None = None, ignore_errors: bool = False) -> str:
-    """Run a shell command and return stdout.
-
-    DEPRECATED: Use run_exec() instead for safety against command injection.
-    """
-    env = await _get_git_env()
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-    stdout, stderr = await proc.communicate()
-    stdout_str = stdout.decode().strip()
-    stderr_str = stderr.decode().strip()
-
-    if proc.returncode != 0 and not ignore_errors:
-        log.error("cmd.failed", cmd=cmd, stderr=stderr_str, returncode=proc.returncode)
-        raise RuntimeError(f"Command failed: {cmd}\n{stderr_str}")
-
-    return stdout_str
-
 
 async def clone(repo: str, dest: str):
     """Clone a GitHub repo."""
@@ -88,8 +60,12 @@ async def fetch_and_reset(workspace: str, branch: str):
 
 
 async def create_branch(workspace: str, branch_name: str):
-    """Create and checkout a new branch."""
-    await run_exec("git", "checkout", "-b", branch_name, cwd=workspace)
+    """Create and checkout a branch. If it already exists, just check it out."""
+    try:
+        await run_exec("git", "checkout", "-b", branch_name, cwd=workspace)
+    except Exception:
+        # Branch already exists — check it out instead
+        await run_exec("git", "checkout", branch_name, cwd=workspace)
 
 
 async def add_all(workspace: str):
@@ -170,9 +146,24 @@ async def diff_stat(workspace: str) -> str:
 
 
 async def changed_files(workspace: str) -> list[str]:
-    """Get list of changed file paths."""
+    """Get list of changed file paths — uncommitted OR last commit (coder commits before deploy)."""
+    files: set[str] = set()
+
+    # Uncommitted changes
     output = await run_exec("git", "diff", "--name-only", "HEAD", cwd=workspace, ignore_errors=True)
-    return [f.strip() for f in output.splitlines() if f.strip()]
+    files.update(f.strip() for f in output.splitlines() if f.strip())
+
+    # Latest commit — coder typically commits before deploy runs, so HEAD is clean.
+    # Include the last commit's files so the deploy step knows to rebuild.
+    output = await run_exec("git", "log", "-1", "--name-only", "--pretty=format:", cwd=workspace, ignore_errors=True)
+    files.update(f.strip() for f in output.splitlines() if f.strip())
+
+    return list(files)
+
+
+async def reset_hard(workspace: str):
+    """Reset working tree to HEAD (used for empty-diff retry path)."""
+    await run_exec("git", "reset", "--hard", "HEAD", cwd=workspace)
 
 
 async def diff_size(workspace: str) -> int:

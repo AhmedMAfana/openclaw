@@ -1,6 +1,7 @@
 """Tunnel management tasks — run on worker, called from bot/MCP via arq."""
 
 from openclow.services import tunnel_service
+from openclow.settings import settings
 from openclow.utils.logging import get_logger
 
 log = get_logger()
@@ -62,12 +63,52 @@ async def check_tunnel_health_task(ctx: dict) -> dict:
                 results[p.name] = {"url": existing_url, "healthy": True}
                 continue
 
+            # Race-condition guard: skip if tunnel was just started (< 120s ago).
+            # Prevents the health loop from racing with a concurrent repair/start
+            # that already launched a fresh cloudflared — the health guard agent
+            # can take 1-3 minutes and cloudflared needs time to register with CF.
+            if existing_url:
+                import time as _time
+                cfg = await tunnel_service._get_tunnel_config(p.name)
+                started_at = cfg.get("started_at", 0) if cfg else 0
+                if _time.time() - started_at < 120:
+                    results[p.name] = {"url": existing_url, "healthy": True}
+                    log.debug("tunnel.health_loop_skip_fresh", service=p.name,
+                              age_s=int(_time.time() - started_at))
+                    continue
+
+            # Skip projects with active tasks — the orchestrator/bootstrap owns
+            # the tunnel lifecycle during task execution. Don't race with it.
+            try:
+                from sqlalchemy import select as _sa_select
+                from openclow.models import Task, async_session as _async_session
+                async with _async_session() as _sess:
+                    _active = await _sess.execute(
+                        _sa_select(Task.id).where(
+                            Task.project_id == p.id,
+                            Task.status.in_(("coding", "preparing", "planning",
+                                             "reviewing", "pushing")),
+                        ).limit(1)
+                    )
+                    if _active.first() is not None:
+                        results[p.name] = {"url": existing_url, "healthy": True}
+                        log.debug("tunnel.health_loop_skip_active_task", service=p.name)
+                        continue
+            except Exception:
+                pass  # If DB check fails, proceed with normal health check
+
+            # Also skip if project is bootstrapping
+            if p.status == "bootstrapping":
+                results[p.name] = {"url": existing_url, "healthy": True}
+                log.debug("tunnel.health_loop_skip_bootstrapping", service=p.name)
+                continue
+
             # Tunnel dead or missing — check if containers are actually running first
             compose_project = f"openclow-{p.name}"
             try:
                 from openclow.worker.tasks.bootstrap import _get_tunnel_target
                 target = await _get_tunnel_target(
-                    compose_project, f"/workspaces/_cache/{p.name}", p.id)
+                    compose_project, f"{settings.workspace_base_path}/_cache/{p.name}", p.id)
             except Exception:
                 target = None
 
@@ -79,7 +120,7 @@ async def check_tunnel_health_task(ctx: dict) -> dict:
             # Detect host header from .env APP_URL
             import os
             host_header = None
-            env_path = f"/workspaces/_cache/{p.name}/.env"
+            env_path = f"{settings.workspace_base_path}/_cache/{p.name}/.env"
             if os.path.exists(env_path):
                 with open(env_path) as f:
                     for line in f:

@@ -291,6 +291,7 @@ async def _run_claude_cli(prompt: str, workspace: str, max_turns: int = 12) -> s
         "claude", "-p", prompt,
         "--output-format", "json",
         "--max-turns", str(max_turns),
+        "--disallowedTools", "Bash",
         "--allowedTools", "Read,Write,Edit,Glob,Grep,mcp__docker__list_containers,mcp__docker__container_logs,mcp__docker__container_health,mcp__docker__docker_exec,mcp__docker__restart_container,mcp__docker__compose_up,mcp__docker__compose_ps",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

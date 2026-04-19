@@ -1,9 +1,4 @@
 # Dev overrides — auto-loaded by docker compose
-# Rules:
-#  - No hardcoded paths anywhere.
-#  - api/bot run as the image's USER so Claude CLI auth works correctly.
-#  - worker needs root only to fix docker.sock perms, then drops back to openclow via su -l.
-
 services:
   bot:
     command: >
@@ -24,13 +19,11 @@ services:
           export WEB_CHAT_JWT_SECRET=$$(cat $$JWT_FILE);
           echo '[api] WEB_CHAT_JWT_SECRET loaded from volume';
         fi;
-        exec uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000 --reload
-          --reload-exclude '*/worker/tasks/*'
-          --reload-exclude '*/worker/arq_app*'
-          --timeout-graceful-shutdown 5
+        exec uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir src/openclow/api --reload-dir src/openclow/models --timeout-graceful-shutdown 5
       "
     volumes:
       - ./src:/app/src:cached
+      - ./workspaces_dev:/workspaces
     environment:
       - LOG_LEVEL=DEBUG
 
@@ -38,6 +31,7 @@ services:
     command: >
       bash -c "
         chmod 666 /var/run/docker.sock 2>/dev/null || true;
+        python3 -c 'import asyncio; from openclow.services.docker_guard import _detect_host_workspace_path; asyncio.run(_detect_host_workspace_path())' 2>/dev/null || true;
         exec su -l openclow -c 'arq openclow.worker.arq_app.WorkerSettings'
       "
     user: root
@@ -47,9 +41,6 @@ services:
       - claude_auth:/home/openclow/.claude
     environment:
       - LOG_LEVEL=DEBUG
-      # Explicit Docker binary path — su -l openclow resets PATH and may drop /usr/bin.
-      # get_docker_bin() checks DOCKER_BIN first so subprocess calls always find docker
-      # regardless of the user's login shell PATH. Adjust if docker is elsewhere on your host.
       - DOCKER_BIN=/usr/bin/docker
 
   postgres:

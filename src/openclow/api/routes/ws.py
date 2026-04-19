@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from openclow.api.web_auth import verify_web_token
@@ -13,6 +15,10 @@ log = get_logger()
 
 router = APIRouter(tags=["websocket"])
 
+# Ping every 30s — keeps the connection alive through nginx/cloudflare proxies
+# that drop idle connections after 60-120s.
+_WS_PING_INTERVAL = 30
+
 
 @router.websocket("/api/ws/{user_id}/{session_id}")
 async def ws_worker_updates(websocket: WebSocket, user_id: int, session_id: int):
@@ -20,8 +26,9 @@ async def ws_worker_updates(websocket: WebSocket, user_id: int, session_id: int)
 
     Auth: reads the web_token cookie from the WS handshake, validates JWT,
     and confirms the token's user_id matches the URL parameter.
+
+    Sends periodic pings to prevent intermediate proxies from dropping the connection.
     """
-    # Validate cookie auth before accepting the connection
     token = websocket.cookies.get("web_token")
     if not token:
         await websocket.close(code=4401)
@@ -34,12 +41,25 @@ async def ws_worker_updates(websocket: WebSocket, user_id: int, session_id: int)
 
     await websocket.accept()
 
-    import redis.asyncio as aioredis
     r = aioredis.from_url(settings.redis_url)
     pubsub = r.pubsub()
     channel = f"wc:{user_id}:{session_id}"
     await pubsub.subscribe(channel)
     log.info("ws.connected", user_id=user_id, session_id=session_id, channel=channel)
+
+    async def _ping_loop():
+        """Send periodic pings so proxies don't drop the connection."""
+        try:
+            while True:
+                await asyncio.sleep(_WS_PING_INTERVAL)
+                try:
+                    await websocket.send_text(json.dumps({"type": "ping"}))
+                except Exception:
+                    break
+        except asyncio.CancelledError:
+            pass
+
+    ping_task = asyncio.create_task(_ping_loop())
 
     try:
         async for message in pubsub.listen():
@@ -53,6 +73,7 @@ async def ws_worker_updates(websocket: WebSocket, user_id: int, session_id: int)
     except Exception as e:
         log.warning("ws.error", user_id=user_id, session_id=session_id, error=str(e))
     finally:
+        ping_task.cancel()
         await pubsub.unsubscribe(channel)
         await r.aclose()
         log.info("ws.disconnected", user_id=user_id, session_id=session_id)

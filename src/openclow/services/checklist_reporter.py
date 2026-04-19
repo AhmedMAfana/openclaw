@@ -21,6 +21,7 @@ class ChecklistReporter(BaseReporter):
         self.subtitle = subtitle
         self.steps: list[dict] = []
         self._footer = ""
+        self._keyboard = None
 
     # -- Step management -------------------------------------------------------
 
@@ -130,6 +131,8 @@ class ChecklistReporter(BaseReporter):
 
     async def _render(self, keyboard=None):
         """Web chat: emit a structured card on every step update; other platforms: text."""
+        if keyboard is not None:
+            self._keyboard = keyboard
         if hasattr(self._chat, "send_progress_card"):
             await self._emit_card()
             return
@@ -137,6 +140,8 @@ class ChecklistReporter(BaseReporter):
 
     async def _force_render(self, keyboard=None):
         """Web chat gets a structured progress_card event; other platforms get text."""
+        if keyboard is not None:
+            self._keyboard = keyboard
         if hasattr(self._chat, "send_progress_card"):
             await self._emit_card()
             return
@@ -146,14 +151,20 @@ class ChecklistReporter(BaseReporter):
         total = len(self.steps)
         done = sum(1 for s in self.steps if s["status"] in ("done", "skipped"))
         failed = sum(1 for s in self.steps if s["status"] == "failed")
+        pending = sum(1 for s in self.steps if s["status"] == "pending")
         all_terminal = (done + failed) == total and total > 0
-        if all_terminal and failed and not done:
+        # Failed + all remaining are pending = terminal failure (cancelled/aborted).
+        # Without this, a cancel during step 1 leaves overall_status="running"
+        # because steps 2-4 are still "pending" (never started).
+        if failed and (failed + pending) == total:
+            overall = "failed"
+        elif all_terminal and failed and not done:
             overall = "failed"
         elif all_terminal:
             overall = "done"
         else:
             overall = "running"
-        return {
+        card = {
             "title": self.title,
             "elapsed": self.elapsed,
             "overall_status": overall,
@@ -163,6 +174,24 @@ class ChecklistReporter(BaseReporter):
             ],
             "footer": self._footer,
         }
+        if self._keyboard is not None:
+            card["buttons"] = self._keyboard_to_buttons(self._keyboard)
+        return card
+
+    def _keyboard_to_buttons(self, keyboard) -> list | None:
+        """Convert ActionKeyboard to JSON-serializable button rows."""
+        if not keyboard:
+            return None
+        buttons = []
+        for row in keyboard.rows:
+            row_buttons = []
+            for btn in row.buttons:
+                row_buttons.append({
+                    "label": btn.label,
+                    "action_id": btn.action_id,
+                })
+            buttons.append(row_buttons)
+        return buttons
 
     async def _emit_card(self):
         try:

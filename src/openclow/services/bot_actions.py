@@ -106,7 +106,7 @@ async def get_task_status(task_id: str) -> str | None:
 _EXPECTED_STATUS: dict[str, set[str]] = {
     "approve_plan": {"plan_review"},
     "approve": {"diff_preview"},
-    "discard": {"diff_preview", "plan_review"},  # Can reject from plan OR diff
+    "discard": {"diff_preview", "plan_review", "failed"},  # Can discard from plan, diff, or failed
     "merge": {"awaiting_approval"},
     "reject": {"awaiting_approval"},
 }
@@ -182,6 +182,7 @@ async def create_task(
     description: str,
     chat_id: str,
     chat_provider_type: str = "telegram",
+    git_mode: str = "branch_per_task",
 ) -> Task:
     """Create a new task in the DB."""
     task_id = uuid.uuid4()
@@ -194,6 +195,7 @@ async def create_task(
             status="pending",
             chat_id=chat_id,
             chat_provider_type=chat_provider_type,
+            git_mode=git_mode,
         )
         session.add(task)
         await session.commit()

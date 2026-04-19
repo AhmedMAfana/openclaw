@@ -1,4 +1,12 @@
 """Web chat sessions/threads endpoints — conversation list and history."""
+from __future__ import annotations
+
+import asyncio
+import json as _json
+
+import redis.asyncio as aioredis
+import sqlalchemy as _sa
+from arq import create_pool
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, desc, delete
 
@@ -6,7 +14,8 @@ from openclow.api.web_auth import web_user_dep
 from openclow.models.user import User
 from openclow.models.base import async_session
 from openclow.models.web_chat import WebChatSession, WebChatMessage
-from openclow.models.project import Project
+from openclow.settings import settings
+from openclow.worker.arq_app import get_arq_pool, parse_redis_url
 from openclow.utils.logging import get_logger
 
 log = get_logger()
@@ -46,6 +55,7 @@ async def list_threads(user: User = Depends(web_user_dep)):
                 "title": s.title,
                 "status": "regular",
                 "projectId": s.project_id,
+                "gitMode": s.git_mode,
                 "lastMessageAt": s.last_message_at.isoformat() if s.last_message_at else s.created_at.isoformat(),
             }
             for s in sessions
@@ -83,6 +93,7 @@ async def get_thread(thread_id: int, user: User = Depends(web_user_dep)):
     return {
         "remoteId": str(result.id),
         "title": result.title,
+        "gitMode": result.git_mode,
         "createdAt": result.created_at.isoformat(),
     }
 
@@ -101,23 +112,22 @@ async def rename_thread(thread_id: int, body: dict, user: User = Depends(web_use
     return {"status": "ok"}
 
 
-@router.put("/threads/{thread_id}/project")
-async def set_thread_project(thread_id: int, body: dict, user: User = Depends(web_user_dep)):
-    """Assign (or clear) a project on a session."""
-    async with async_session() as session:
-        result = await session.get(WebChatSession, thread_id)
-        if not result or result.user_id != user.id:
-            raise HTTPException(404, "Thread not found")
+@router.patch("/threads/{thread_id}/git-mode")
+async def set_thread_git_mode(thread_id: int, body: dict, user: User = Depends(web_user_dep)):
+    """Update the git mode for a session."""
+    valid_modes = {"branch_per_task", "direct_commit", "session_branch"}
+    new_mode = body.get("git_mode", "branch_per_task")
+    if new_mode not in valid_modes:
+        raise HTTPException(400, f"Invalid git_mode. Must be one of: {', '.join(valid_modes)}")
 
-        project_id = body.get("project_id")  # int or None
-        if project_id is not None:
-            proj = await session.get(Project, int(project_id))
-            if not proj:
-                raise HTTPException(404, "Project not found")
-        result.project_id = project_id
+    async with async_session() as session:
+        ws = await session.get(WebChatSession, thread_id)
+        if not ws or ws.user_id != user.id:
+            raise HTTPException(404, "Thread not found")
+        ws.git_mode = new_mode
         await session.commit()
 
-    return {"status": "ok", "project_id": project_id}
+    return {"status": "ok", "git_mode": new_mode}
 
 
 @router.post("/threads/{thread_id}/archive")
@@ -127,7 +137,6 @@ async def archive_thread(thread_id: int, user: User = Depends(web_user_dep)):
         result = await session.get(WebChatSession, thread_id)
         if not result or result.user_id != user.id:
             raise HTTPException(404, "Thread not found")
-        # For now, just return ok. Could add a status field if needed.
         await session.delete(result)
         await session.commit()
 
@@ -149,7 +158,6 @@ async def truncate_thread_messages(thread_id: int, body: dict, user: User = Depe
         if not ws or ws.user_id != user.id:
             raise HTTPException(404, "Thread not found")
 
-        # Get all message IDs ordered by created_at
         result = await session.execute(
             select(WebChatMessage.id)
             .where(WebChatMessage.session_id == thread_id)
@@ -157,7 +165,6 @@ async def truncate_thread_messages(thread_id: int, body: dict, user: User = Depe
         )
         all_ids = [row[0] for row in result.all()]
 
-        # Delete everything after the first keep_count messages
         ids_to_delete = all_ids[keep_count:]
         if ids_to_delete:
             await session.execute(
@@ -174,12 +181,10 @@ async def truncate_thread_messages(thread_id: int, body: dict, user: User = Depe
 async def get_thread_messages(thread_id: int, user: User = Depends(web_user_dep)):
     """Load message history for a thread."""
     async with async_session() as session:
-        # Verify thread belongs to user
         ws = await session.get(WebChatSession, thread_id)
         if not ws or ws.user_id != user.id:
             raise HTTPException(404, "Thread not found")
 
-        # Load messages
         result = await session.execute(
             select(WebChatMessage)
             .where(WebChatMessage.session_id == thread_id)
@@ -194,6 +199,7 @@ async def get_thread_messages(thread_id: int, user: User = Depends(web_user_dep)
                 "role": m.role,
                 "content": m.content,
                 "createdAt": m.created_at.isoformat(),
+                "isComplete": m.is_complete,
             }
             for m in messages
         ]
@@ -223,103 +229,158 @@ async def list_projects(user: User = Depends(web_user_dep)):
     }
 
 
-# ── Session job cancellation ─────────────────────────────────
+# ── Cancel service — extracted from handler for clarity + proper cleanup ──────
 
-@router.post("/threads/{session_id}/cancel")
-async def cancel_session_jobs(session_id: int, user: User = Depends(web_user_dep)):
-    """Abort all arq jobs enqueued during this session. Called when user clicks Stop."""
-    import json as _json
-    chat_id = f"web:{user.id}:{session_id}"
+async def _cancel_session(session_id: int, user_id: int) -> int:
+    """Cancel the most recent running task. Returns number of aborted jobs.
+
+    Uses a single Redis connection (via async-with) to prevent leaks.
+    """
+    chat_id = f"web:{user_id}:{session_id}"
     key = f"openclow:session_jobs:{chat_id}"
+    aborted = 0
 
-    try:
-        import redis.asyncio as aioredis
-        from openclow.settings import settings
-        from arq import create_pool
-        from openclow.worker.arq_app import parse_redis_url
-
-        r = aioredis.from_url(settings.redis_url)
+    # 1. Fetch job IDs + set cancel flag in one connection
+    async with aioredis.from_url(settings.redis_url) as r:
         job_ids = await r.lrange(key, 0, -1)
-        await r.delete(key)
-        # Set session-level cancel flag so running worker tasks (coder, repair, bootstrap)
-        # bail out cleanly on their next iteration — survives even if arq abort races
         await r.set(f"openclow:cancel_session:{session_id}", "1", ex=600)
-        await r.aclose()
+        await r.publish(f"openclow:cancel:{session_id}", "cancel")
 
-        # ── Immediately mark in-progress progress cards as cancelled in DB ──
-        # Only touches __PROGRESS_CARD__ messages — never plain text stubs.
-        # __LOADING__ stubs (send_message("") placeholders) are deleted so they
-        # don't show stray "Cancelled" text in the chat.
-        try:
-            import sqlalchemy as _sa
-            from openclow.models.base import async_session as _db_session
-            from openclow.models.web_chat import WebChatMessage
-
-            async with _db_session() as db:
-                result = await db.execute(
+    # 2. Mark the most recent running progress card as cancelled
+    updated_card: tuple[int, dict] | None = None
+    try:
+        async with async_session() as db:
+            # First try incomplete messages; fall back to any recent progress card
+            # still marked "running" (handles the race where a heartbeat set
+            # is_complete=True while overall_status stayed "running").
+            result = await db.execute(
+                _sa.select(WebChatMessage).where(
+                    WebChatMessage.session_id == session_id,
+                    WebChatMessage.role == "assistant",
+                    WebChatMessage.is_complete == False,  # noqa: E712
+                ).order_by(WebChatMessage.created_at.desc()).limit(1)
+            )
+            msg = result.scalar_one_or_none()
+            if not msg:
+                # Fallback: find stuck cards (is_complete=True but overall_status=running)
+                result2 = await db.execute(
                     _sa.select(WebChatMessage).where(
                         WebChatMessage.session_id == session_id,
                         WebChatMessage.role == "assistant",
-                        WebChatMessage.is_complete == False,  # noqa: E712
-                    ).order_by(WebChatMessage.created_at.desc()).limit(10)
+                        WebChatMessage.content.like("__PROGRESS_CARD__%running%"),
+                    ).order_by(WebChatMessage.created_at.desc()).limit(1)
                 )
-                msgs = result.scalars().all()
-                updated_cards = []
-                for msg in msgs:
-                    if msg.content.startswith("__PROGRESS_CARD__"):
-                        try:
-                            card = _json.loads(msg.content[len("__PROGRESS_CARD__"):])
-                            if card.get("overall_status") == "running":
-                                for step in card.get("steps", []):
-                                    if step.get("status") == "running":
-                                        step["status"] = "failed"
-                                        step["detail"] = "cancelled"
-                                card["overall_status"] = "failed"
-                                card["footer"] = "Cancelled by user"
-                                msg.content = f"__PROGRESS_CARD__{_json.dumps(card)}"
-                                msg.is_complete = True
-                                updated_cards.append((msg.id, card))
-                        except Exception:
-                            pass
-                    elif msg.content in ("", "__LOADING__"):
-                        # Delete stub messages — they have no content worth keeping
-                        await db.delete(msg)
-                await db.commit()
-
-            # Publish updated cards via WebSocket so connected clients update instantly
-            if updated_cards:
-                r2 = aioredis.from_url(settings.redis_url)
-                channel = f"wc:{user.id}:{session_id}"
+                msg = result2.scalar_one_or_none()
+            if msg and msg.content.startswith("__PROGRESS_CARD__"):
                 try:
-                    for msg_id, card in updated_cards:
-                        await r2.publish(channel, _json.dumps({
-                            "type": "progress_card",
-                            "message_id": str(msg_id),
-                            "card": card,
-                        }))
-                finally:
-                    await r2.aclose()
-        except Exception as e:
-            log.warning("session.cancel_card_update_failed", error=str(e))
+                    card = _json.loads(msg.content[len("__PROGRESS_CARD__"):])
+                    if card.get("overall_status") == "running":
+                        for step in card.get("steps", []):
+                            if step.get("status") == "running":
+                                step["status"] = "failed"
+                                step["detail"] = "cancelled"
+                        card["overall_status"] = "failed"
+                        card["footer"] = "Cancelled by user"
+                        msg.content = f"__PROGRESS_CARD__{_json.dumps(card)}"
+                        msg.is_complete = True
+                        updated_card = (msg.id, card)
+                except Exception:
+                    pass
+            elif msg and msg.content in ("", "__LOADING__"):
+                await db.delete(msg)
+            elif msg:
+                msg.is_complete = True
 
-        if not job_ids:
-            return {"cancelled": 0}
+            # Update Task.status in the same DB session
+            from openclow.models import Task
+            task_result = await db.execute(
+                _sa.select(Task).where(
+                    Task.chat_id == chat_id,
+                    Task.status.in_(["pending", "preparing", "planning",
+                                     "plan_review", "coding", "reviewing", "pushing"]),
+                ).order_by(Task.created_at.desc()).limit(1)
+            )
+            task = task_result.scalar_one_or_none()
+            if task:
+                task.status = "cancelled"
+                task.error_message = "Cancelled by user"
 
-        pool = await create_pool(parse_redis_url(settings.redis_url))
-        cancelled = 0
-        for jid in job_ids:
-            jid_str = jid.decode() if isinstance(jid, bytes) else jid
+            await db.commit()
+    except Exception as e:
+        log.warning("cancel.db_update_failed", error=str(e))
+
+    # 3. Publish updated card to WebSocket (single connection)
+    if updated_card:
+        msg_id, card = updated_card
+        try:
+            async with aioredis.from_url(settings.redis_url) as r:
+                payload = {
+                    "type": "progress_card",
+                    "message_id": str(msg_id),
+                    "card": card,
+                }
+                await r.publish(f"wc:{user_id}:{session_id}", _json.dumps(payload))
+        except Exception:
+            pass
+
+    # 4. Abort the most recent ARQ job
+    if job_ids:
+        try:
+            redis_settings = parse_redis_url(settings.redis_url)
+            arq_pool = await create_pool(redis_settings)
             try:
-                job = pool.job(jid_str)
-                await job.abort(timeout=2)
-                cancelled += 1
-            except Exception:
-                pass
-        await pool.aclose()
+                for jid in job_ids[:1]:
+                    jid_str = jid.decode() if isinstance(jid, bytes) else jid
+                    try:
+                        job = arq_pool.job(jid_str)
+                        await job.abort(timeout=2)
+                        aborted += 1
+                    except Exception:
+                        pass
+            finally:
+                await arq_pool.aclose()
+        except Exception as e:
+            log.warning("cancel.arq_abort_failed", error=str(e))
 
-        log.info("session.cancelled", session_id=session_id, user_id=user.id, jobs=cancelled)
-        return {"cancelled": cancelled}
+    return aborted
 
+
+# ── Session job cancellation endpoint ─────────────────────────
+
+@router.post("/threads/{session_id}/cancel")
+async def cancel_session_jobs(session_id: int, user: User = Depends(web_user_dep)):
+    """Cancel the most recent running task in this session."""
+    try:
+        aborted = await _cancel_session(session_id, user.id)
+        log.info("session.cancelled", session_id=session_id, user_id=user.id, jobs=aborted)
+        return {"cancelled": aborted}
     except Exception as e:
         log.warning("session.cancel_failed", error=str(e))
         return {"cancelled": 0, "error": str(e)}
+
+
+@router.post("/threads/{session_id}/action")
+async def session_action(session_id: int, body: dict, user: User = Depends(web_user_dep)):
+    """Handle action buttons from the web chat progress card."""
+    action_id = body.get("action_id", "")
+    chat_id = f"web:{user.id}:{session_id}"
+    log.info("session.action", session_id=session_id, action=action_id, user_id=user.id)
+
+    if action_id.startswith("discard_task:"):
+        task_id = action_id.split(":", 1)[1]
+        pool = await asyncio.wait_for(get_arq_pool(), timeout=5)
+        await pool.enqueue_job("discard_task", task_id)
+        return {"status": "queued", "job": "discard_task"}
+
+    if action_id.startswith("retry_task:"):
+        task_id = action_id.split(":", 1)[1]
+        pool = await asyncio.wait_for(get_arq_pool(), timeout=5)
+        await pool.enqueue_job("execute_task", task_id)
+        return {"status": "queued", "job": "execute_task"}
+
+    from openclow.api.routes.actions import web_action, WebActionRequest
+    try:
+        return await web_action(WebActionRequest(action_id=action_id, chat_id=chat_id), user)
+    except Exception as e:
+        log.warning("session.action_failed", error=str(e))
+        return {"status": "error", "error": str(e)}

@@ -84,6 +84,21 @@ async def run(workspace_path: str, task: Task) -> ReviewResult:
         agent_system_prompt=project.agent_system_prompt or "",
     )
 
+    # Append tool inventory so LLM never needs ToolSearch
+    system_prompt += """
+
+## Available Tools (use directly — do NOT search for tools)
+
+File tools: Read(file_path), Glob(pattern), Grep(pattern, path?)
+
+Git tools (prefixed mcp__git__):
+- git_diff_staged(repo_path) — show staged changes
+- git_diff_unstaged(repo_path) — show unstaged changes
+- git_log(repo_path) — show recent commits
+- git_show(repo_path, revision) — show a specific commit
+- git_status(repo_path) — show working tree status
+"""
+
     options = ClaudeAgentOptions(
         cwd=workspace_path,
         system_prompt=system_prompt,

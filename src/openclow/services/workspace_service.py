@@ -104,9 +104,10 @@ class WorkspaceService:
                 shutil.copy2(src_auth, dest_auth)
                 log.info("workspace.auth_json_copied", workspace=workspace)
 
+        import shlex
         for lock_file, install_cmd in self._LOCK_FILE_COMMANDS:
             if os.path.exists(os.path.join(workspace, lock_file)):
-                await git_ops.run_cmd(install_cmd, cwd=workspace)
+                await git_ops.run_exec(*shlex.split(install_cmd), cwd=workspace)
 
     async def prepare(self, project: Project, task_id: str) -> Workspace:
         """Prepare a workspace for a task. Uses cache + git worktree for speed."""
@@ -173,10 +174,11 @@ class WorkspaceService:
 
             # Run project-specific setup commands
             if project.setup_commands:
+                import shlex as _shlex
                 for cmd in project.setup_commands.strip().split("\n"):
                     cmd = cmd.strip()
                     if cmd:
-                        await git_ops.run_cmd(cmd, cwd=work, ignore_errors=True)
+                        await git_ops.run_exec(*_shlex.split(cmd), cwd=work, ignore_errors=True)
 
             # Docker: DON'T start containers per-task.
             # Containers are already running from bootstrap/Open App.

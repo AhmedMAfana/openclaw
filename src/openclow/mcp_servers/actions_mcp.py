@@ -53,6 +53,133 @@ async def _track_job(chat_id: str, job_id: str) -> None:
         pass
 
 
+# ── Block-until-done helpers — MCP tools wait for verified completion ─────────
+
+async def _verify_tunnel_live(url: str, timeout: float = 8) -> bool:
+    """HTTP-check a tunnel URL — returns True only if it actually serves."""
+    try:
+        import httpx
+        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as http:
+            resp = await http.get(url)
+            return resp.status_code < 502
+    except Exception:
+        return False
+
+
+async def _containers_running(compose_project: str) -> bool:
+    """Check whether any compose-labelled containers are running."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "ps",
+            "--filter", f"label=com.docker.compose.project={compose_project}",
+            "--format", "{{.Names}}",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        return bool(stdout.decode().strip())
+    except Exception:
+        return False
+
+
+async def _wait_for_bootstrap_done(
+    project_id: int, project_name: str, timeout: int = 720,
+) -> str:
+    """Block until the bootstrap worker finishes (status leaves 'bootstrapping').
+    Returns a verified human-readable summary including the live tunnel URL.
+    """
+    from openclow.models import Project, async_session
+    from openclow.services.tunnel_service import get_tunnel_url
+
+    deadline = asyncio.get_event_loop().time() + timeout
+    last_status = "bootstrapping"
+
+    while asyncio.get_event_loop().time() < deadline:
+        async with async_session() as s:
+            r = await s.execute(select(Project).where(Project.id == project_id))
+            proj = r.scalar_one_or_none()
+            if not proj:
+                return f"Project '{project_name}' disappeared during bootstrap."
+            last_status = proj.status
+
+        if last_status not in ("bootstrapping", "pending"):
+            break
+        await asyncio.sleep(5)
+    else:
+        return (
+            f"Bootstrap of '{project_name}' did not finish within {timeout}s. "
+            f"Current status: {last_status}. The worker may still be running — "
+            f"call list_projects() in a minute to recheck."
+        )
+
+    if last_status == "failed":
+        return (
+            f"Bootstrap FAILED for '{project_name}'. The worker hit an error it could not recover from. "
+            f"Check the progress card for the failing step. The user must decide whether to retry."
+        )
+
+    # Active — verify tunnel actually serves
+    tunnel = await get_tunnel_url(project_name)
+    compose_project = f"openclow-{project_name}"
+    containers_ok = await _containers_running(compose_project)
+
+    if not containers_ok:
+        return (
+            f"Bootstrap of '{project_name}' completed (status=active) but no containers are running. "
+            f"Something stopped them after setup. Recommend calling docker_up('{project_name}')."
+        )
+    if not tunnel:
+        return (
+            f"'{project_name}' is bootstrapped and containers are up, but no tunnel URL was created. "
+            f"Recommend calling docker_up('{project_name}') to set up the tunnel."
+        )
+    if not await _verify_tunnel_live(tunnel):
+        return (
+            f"'{project_name}' is bootstrapped, containers running, but tunnel {tunnel} is not responding. "
+            f"Recommend calling docker_up('{project_name}') to refresh the tunnel."
+        )
+
+    return (
+        f"Bootstrap VERIFIED LIVE for '{project_name}'. "
+        f"Containers running, tunnel responding at {tunnel}. Project is ready for tasks."
+    )
+
+
+async def _wait_for_docker_up_done(
+    project_name: str, timeout: int = 360,
+) -> str:
+    """Block until docker_up_task finishes — containers running AND tunnel responsive.
+    Returns a verified human-readable summary.
+    """
+    from openclow.services.tunnel_service import get_tunnel_url
+
+    compose_project = f"openclow-{project_name}"
+    deadline = asyncio.get_event_loop().time() + timeout
+    last_seen_containers = False
+    last_seen_tunnel: str | None = None
+
+    while asyncio.get_event_loop().time() < deadline:
+        containers_ok = await _containers_running(compose_project)
+        last_seen_containers = containers_ok
+        tunnel = await get_tunnel_url(project_name)
+        last_seen_tunnel = tunnel
+
+        if containers_ok and tunnel and await _verify_tunnel_live(tunnel):
+            return (
+                f"Docker for '{project_name}' VERIFIED LIVE. "
+                f"Containers running, tunnel responding at {tunnel}."
+            )
+        await asyncio.sleep(4)
+
+    parts = [f"Docker startup of '{project_name}' did not fully verify within {timeout}s."]
+    parts.append(f"Containers: {'running' if last_seen_containers else 'NOT running'}")
+    parts.append(f"Tunnel: {last_seen_tunnel or 'no URL'}")
+    parts.append(
+        "The worker may still be repairing — call project_health to recheck, "
+        "or report the partial state to the user."
+    )
+    return " ".join(parts)
+
+
 def _provider_type(chat_id: str) -> str:
     """Detect chat provider type from chat_id prefix.
 
@@ -358,18 +485,33 @@ async def project_health(project_name: str, auto_fix: bool = True) -> str:
 
 
 @mcp.tool()
-async def trigger_task(project_name: str, description: str, chat_id: str, skip_planning: bool = False) -> str:
+async def trigger_task(project_name: str, description: str, chat_id: str, skip_planning: bool = False, git_mode: str = "branch_per_task") -> str:
     """Create a development task and start processing.
     skip_planning=False (default): plan → user approves → code → review → PR.
     skip_planning=True (quick mode): skip plan step, go straight to coding.
-    chat_id is the chat to send updates to."""
+    chat_id is the chat to send updates to.
+    git_mode defaults to branch_per_task; for web chat it is resolved from the session."""
     from openclow.services.access_service import is_tool_allowed
     user_id, is_admin, accessible_ids, effective_role = await _get_web_access_context(chat_id)
     if chat_id.startswith("web:") and not is_admin:
         if not is_tool_allowed(effective_role, "trigger_task"):
             return f"Access denied: your role ({effective_role}) does not allow creating coding tasks."
 
-    from openclow.models import Project, Task, User, async_session
+    from openclow.models import Project, Task, User, async_session, WebChatSession
+
+    # Resolve git_mode from web session when not explicitly overridden
+    resolved_git_mode = git_mode
+    if chat_id.startswith("web:") and git_mode == "branch_per_task":
+        try:
+            parts = chat_id.split(":", 2)
+            if len(parts) == 3:
+                session_id = int(parts[2])
+                async with async_session() as db:
+                    ws = await db.get(WebChatSession, session_id)
+                    if ws:
+                        resolved_git_mode = ws.git_mode
+        except Exception:
+            pass
 
     async with async_session() as session:
         result = await session.execute(select(Project).where(Project.name == project_name))
@@ -396,6 +538,7 @@ async def trigger_task(project_name: str, description: str, chat_id: str, skip_p
             id=task_id, user_id=user.id, project_id=project.id,
             description=description, status="pending", chat_id=chat_id,
             chat_provider_type=_provider_type(chat_id),
+            git_mode=resolved_git_mode,
         )
         session.add(task)
         await session.commit()
@@ -525,7 +668,7 @@ async def relink_project(project_name: str, chat_id: str, message_id: str) -> st
     job = await pool.enqueue_job("bootstrap_project", project_id, chat_id, card_msg_id, _provider_type(chat_id))
     if job:
         await _track_job(chat_id, job.job_id)
-    return f"Re-linking {project_name}. Running full bootstrap setup..."
+    return await _wait_for_bootstrap_done(project_id, project_name)
 
 
 @mcp.tool()
@@ -558,13 +701,34 @@ async def docker_up(project_name: str, chat_id: str, message_id: str) -> str:
             f"Use poll_project_ready('{project_name}') to track progress."
         )
 
+    # Guard: don't open a phantom repair card while a coding task is active
+    # for this project. Coding failures auto-trigger the assistant to call
+    # docker_up, which creates a distracting second card on top of the user's
+    # in-progress task. The coding task has its own health check built-in.
+    from openclow.models import Task
+    async with async_session() as session:
+        active_statuses = ("pending", "preparing", "planning", "coding",
+                           "reviewing", "diff_preview", "awaiting_approval", "pushing")
+        result = await session.execute(
+            select(Task)
+            .where(Task.project_id == project_id)
+            .where(Task.status.in_(active_statuses))
+            .limit(1)
+        )
+        if result.scalar_one_or_none() is not None:
+            return (
+                f"A task is already running for '{project_name}'. "
+                f"Do NOT call docker_up — the running task handles Docker health itself. "
+                f"If the task just failed, let the user click Retry instead of spawning a repair card."
+            )
+
     from openclow.worker.arq_app import get_arq_pool
     pool = await asyncio.wait_for(get_arq_pool(), timeout=5)
     card_msg_id = await _fresh_web_message_id(chat_id, message_id)
     job = await pool.enqueue_job("docker_up_task", project_id, chat_id, card_msg_id, _provider_type(chat_id))
     if job:
         await _track_job(chat_id, job.job_id)
-    return f"Starting Docker for {project_name}..."
+    return await _wait_for_docker_up_done(project_name)
 
 
 @mcp.tool()
@@ -631,13 +795,34 @@ async def bootstrap(project_name: str, chat_id: str, message_id: str) -> str:
             f"Do NOT call bootstrap again. Wait for the worker to finish — it will send a completion message."
         )
 
+    # Guard: don't open a phantom repair card while a coding task is active.
+    # Same rule as docker_up — if the user has a task in flight, the assistant
+    # must not spawn a second card on top of it. If the task just failed, the
+    # correct action is "tell the user to click Retry", not auto-repair.
+    from openclow.models import Task
+    async with async_session() as session:
+        active_statuses = ("pending", "preparing", "planning", "coding",
+                           "reviewing", "diff_preview", "awaiting_approval", "pushing")
+        result = await session.execute(
+            select(Task)
+            .where(Task.project_id == project_id)
+            .where(Task.status.in_(active_statuses))
+            .limit(1)
+        )
+        if result.scalar_one_or_none() is not None:
+            return (
+                f"A task is already running for '{project_name}'. "
+                f"Do NOT call bootstrap — it would open a second progress card on top of the user's task. "
+                f"If the task just failed, tell the user to click Retry on their existing card."
+            )
+
     from openclow.worker.arq_app import get_arq_pool
     pool = await asyncio.wait_for(get_arq_pool(), timeout=5)
     card_msg_id = await _fresh_web_message_id(chat_id, message_id)
     job = await pool.enqueue_job("bootstrap_project", project_id, chat_id, card_msg_id, _provider_type(chat_id))
     if job:
         await _track_job(chat_id, job.job_id)
-    return f"Bootstrapping {project_name}. Full setup starting..."
+    return await _wait_for_bootstrap_done(project_id, project_name)
 
 
 @mcp.tool()
@@ -840,12 +1025,9 @@ async def confirm_project(project_name: str, chat_id: str, message_id: str) -> s
     if job:
         await _track_job(chat_id, job.job_id)
 
-    return (
-        f"Project '{project_name}' saved (id={project_id}) and bootstrap queued. "
-        "Worker is now: docker build → containers up → migrations → tunnel. "
-        "Progress updates will appear in chat. "
-        "Call list_projects() after ~2 minutes to get the tunnel URL."
-    )
+    # Block until bootstrap finishes and tunnel is verified live —
+    # never report "queued" to the user. Either it works, it failed, or it timed out.
+    return await _wait_for_bootstrap_done(project_id, project_name)
 
 
 if __name__ == "__main__":

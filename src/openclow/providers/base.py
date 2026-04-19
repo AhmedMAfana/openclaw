@@ -80,14 +80,15 @@ class LLMProvider(ABC):
         ...
 
     @abstractmethod
-    async def run_reviewer(
+    def run_reviewer(
         self,
         workspace_path: str,
         task_description: str,
         project_name: str,
         tech_stack: str,
         max_turns: int,
-    ) -> ReviewResult:
+        on_stream: "Callable | None" = None,
+    ) -> "AsyncIterator[Any]":
         ...
 
     @abstractmethod
@@ -233,6 +234,10 @@ class GitProvider(ABC):
     @abstractmethod
     async def delete_branch(self, repo: str, branch: str) -> None:
         ...
+
+    async def get_pr_for_branch(self, repo: str, branch: str) -> tuple[str | None, int | None]:
+        """Check if a PR already exists for this branch. Returns (pr_url, pr_number) or (None, None)."""
+        return None, None
 
     @abstractmethod
     def generate_pr_body(self, task: Any) -> str:

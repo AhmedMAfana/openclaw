@@ -217,8 +217,10 @@ class WebChatProvider(ChatProvider):
                     msg = await db.get(WebChatMessage, int(message_id))
                     if msg:
                         msg.content = content
-                        if card.get("overall_status") in ("done", "failed"):
-                            msg.is_complete = True
+                        # Always sync is_complete with overall_status so a heartbeat
+                        # overwrite after a cancel resets is_complete to False, keeping
+                        # the card cancellable again.
+                        msg.is_complete = card.get("overall_status") in ("done", "failed")
                         await db.commit()
             except Exception as e:
                 log.warning("web_provider.progress_card_persist_failed", message_id=message_id, error=str(e))
@@ -251,9 +253,9 @@ class WebChatProvider(ChatProvider):
     async def send_summary(
         self, chat_id: str, message_id: str, task_id: str, summary: str, diff_summary: str
     ) -> None:
-        """Web: send completion summary as plain text — no PR/Discard buttons needed."""
+        """Web: send completion summary as a NEW message — do NOT overwrite the progress card."""
         text = f"{summary}\n\n**Changes:**\n{diff_summary}"
-        await self.edit_message(chat_id, message_id, text, is_final=True)
+        await self.send_message(chat_id, text)
 
     async def send_diff_preview(
         self, chat_id: str, message_id: str, task_id: str, diff_summary: str

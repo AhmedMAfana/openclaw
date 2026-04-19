@@ -151,6 +151,12 @@ Before editing any file:
 6. Stage all changed files: git add [specific files] — never git add .
 7. Do NOT commit or push
 
+## DO NOT run frontend builds
+
+Do NOT run `npm run build`, `npx vite build`, or any frontend asset compilation.
+The orchestrator runs the build automatically after you finish coding.
+Focus only on editing source files and verifying they are correct.
+
 ## When to Output BLOCKED
 
 Output `BLOCKED: [reason]` and stop if:
@@ -385,6 +391,7 @@ class ClaudeProvider(LLMProvider):
             permission_mode="bypassPermissions",
             max_turns=max_turns or self.coder_max_turns,
             setting_sources=["project"],
+            include_partial_messages=True,
         )
 
         log.info("claude.coder.started", workspace=workspace_path)
@@ -446,6 +453,7 @@ class ClaudeProvider(LLMProvider):
             },
             permission_mode="bypassPermissions",
             max_turns=max_turns or 10,  # Fixes should be quick — 10 turns max
+            include_partial_messages=True,
         )
 
         prompt = FIX_PROMPT.format(issues=issues)
@@ -466,9 +474,14 @@ class ClaudeProvider(LLMProvider):
         max_turns: int,
         description: str = "",
         agent_system_prompt: str = "",
-    ) -> ReviewResult:
+        on_stream: "Callable | None" = None,
+    ) -> AsyncIterator[Any]:
+        """Run reviewer agent — yields SDK messages for streaming.
+
+        The orchestrator collects output via _run_agent_with_streaming and
+        parses ReviewResult from the collected text.
+        """
         from claude_agent_sdk import query, ClaudeAgentOptions
-        from claude_agent_sdk.types import AssistantMessage, TextBlock
 
         system_prompt = REVIEWER_SYSTEM_PROMPT.format(
             project_name=project_name,
@@ -481,7 +494,7 @@ class ClaudeProvider(LLMProvider):
         options = ClaudeAgentOptions(
             cwd=workspace_path,
             system_prompt=system_prompt,
-            model="claude-sonnet-4-6",  # Review is pattern matching — Sonnet excels
+            model="claude-sonnet-4-6",
             allowed_tools=[
                 "Read", "Glob", "Grep",
                 "mcp__git__git_diff_staged",
@@ -495,35 +508,19 @@ class ClaudeProvider(LLMProvider):
             },
             permission_mode="bypassPermissions",
             max_turns=max_turns or self.reviewer_max_turns,
+            include_partial_messages=True,
         )
 
         log.info("claude.reviewer.started", workspace=workspace_path)
-        full_output = ""
         try:
             async for message in query(
                 prompt=f"Review the changes made for: {task_description}",
                 options=options,
             ):
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            full_output += block.text
+                yield message
         except Exception as e:
             _check_auth_error(e)
             raise
-
-        has_issues = "STATUS: ISSUES" in full_output
-        issues = ""
-        if has_issues:
-            parts = full_output.split("STATUS: ISSUES", 1)
-            if len(parts) > 1:
-                issues = parts[1].strip()
-
-        # has_blocking: CRITICAL or WARNING present (not just SUGGESTION-only)
-        has_blocking = has_issues and ("CRITICAL" in full_output or "WARNING" in full_output)
-
-        log.info("claude.reviewer.done", has_issues=has_issues, has_blocking=has_blocking)
-        return ReviewResult(has_issues=has_issues, issues=issues, raw_output=full_output)
 
     def is_tool_use(self, message: Any) -> str | None:
         from claude_agent_sdk.types import AssistantMessage, ToolUseBlock

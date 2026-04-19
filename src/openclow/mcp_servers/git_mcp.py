@@ -30,8 +30,11 @@ async def _run_git(*args: str, cwd: str = None) -> str:
         return f"FAILED: {str(e)[:200]}"
 
 
-# Store workspace path — set when the server is configured
-_workspace = "/workspaces"
+from openclow.settings import settings
+
+# Store workspace path — uses the configured base path so it works regardless
+# of whether the container mounts workspaces at /workspaces or a host path.
+_workspace = settings.workspace_base_path
 
 
 @mcp.tool()

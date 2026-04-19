@@ -108,6 +108,7 @@ async def chat_response(ctx: dict, user_message: str, chat_id: str, message_id: 
             "--system-prompt", fallback_system,
             "--output-format", "json",
             "--max-turns", "1",
+            "--disallowedTools", "Bash",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

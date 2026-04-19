@@ -125,7 +125,22 @@
       "Bash(openssl rand *)",
       "Bash(ls /Users/ahmedmoh/Desktop/projects/openclow/Dockerfile*)",
       "Bash(grep -v \"^Exception\\\\|^Traceback\\\\|^Runtime\\\\|^  File\\\\|^    \\\\|^$\")",
-      "Bash(python -m py_compile /Users/ahmedmoh/Desktop/projects/openclow/src/openclow/services/tunnel_service.py /Users/ahmedmoh/Desktop/projects/openclow/src/openclow/mcp_servers/docker_mcp.py /Users/ahmedmoh/Desktop/projects/openclow/src/openclow/worker/tasks/health_task.py)"
+      "Bash(python -m py_compile /Users/ahmedmoh/Desktop/projects/openclow/src/openclow/services/tunnel_service.py /Users/ahmedmoh/Desktop/projects/openclow/src/openclow/mcp_servers/docker_mcp.py /Users/ahmedmoh/Desktop/projects/openclow/src/openclow/worker/tasks/health_task.py)",
+      "Bash(echo \"done \\(rc=$?\\)\")",
+      "Bash(python -m py_compile /Users/ahmedmoh/Desktop/projects/openclow/src/openclow/services/tunnel_service.py /Users/ahmedmoh/Desktop/projects/openclow/src/openclow/worker/tasks/tunnel_tasks.py)",
+      "Bash(python -m py_compile /Users/ahmedmoh/Desktop/projects/openclow/src/openclow/services/tunnel_service.py)",
+      "Bash(python -m pytest tests/test_audit_fixes.py -v --tb=short)",
+      "Bash(python -m pytest tests/test_git_modes.py tests/test_audit_fixes.py -v --tb=short)",
+      "Bash(python -m pytest tests/test_audit_fixes.py tests/test_git_modes.py -v --tb=short)",
+      "Bash(python -m py_compile src/openclow/services/pipeline_cache.py)",
+      "Bash(python -m py_compile src/openclow/settings.py)",
+      "Bash(find /Users/ahmedmoh/Desktop/projects/openclow/src -name \"*.py\" -type f -exec grep -l \"send_progress_card\" {} \\\\;)",
+      "Bash(find /Users/ahmedmoh/Desktop/projects/openclow/workspaces_dev/task-* -type f -name \"package.json\")",
+      "Bash(find /Users/ahmedmoh/Desktop/projects/openclow/workspaces_dev/task-* -type f -name \"vite.config.ts\")",
+      "Read(//dev/**)",
+      "Bash(python -m py_compile src/openclow/worker/tasks/bootstrap.py src/openclow/worker/tasks/project_lifecycle.py src/openclow/worker/tasks/health_task.py)",
+      "Bash(python -m py_compile src/openclow/mcp_servers/actions_mcp.py src/openclow/worker/tasks/orchestrator.py)",
+      "Bash(git check-ignore *)"
     ],
     "additionalDirectories": [
       "/Users/ahmedmoh/Desktop/projects/openclow"

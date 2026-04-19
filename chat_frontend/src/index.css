@@ -1,3 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
 @import "tw-animate-css";
 
@@ -35,25 +36,26 @@
 
 /* Dark theme (default) */
 :root {
-  --radius: 0.625rem;
-  --background: oklch(0.08 0.005 286);
-  --foreground: oklch(0.93 0.005 286);
-  --card: oklch(0.1 0.005 286);
-  --card-foreground: oklch(0.93 0.005 286);
-  --popover: oklch(0.12 0.005 286);
-  --popover-foreground: oklch(0.93 0.005 286);
-  --primary: oklch(0.65 0.18 260);
-  --primary-foreground: oklch(0.98 0 0);
-  --secondary: oklch(0.15 0.005 286);
-  --secondary-foreground: oklch(0.93 0.005 286);
-  --muted: oklch(0.16 0.005 286);
-  --muted-foreground: oklch(0.55 0.01 286);
-  --accent: oklch(0.16 0.005 286);
-  --accent-foreground: oklch(0.93 0.005 286);
-  --destructive: oklch(0.55 0.22 27);
-  --border: oklch(0.22 0.005 286);
-  --input: oklch(0.22 0.005 286);
-  --ring: oklch(0.45 0.12 260);
+  --radius: 0.75rem;
+  --background: oklch(0.09 0.008 265);
+  --foreground: oklch(0.94 0.006 265);
+  --card: oklch(0.12 0.008 265);
+  --card-foreground: oklch(0.94 0.006 265);
+  --popover: oklch(0.13 0.008 265);
+  --popover-foreground: oklch(0.94 0.006 265);
+  --primary: oklch(0.62 0.22 265);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.16 0.008 265);
+  --secondary-foreground: oklch(0.94 0.006 265);
+  --muted: oklch(0.17 0.008 265);
+  --muted-foreground: oklch(0.58 0.012 265);
+  --accent: oklch(0.17 0.008 265);
+  --accent-foreground: oklch(0.94 0.006 265);
+  --destructive: oklch(0.56 0.22 27);
+  --border: oklch(0.23 0.008 265);
+  --input: oklch(0.23 0.008 265);
+  --ring: oklch(0.48 0.15 265);
+  --sidebar: oklch(0.07 0.008 265);
 }
 
 @layer base {
@@ -65,11 +67,18 @@
     margin: 0;
     background-color: var(--background);
     color: var(--foreground);
-    font-family: system-ui, -apple-system, sans-serif;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
   #root {
     width: 100%;
     height: 100vh;
   }
 }
+
+/* Subtle scrollbar styling */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: oklch(0.28 0.008 265); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: oklch(0.35 0.008 265); }

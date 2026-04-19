@@ -35,6 +35,18 @@ _worker_instance_id: str = uuid.uuid4().hex[:12]
 # until this timestamp. Prevents the death spiral of retries making it worse.
 _rate_limit_until: list[float] = [0.0]  # mutable list so nested functions can write
 
+# Per-service locks — prevent concurrent start/stop/refresh for the same tunnel.
+# Without this, two callers can both pass the idempotency checks and both spawn
+# a new cloudflared process (race condition).
+_tunnel_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_lock(service_name: str) -> asyncio.Lock:
+    """Get or create the asyncio.Lock for a given service_name."""
+    if service_name not in _tunnel_locks:
+        _tunnel_locks[service_name] = asyncio.Lock()
+    return _tunnel_locks[service_name]
+
 
 async def start_tunnel(
     service_name: str, target_url: str, host_header: str | None = None,
@@ -43,6 +55,7 @@ async def start_tunnel(
 
     Idempotent: if tunnel already running for this service, returns existing URL.
     Persists URL in DB under category="tunnel", key=service_name.
+    Thread-safe: per-service asyncio.Lock prevents duplicate cloudflared processes.
 
     Args:
         service_name: Unique name for this tunnel (e.g. "tagh-test")
@@ -52,6 +65,14 @@ async def start_tunnel(
 
     Returns the public URL or None on failure.
     """
+    async with _get_lock(service_name):
+        return await _start_tunnel_unlocked(service_name, target_url, host_header)
+
+
+async def _start_tunnel_unlocked(
+    service_name: str, target_url: str, host_header: str | None = None,
+) -> str | None:
+    """Inner start_tunnel — caller must hold _get_lock(service_name)."""
     # Rate limit cooldown — don't even try if Cloudflare is blocking us
     if time.time() < _rate_limit_until[0]:
         remaining = int(_rate_limit_until[0] - time.time())
@@ -85,8 +106,8 @@ async def start_tunnel(
         except (OSError, ProcessLookupError):
             pass
 
-    # Kill any stale process first
-    await stop_tunnel(service_name)
+    # Kill any stale process first (use unlocked variant — we already hold the lock)
+    await _stop_tunnel_unlocked(service_name)
 
     # Start cloudflared
     cmd = ["cloudflared", "tunnel", "--url", target_url]
@@ -194,6 +215,7 @@ async def sync_project_tunnel(service_name: str, tunnel_url: str):
         return
 
     import re as _re
+    import shlex
     from openclow.settings import settings as app_settings
 
     # ── Find project in DB ──
@@ -217,9 +239,38 @@ async def sync_project_tunnel(service_name: str, tunnel_url: str):
     container_name = project.app_container_name or "laravel.test"
     container = f"{compose_project}-{container_name}-1"
 
-    # All URL-bearing env vars — must ALL point to the new tunnel URL.
-    # Bootstrap sets these via _configure_app_for_tunnel(); sync must match.
-    _URL_KEYS = ("APP_URL", "ASSET_URL", "VITE_APP_URL", "NEXT_PUBLIC_URL", "BASE_URL")
+    # Skip sync entirely if APP_URL already matches — avoids unnecessary
+    # Vite rebuilds on every tunnel restart (saves 10-30s per restart).
+    try:
+        from openclow.services.docker_guard import run_docker as _check_docker
+        rc, current_url = await _check_docker(
+            "docker", "exec", container, "sh", "-c",
+            "grep '^APP_URL=' /var/www/html/.env 2>/dev/null || "
+            "grep '^APP_URL=' /app/.env 2>/dev/null || echo ''",
+            actor="tunnel_sync", timeout=5,
+        )
+        if rc == 0:
+            existing = current_url.strip().split("=", 1)[-1] if "=" in current_url else ""
+            if existing == tunnel_url:
+                log.info("tunnel.sync_skipped_unchanged", service=service_name)
+                return
+    except Exception:
+        pass  # If check fails, proceed with full sync
+
+    # URL env var strategy — separates app identity from asset delivery:
+    #
+    #   _APP_URL_KEYS  → set to the tunnel URL (PHP needs absolute URLs for
+    #                    SSO callbacks, email links, CSRF origin checks)
+    #   _ASSET_URL_KEYS → set to "/" (relative base). Vite bakes the base URL
+    #                     into every dynamic import at compile time. If we set
+    #                     ASSET_URL=https://tunnel.trycloudflare.com, every new
+    #                     tunnel requires a full npm rebuild or assets 404/CORS.
+    #                     With ASSET_URL=/, assets resolve to the current page
+    #                     origin — any tunnel URL serves them correctly without
+    #                     a rebuild.
+    _APP_URL_KEYS   = ("APP_URL", "VITE_APP_URL", "NEXT_PUBLIC_URL", "BASE_URL")
+    _ASSET_URL_KEYS = ("ASSET_URL",)
+    _ALL_URL_KEYS   = _APP_URL_KEYS + _ASSET_URL_KEYS
 
     # ── 1. Update host .env ──
     env_path = os.path.join(workspace, ".env")
@@ -227,17 +278,18 @@ async def sync_project_tunnel(service_name: str, tunnel_url: str):
         try:
             with open(env_path) as f:
                 content = f.read()
-            # Replace every old trycloudflare URL in the file
-            content = _re.sub(
-                r'https://[a-z0-9-]+\.trycloudflare\.com',
-                tunnel_url, content,
-            )
-            # Ensure all URL vars point to the new tunnel
-            for key in _URL_KEYS:
+            # Replace every old absolute trycloudflare URL in app URL vars
+            for key in _APP_URL_KEYS:
                 if _re.search(rf'^{key}=', content, _re.MULTILINE):
                     content = _re.sub(rf'^{key}=.*$', f'{key}={tunnel_url}', content, flags=_re.MULTILINE)
                 else:
                     content += f"\n{key}={tunnel_url}\n"
+            # Set ASSET_URL to relative so Vite chunks load from current origin
+            for key in _ASSET_URL_KEYS:
+                if _re.search(rf'^{key}=', content, _re.MULTILINE):
+                    content = _re.sub(rf'^{key}=.*$', f'{key}=/', content, flags=_re.MULTILINE)
+                else:
+                    content += f"\n{key}=/\n"
             with open(env_path, "w") as f:
                 f.write(content)
         except Exception as e:
@@ -247,20 +299,23 @@ async def sync_project_tunnel(service_name: str, tunnel_url: str):
     try:
         from openclow.services.docker_guard import run_docker
 
-        # Replace tunnel URLs in container .env and set all URL vars
+        # Update container .env — app URL vars get the tunnel URL, ASSET_URL gets "/"
         for env_loc in (".env", "/var/www/html/.env", "/app/.env"):
-            await run_docker(
-                "docker", "exec", container, "sh", "-c",
-                f"[ -f {env_loc} ] && sed -i 's|https://[a-z0-9-]*\\.trycloudflare\\.com|{tunnel_url}|g' {env_loc} || true",
-                actor="tunnel_sync", timeout=30,
-            )
-            # Set every URL var (ASSET_URL, VITE_APP_URL, NEXT_PUBLIC_URL, BASE_URL)
-            for key in _URL_KEYS:
+            _quoted_url = shlex.quote(tunnel_url)
+            for key in _APP_URL_KEYS:
                 await run_docker(
                     "docker", "exec", container, "sh", "-c",
                     f"[ -f {env_loc} ] && (grep -q '^{key}=' {env_loc} "
-                    f"&& sed -i 's|^{key}=.*|{key}={tunnel_url}|' {env_loc} "
-                    f"|| echo '{key}={tunnel_url}' >> {env_loc}) || true",
+                    f"&& sed -i 's|^{key}=.*|{key}={_quoted_url}|' {env_loc} "
+                    f"|| echo '{key}={_quoted_url}' >> {env_loc}) || true",
+                    actor="tunnel_sync", timeout=30,
+                )
+            for key in _ASSET_URL_KEYS:
+                await run_docker(
+                    "docker", "exec", container, "sh", "-c",
+                    f"[ -f {env_loc} ] && (grep -q '^{key}=' {env_loc} "
+                    f"&& sed -i 's|^{key}=.*|{key}=/|' {env_loc} "
+                    f"|| echo '{key}=/' >> {env_loc}) || true",
                     actor="tunnel_sync", timeout=30,
                 )
 
@@ -286,10 +341,16 @@ async def sync_project_tunnel(service_name: str, tunnel_url: str):
             actor="tunnel_sync", timeout=30,
         )
 
-        # Rebuild frontend assets (fire-and-forget) — Vite bakes APP_URL into JS/CSS
-        # bundles at build time, so we must rebuild after a tunnel URL change.
-        # Runs in the background so the tunnel URL is returned immediately without
-        # blocking the worker slot for up to 3 minutes.
+        # Rebuild frontend assets — Vite bakes ASSET_URL into chunk import paths at
+        # compile time. We now set ASSET_URL=/ (relative) so this is a one-time build:
+        # once built with relative paths, future tunnel changes need NO rebuild —
+        # chunks always load from the current page origin.
+        #
+        # Run SYNCHRONOUSLY so the URL is only returned to the caller after assets
+        # are correct. A few minutes wait once is far better than CORS errors every
+        # tunnel restart.
+        #
+        # Skip if the container has no package.json (PHP-only / no frontend build).
         _build_cmd = (
             "PKG=$(find . /var/www/html /app -name 'package.json' "
             "  -not -path '*/node_modules/*' -maxdepth 4 2>/dev/null | head -1); "
@@ -298,22 +359,17 @@ async def sync_project_tunnel(service_name: str, tunnel_url: str):
             "  (npm run build 2>&1 || npx vite build 2>&1 || true); "
             "fi"
         )
-
-        async def _do_rebuild():
-            try:
-                rc, out = await run_docker(
-                    "docker", "exec", container, "sh", "-c", _build_cmd,
-                    actor="tunnel_sync", timeout=180,
-                )
-                if rc == 0:
-                    log.info("tunnel.frontend_rebuilt", service=service_name)
-                else:
-                    log.warning("tunnel.frontend_rebuild_failed", service=service_name, output=out[:300])
-            except Exception as e:
-                log.warning("tunnel.frontend_rebuild_error", service=service_name, error=str(e))
-
-        task = asyncio.create_task(_do_rebuild())
-        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        try:
+            rc, out = await run_docker(
+                "docker", "exec", container, "sh", "-c", _build_cmd,
+                actor="tunnel_sync", timeout=240,
+            )
+            if rc == 0:
+                log.info("tunnel.frontend_rebuilt", service=service_name)
+            else:
+                log.warning("tunnel.frontend_rebuild_failed", service=service_name, output=out[:300])
+        except Exception as e:
+            log.warning("tunnel.frontend_rebuild_error", service=service_name, error=str(e))
 
         log.info("tunnel.project_synced", service=service_name, url=tunnel_url)
     except Exception as e:
@@ -322,6 +378,12 @@ async def sync_project_tunnel(service_name: str, tunnel_url: str):
 
 async def stop_tunnel(service_name: str) -> None:
     """Stop a tunnel by service name. Cleans up process and DB entry."""
+    async with _get_lock(service_name):
+        await _stop_tunnel_unlocked(service_name)
+
+
+async def _stop_tunnel_unlocked(service_name: str) -> None:
+    """Inner stop_tunnel — caller must hold _get_lock(service_name)."""
     # Kill in-memory process handle
     proc = _active_processes.pop(service_name, None)
     if proc and proc.returncode is None:
@@ -364,39 +426,86 @@ async def get_tunnel_url(service_name: str) -> str | None:
     return None
 
 
+async def verify_tunnel_url(url: str, timeout: float = 8.0) -> bool:
+    """HTTP probe — confirms a tunnel URL is actually reachable.
+
+    Returns True if the URL responds with HTTP status < 502.
+    Any connection error, timeout, or 502+ means the tunnel is dead.
+    """
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            resp = await client.get(url)
+            reachable = resp.status_code < 502
+            if not reachable:
+                log.warning("tunnel.verify_failed", url=url, status=resp.status_code)
+            return reachable
+    except Exception as e:
+        log.warning("tunnel.verify_unreachable", url=url, error=str(e)[:100])
+        return False
+
+
+async def _get_tunnel_config(service_name: str) -> dict | None:
+    """Read the full tunnel config from DB (url, target, pid, started_at, worker_id)."""
+    return await get_config(TUNNEL_CATEGORY, service_name)
+
+
 async def check_tunnel_health(service_name: str) -> bool:
     """Check if a tunnel is alive: process running + URL in DB + origin reachable.
 
     The origin check catches the "containers restarted → new IP" scenario where
     cloudflared is still running but pointing at a dead IP address, which shows
     as "The origin has been unregistered from Argo Tunnel" in the browser.
+
+    Falls back to DB PID check when the in-memory process handle is missing
+    (e.g. after worker restart), preventing unnecessary tunnel restarts.
     """
     proc = _active_processes.get(service_name)
-    if proc and proc.returncode is None:
+    process_alive = proc and proc.returncode is None
+
+    # No in-memory handle — check if the old cloudflared PID from DB is still alive
+    if not process_alive:
         config = await get_config(TUNNEL_CATEGORY, service_name)
-        if not config or not config.get("url"):
-            return False
-        # TCP-connect to origin — verifies the container is actually reachable.
-        target = config.get("target", "")
-        if target:
+        if config and config.get("url") and config.get("pid"):
             try:
-                import urllib.parse as _urlparse
-                parsed = _urlparse.urlparse(target)
-                host = parsed.hostname
-                port = parsed.port or 80
-                _, writer = await asyncio.wait_for(
-                    asyncio.open_connection(host, port), timeout=2
+                proc_check = await asyncio.create_subprocess_exec(
+                    "ps", "-p", str(config["pid"]), "-o", "comm=",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                 )
-                writer.close()
-                try:
-                    await writer.wait_closed()
-                except Exception:
-                    pass
+                stdout, _ = await proc_check.communicate()
+                if "cloudflared" in stdout.decode().strip():
+                    process_alive = True
+            except (OSError, ProcessLookupError):
+                pass
+
+    if not process_alive:
+        return False
+
+    config = await get_config(TUNNEL_CATEGORY, service_name)
+    if not config or not config.get("url"):
+        return False
+
+    # TCP-connect to origin — verifies the container is actually reachable.
+    target = config.get("target", "")
+    if target:
+        try:
+            import urllib.parse as _urlparse
+            parsed = _urlparse.urlparse(target)
+            host = parsed.hostname
+            port = parsed.port or 80
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=2
+            )
+            writer.close()
+            try:
+                await writer.wait_closed()
             except Exception:
-                log.debug("tunnel.origin_unreachable", service=service_name, target=target)
-                return False  # origin gone — cloudflared shows "origin unregistered"
-        return True
-    return False
+                pass
+        except Exception:
+            log.debug("tunnel.origin_unreachable", service=service_name, target=target)
+            return False  # origin gone — cloudflared shows "origin unregistered"
+    return True
 
 
 async def ensure_tunnel(service_name: str, target_url: str) -> str | None:
@@ -413,8 +522,9 @@ async def ensure_tunnel(service_name: str, target_url: str) -> str | None:
 
 async def refresh_tunnel(service_name: str, target_url: str) -> str | None:
     """Kill old tunnel, start fresh one. Used by 'Refresh' button."""
-    await stop_tunnel(service_name)
-    return await start_tunnel(service_name, target_url)
+    async with _get_lock(service_name):
+        await _stop_tunnel_unlocked(service_name)
+        return await _start_tunnel_unlocked(service_name, target_url)
 
 
 async def _drain_stderr(service_name: str, proc: asyncio.subprocess.Process):

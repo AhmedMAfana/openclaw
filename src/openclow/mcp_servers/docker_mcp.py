@@ -105,11 +105,18 @@ async def compose_build(compose_file: str, project_name: str, working_dir: str) 
     except FileNotFoundError as e:
         return f"FAILED — Docker binary not found: {e}"
 
+    # Mimic default docker compose behavior: auto-load override file
+    _override_path = os.path.join(working_dir or ".", "docker-compose.override.yml")
+    _has_override = os.path.exists(_override_path)
+
     try:
         log_f = open(log_path, "w")
+        build_args = [docker_bin, "compose", "-f", compose_file]
+        if _has_override:
+            build_args += ["-f", "docker-compose.override.yml"]
+        build_args += ["-p", project_name, "build", "--progress", "plain"]
         proc = await asyncio.create_subprocess_exec(
-            docker_bin, "compose", "-f", compose_file, "-p", project_name, "build",
-            "--progress", "plain",
+            *build_args,
             stdin=asyncio.subprocess.DEVNULL,   # never inherit MCP server's stdin
             stdout=log_f,
             stderr=asyncio.subprocess.STDOUT,
@@ -241,7 +248,11 @@ async def compose_up(compose_file: str, project_name: str, working_dir: str) -> 
         return f"FAILED — Docker binary not found: {e}"
 
     # Build the command with --project-directory (host path resolution for Docker-in-Docker)
-    up_args = [docker_bin, "compose", "-f", compose_file, "-p", project_name]
+    _override_path = os.path.join(working_dir or ".", "docker-compose.override.yml")
+    up_args = [docker_bin, "compose", "-f", compose_file]
+    if os.path.exists(_override_path):
+        up_args += ["-f", "docker-compose.override.yml"]
+    up_args += ["-p", project_name]
 
     host_path = await _detect_host_workspace_path()
     if host_path and working_dir.startswith(_s.workspace_base_path):

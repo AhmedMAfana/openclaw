@@ -1,5 +1,5 @@
 import "./index.css";
-import { Component, useState, useCallback, useEffect, useRef, type ReactNode, type RefObject } from "react";
+import { Component, memo, useState, useCallback, useEffect, useRef, type ReactNode, type RefObject } from "react";
 
 // ── Error Boundary (catches React render crashes in the Thread) ───────────────
 
@@ -65,6 +65,7 @@ interface ChatThread {
   remoteId: string;
   title: string;
   projectId?: number | null;
+  gitMode?: string;
   lastMessageAt?: string; // ISO string from API
 }
 
@@ -143,6 +144,7 @@ export default function App() {
   // Projects
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<number | null>(null);
+  const [activeGitMode, setActiveGitMode] = useState<string>("branch_per_task");
 
   // Current user id (for WebSocket URL)
   const [myUserId, setMyUserId] = useState<number | null>(null);
@@ -155,6 +157,9 @@ export default function App() {
   // Set to true when the WS was intentionally closed (thread switch / unmount)
   // Prevents the onclose reconnect loop from re-opening a dead session
   const wsIntentionalClose = useRef(false);
+  // Reconnect backoff state — exponential backoff with max 8 retries
+  const wsReconnectAttempt = useRef(0);
+  const _WS_MAX_RETRIES = 8;
 
   // Rename state
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -235,7 +240,7 @@ export default function App() {
     setThinkingSteps([]);
     // Drop any __LOADING__ stubs from message state immediately — they're placeholders
     // that the worker never finished populating, and we don't want them showing as blank rows
-    setMessages((prev) => prev.filter((m) => m.content !== "__LOADING__" && m.content.trim() !== ""));
+    setMessages((prev) => prev.filter((m) => m.content !== "__LOADING__"));
     // Also abort any arq worker jobs enqueued during this session
     if (activeThreadId) {
       fetch(`/api/threads/${activeThreadId}/cancel`, {
@@ -257,18 +262,25 @@ export default function App() {
   }
 
   function scrollThreadToBottom(delay = 50) {
-    // Give React one tick to commit the new message, then smooth-scroll to bottom
     setTimeout(() => {
-      const viewport = document.querySelector(".aui-thread-viewport");
+      const viewport = getViewport();
       if (viewport) viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
     }, delay);
   }
 
+  // Cached viewport element for scroll helpers — avoids DOM query every frame
+  const viewportRef = useRef<Element | null>(null);
+  function getViewport(): Element | null {
+    if (!viewportRef.current || !viewportRef.current.isConnected) {
+      viewportRef.current = document.querySelector(".aui-thread-viewport");
+    }
+    return viewportRef.current;
+  }
+
   // Sticky-scroll helper: if the viewport is already at (or near) the bottom,
-  // keep it there. Called on every RAF frame during streaming so new content
-  // is always visible without interrupting manual upward scroll.
+  // keep it there. Uses cached viewport ref instead of querying DOM every frame.
   function stickyScrollToBottom() {
-    const viewport = document.querySelector(".aui-thread-viewport");
+    const viewport = getViewport();
     if (!viewport) return;
     const distFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
     if (distFromBottom < 120) viewport.scrollTop = viewport.scrollHeight;
@@ -279,15 +291,21 @@ export default function App() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/api/ws/${userId}/${sessionId}`);
 
+    ws.onopen = () => { wsReconnectAttempt.current = 0; };
+
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data) as {
           type: string;
           text?: string;
+          delta?: string;
           message_id?: string;
           task_id?: string;
           card?: unknown;
         };
+
+        // Server keepalive ping — ignore
+        if (data.type === "ping") return;
         const text = data.text ?? "";
         const msgKey = data.message_id
           ? `worker-msg-${data.message_id}`
@@ -295,10 +313,27 @@ export default function App() {
 
         // plainId: the bare numeric DB message id — needed to deduplicate against
         // DB-loaded messages (id="123") vs WS-created messages (id="worker-msg-123")
-        const plainId = data.message_id ?? null;
+        // Coerce to string because JSON.parse may return a number for message_id.
+        const plainId = data.message_id != null ? String(data.message_id) : null;
         const matchesMsg = (id: string) => id === msgKey || (plainId !== null && id === plainId);
 
-        if (data.type === "agent_token" && data.text) {
+        if (data.type === "token" && data.delta) {
+          // Token-level streaming from agent session — append to the latest assistant message
+          const delta = data.delta;
+          setMessages((prev) => {
+            const lastAssistantIdx = prev.map((m, i) => ({ m, i }))
+              .filter(({ m }) => m.role === "assistant")
+              .pop()?.i;
+            if (lastAssistantIdx === undefined) {
+              // No open assistant message — create one
+              scrollThreadToBottom();
+              return [...prev, { id: msgKey, role: "assistant" as const, content: delta }];
+            }
+            return prev.map((m, i) =>
+              i === lastAssistantIdx ? { ...m, content: m.content + delta } : m
+            );
+          });
+        } else if (data.type === "agent_token" && data.text) {
           // Append agent text to the progress card's live stream_buffer
           setMessages((prev) =>
             prev.map((m) => {
@@ -351,7 +386,15 @@ export default function App() {
           // (Old code used worker-new-${Date.now()} for msg_new which could never be found by msg_update.)
           setMessages((prev) => {
             const exists = prev.find((m) => matchesMsg(m.id));
-            if (exists) return prev.map((m) => matchesMsg(m.id) ? { ...m, id: msgKey, content: text } : m);
+            if (exists) {
+              return prev.map((m) => {
+                if (!matchesMsg(m.id)) return m;
+                // NEVER wipe a progress card with empty text — msg_new for card placeholders
+                // sometimes races behind progress_card and would blank the card entirely.
+                if (m.content.startsWith("__PROGRESS_CARD__") && !text) return m;
+                return { ...m, id: msgKey, content: text };
+              });
+            }
             scrollThreadToBottom();
             return [...prev, { id: msgKey, role: "assistant" as const, content: text }];
           });
@@ -361,12 +404,14 @@ export default function App() {
 
     ws.onerror = () => { /* onclose handles cleanup */ };
 
-    // Reconnect automatically if the connection drops unexpectedly
+    // Reconnect with exponential backoff (1s, 2s, 4s, 8s, ... up to 30s, max 8 retries)
     ws.onclose = () => {
-      if (wsRef.current !== ws) return;  // intentional close — don't reconnect
+      if (wsRef.current !== ws) return;
       wsRef.current = null;
-      if (!wsIntentionalClose.current) {
-        setTimeout(() => openWorkerSocket(userId, sessionId), 3000);
+      if (!wsIntentionalClose.current && wsReconnectAttempt.current < _WS_MAX_RETRIES) {
+        const delay = Math.min(1000 * Math.pow(2, wsReconnectAttempt.current), 30000);
+        wsReconnectAttempt.current += 1;
+        setTimeout(() => openWorkerSocket(userId, sessionId), delay);
       }
     };
 
@@ -423,6 +468,23 @@ export default function App() {
     } catch { /* best-effort */ }
   }
 
+  async function updateGitMode(threadId: string, gitMode: string) {
+    try {
+      const res = await fetch(`/api/threads/${threadId}/git-mode`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ git_mode: gitMode }),
+      });
+      if (res.ok) {
+        setActiveGitMode(gitMode);
+        setThreads((prev) => prev.map((t) =>
+          t.remoteId === threadId ? { ...t, gitMode } : t
+        ));
+      }
+    } catch { /* best-effort */ }
+  }
+
   async function selectThread(id: string, fromList?: ChatThread[]) {
     if (id === activeThreadId) return; // already on this thread
     cancelStream();
@@ -432,27 +494,32 @@ export default function App() {
     // Restore project context — use fromList if provided (avoids stale threads state)
     const lookup = fromList ?? threads;
     const thread = lookup.find((t) => t.remoteId === id);
-    if (thread !== undefined) setActiveProjectId(thread.projectId ?? null);
+    if (thread !== undefined) {
+      setActiveProjectId(thread.projectId ?? null);
+      setActiveGitMode(thread.gitMode ?? "branch_per_task");
+    }
     try {
       const res = await fetch(`/api/threads/${id}/messages`, { credentials: "include" });
       if (res.ok) {
         const data = await res.json();
         setMessages(
           (data.messages ?? [])
-            // Filter out truly empty assistant stubs (content="" or whitespace-only).
-            // __LOADING__ stubs are kept — they show a spinner until the progress card heartbeat
-            // overwrites the DB content, and they give WebSocket events a message slot to update.
-            .filter((m: { role: string; content: string }) =>
-              m.role !== "assistant" || m.content.trim() !== ""
+            // Filter out empty assistant stubs UNLESS they are incomplete (streaming).
+            // Incomplete assistant messages show a TinkeringIndicator spinner after refresh.
+            .filter((m: { role: string; content: string; isComplete?: boolean }) =>
+              m.role !== "assistant" || m.content.trim() !== "" || m.isComplete === false
             )
             // Deduplicate by id — DB load vs WebSocket can both create an entry for the same message_id
             .filter((m: { id: string }, i: number, arr: { id: string }[]) =>
               arr.findIndex((x) => x.id === m.id) === i
             )
-            .map((m: { id: string; role: string; content: string; createdAt?: string }) => ({
+            .map((m: { id: string; role: string; content: string; createdAt?: string; isComplete?: boolean }) => ({
               id: m.id,
               role: m.role as "user" | "assistant",
-              content: m.content,
+              // Empty incomplete assistant messages show as loading spinner on refresh
+              content: m.role === "assistant" && m.isComplete === false && m.content.trim() === ""
+                ? "__LOADING__"
+                : m.content,
               createdAt: m.createdAt,
             }))
         );
@@ -496,13 +563,18 @@ export default function App() {
   async function deleteThread(threadId: string) {
     if (activeThreadId === threadId) cancelStream();
     try {
-      await fetch(`/api/threads/${threadId}/archive`, { method: "POST", credentials: "include" });
+      const res = await fetch(`/api/threads/${threadId}/archive`, { method: "POST", credentials: "include" });
+      if (!res.ok) { console.warn("Delete failed:", res.status); return; }
       setDeleteTarget(null);
-      setThreads((prev) => prev.filter((t) => t.remoteId !== threadId));
+      // Use functional updater to get fresh threads state (avoids stale closure)
+      let remaining: ChatThread[] = [];
+      setThreads((prev) => {
+        const filtered = prev.filter((t) => t.remoteId !== threadId);
+        remaining = filtered;
+        return filtered;
+      });
       if (activeThreadId === threadId) {
-        const remaining = threads.filter((t) => t.remoteId !== threadId);
         if (remaining.length > 0) {
-          // selectThread skips if same id; force it by clearing active first
           setActiveThreadId(null);
           await selectThread(remaining[0].remoteId);
         } else {
@@ -510,7 +582,7 @@ export default function App() {
           setMessages([]);
         }
       }
-    } catch { /* silently fail */ }
+    } catch (e) { console.warn("Delete thread error:", e); }
   }
 
   function startRename(thread: ChatThread) {
@@ -542,25 +614,28 @@ export default function App() {
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
     // Animation queue: network text accumulates in a plain ref,
-    // RAF loop drains it at ~8 chars/frame → smooth character-by-character display
+    // Throttled loop drains it at ~15fps (every ~66ms) instead of 60fps to reduce
+    // React reconciliation overhead on long message lists.
     const pendingRef = { current: "" };   // full received text (updated by network)
     const displayedRef = { current: 0 };  // how many chars are currently shown
-    // Tracks the live message id — starts as asstMsgId, updated when server sends the real DB id.
-    // RAF and finally must use this ref so they still find the message after the rename.
     const liveIdRef = { current: asstMsgId };
     let rafId: number | null = null;
     let streamDone = false;
+    let lastRenderTime = 0;
+    const RENDER_INTERVAL = 66; // ~15fps
 
-    function animateTick() {
+    function animateTick(now: number) {
       const full = pendingRef.current;
       const shown = displayedRef.current;
-      if (shown < full.length) {
-        const next = Math.min(full.length, shown + 8);
+      const elapsed = now - lastRenderTime;
+      if (shown < full.length && elapsed >= RENDER_INTERVAL) {
+        // Advance by more chars per tick to compensate for lower frame rate
+        const next = Math.min(full.length, shown + 24);
         displayedRef.current = next;
+        lastRenderTime = now;
         setMessages((prev) =>
           prev.map((m) => m.id === liveIdRef.current ? { ...m, content: full.slice(0, next) } : m)
         );
-        // Sticky-scroll: if the user hasn't scrolled up, keep the bottom in view
         stickyScrollToBottom();
       }
       if (!streamDone || displayedRef.current < pendingRef.current.length) {
@@ -726,13 +801,15 @@ export default function App() {
     const keepUpToIdx = parentId ? messages.findIndex((m) => m.id === parentId) : -1;
     const keepCount = keepUpToIdx >= 0 ? keepUpToIdx + 1 : 0;
 
-    // Best-effort: clean up DB messages after the edit point
-    fetch(`/api/threads/${activeThreadId}/truncate`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ keep_count: keepCount }),
-    }).catch(() => {});
+    // Clean up DB messages after the edit point — await to ensure consistency on reload
+    try {
+      await fetch(`/api/threads/${activeThreadId}/truncate`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keep_count: keepCount }),
+      });
+    } catch (e) { console.warn("Truncate failed:", e); }
 
     const newAsstId = `asst-edit-${Date.now()}`;
     const newUserMsgId = `user-edit-${Date.now()}`;
@@ -797,21 +874,37 @@ export default function App() {
   return (
     <div className="h-screen flex overflow-hidden bg-background">
       {/* Sidebar */}
-      <aside className="w-[260px] shrink-0 flex flex-col border-r border-border bg-card">
-        <div className="px-4 pt-5 pb-3">
-          <div className="flex items-center gap-2.5 mb-4">
-            <div className="size-7 rounded-lg flex items-center justify-center text-xs font-bold bg-primary text-primary-foreground">
-              AI
+      <aside className="w-[255px] shrink-0 flex flex-col border-r border-border/60" style={{ background: "var(--sidebar)" }}>
+        {/* Brand header */}
+        <div className="px-4 pt-5 pb-4">
+          <div className="flex items-center gap-2.5 mb-5">
+            {/* Logo mark */}
+            <div className="size-8 rounded-xl flex items-center justify-center shrink-0 shadow-lg"
+              style={{ background: "linear-gradient(135deg, oklch(0.62 0.22 265), oklch(0.55 0.22 295))" }}>
+              <svg viewBox="0 0 20 20" fill="none" className="size-4.5" xmlns="http://www.w3.org/2000/svg">
+                <path d="M10 2L13 8H7L10 2Z" fill="white" opacity="0.9"/>
+                <path d="M7 8L4 14H10L7 8Z" fill="white" opacity="0.6"/>
+                <path d="M13 8L16 14H10L13 8Z" fill="white" opacity="0.75"/>
+              </svg>
             </div>
-            <span className="font-semibold text-sm text-foreground">DevOps</span>
+            <div>
+              <span className="font-semibold text-sm text-foreground tracking-tight">TAGH DevOps</span>
+              <p className="text-[10px] text-muted-foreground/70 leading-none mt-0.5">AI DevOps Agent</p>
+            </div>
           </div>
+
           <button
             onClick={newThread}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors bg-secondary hover:bg-accent text-secondary-foreground border border-border"
+            className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-150 border border-border/60 text-foreground/80 hover:text-foreground hover:border-primary/40"
+            style={{ background: "oklch(0.13 0.008 265)" }}
           >
-            <PlusIcon className="size-4" />
-            New Chat
+            <div className="size-4.5 rounded-md flex items-center justify-center"
+              style={{ background: "linear-gradient(135deg, oklch(0.62 0.22 265), oklch(0.55 0.22 295))" }}>
+              <PlusIcon className="size-3 text-white" />
+            </div>
+            New conversation
           </button>
+
           {projects.length > 0 && (
             <select
               value={activeProjectId ?? ""}
@@ -819,26 +912,52 @@ export default function App() {
                 const val = e.target.value;
                 selectProject(val ? Number(val) : null, activeThreadId);
               }}
-              className="mt-2 w-full px-3 py-1.5 rounded-lg text-xs bg-secondary border border-border text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+              className="mt-2 w-full px-3 py-1.5 rounded-lg text-xs border border-border/60 text-foreground/80 focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/40 transition-colors"
+              style={{ background: "oklch(0.13 0.008 265)" }}
               title="Focus agent on a project"
             >
-              <option value="">General (no project)</option>
+              <option value="">All projects</option>
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}
             </select>
           )}
+
+          {/* Git mode selector */}
+          {activeThreadId && (
+            <select
+              value={activeGitMode}
+              onChange={(e) => {
+                updateGitMode(activeThreadId, e.target.value);
+              }}
+              className="mt-2 w-full px-3 py-1.5 rounded-lg text-xs border border-border/60 text-foreground/80 focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/40 transition-colors"
+              style={{ background: "oklch(0.13 0.008 265)" }}
+              title="Git workflow mode"
+            >
+              <option value="branch_per_task">Branch per Task</option>
+              <option value="direct_commit">Direct Commit</option>
+              <option value="session_branch">Session Branch</option>
+            </select>
+          )}
         </div>
 
+        {/* Thread list */}
         <div className="flex-1 overflow-y-auto px-2 pb-2">
           {sidebarLoading ? (
-            <div className="px-3 py-2 text-sm text-muted-foreground">Loading...</div>
+            <div className="px-3 py-6 flex flex-col gap-2">
+              {[...Array(4)].map((_, i) => (
+                <div key={i} className="h-8 rounded-lg animate-pulse" style={{ background: "oklch(0.15 0.008 265)", opacity: 1 - i * 0.15 }} />
+              ))}
+            </div>
           ) : threads.length === 0 ? (
-            <div className="px-3 py-2 text-sm text-muted-foreground">No chats yet</div>
+            <div className="px-3 py-6 text-center">
+              <p className="text-xs text-muted-foreground/60">No conversations yet</p>
+              <p className="text-xs text-muted-foreground/40 mt-0.5">Start one above</p>
+            </div>
           ) : (
             groupThreadsByDate(threads).map(({ label, threads: group }) => (
               <div key={label}>
-                <p className="px-2 pt-3 pb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/60">
+                <p className="px-3 pt-4 pb-1.5 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/40">
                   {label}
                 </p>
                 {group.map((t) => (
@@ -862,28 +981,29 @@ export default function App() {
           )}
         </div>
 
-        <div className="px-2 py-3 border-t border-border flex flex-col gap-0.5">
+        {/* Bottom actions */}
+        <div className="px-2 py-3 border-t border-border/40 flex flex-col gap-0.5">
           {isAdmin && (
             <button
               onClick={() => setShowAccessPanel(true)}
-              className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors w-full text-left"
+              className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors w-full text-left"
             >
-              <ShieldIcon className="size-4" />
+              <ShieldIcon className="size-3.5 shrink-0" />
               Access Control
             </button>
           )}
           {isAdmin && (
             <button
               onClick={() => setShowSettingsPanel(true)}
-              className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors w-full text-left ${showSettingsPanel ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground hover:bg-accent"}`}
+              className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs transition-colors w-full text-left ${showSettingsPanel ? "bg-white/8 text-foreground" : "text-muted-foreground hover:text-foreground hover:bg-white/5"}`}
             >
-              <SettingsIcon className="size-4" />
+              <SettingsIcon className="size-3.5 shrink-0" />
               Settings
             </button>
           )}
-          <a href="/chat/logout" className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors">
-            <LogOutIcon className="size-4" />
-            Logout
+          <a href="/chat/logout" className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors">
+            <LogOutIcon className="size-3.5 shrink-0" />
+            Sign out
           </a>
         </div>
       </aside>
@@ -985,7 +1105,7 @@ interface ThreadItemProps {
   onDelete: () => void;
 }
 
-function ThreadItem({
+const ThreadItem = memo(function ThreadItem({
   thread, isActive, isRenaming, renameValue, renameInputRef,
   onSelect, onStartRename, onRenameChange, onRenameCommit, onRenameCancel, onDelete,
 }: ThreadItemProps) {
@@ -993,13 +1113,13 @@ function ThreadItem({
 
   if (isRenaming) {
     return (
-      <div className="flex items-center gap-1 px-2 py-1 rounded-lg bg-accent">
+      <div className="flex items-center gap-1 px-2 py-1.5 rounded-lg" style={{ background: "oklch(0.17 0.008 265)" }}>
         <input
           ref={renameInputRef}
           value={renameValue}
           onChange={(e) => onRenameChange(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") onRenameCommit(); if (e.key === "Escape") onRenameCancel(); }}
-          className="flex-1 min-w-0 bg-transparent text-sm text-foreground outline-none"
+          className="flex-1 min-w-0 bg-transparent text-xs text-foreground outline-none"
         />
         <button onClick={onRenameCommit} className="shrink-0 p-1 rounded text-muted-foreground hover:text-foreground" title="Save">
           <CheckIcon className="size-3" />
@@ -1015,17 +1135,24 @@ function ThreadItem({
 
   return (
     <div
-      className={`group relative flex items-center rounded-lg transition-colors ${
-        isActive ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+      className={`group relative flex items-center rounded-lg transition-all duration-100 ${
+        isActive
+          ? "text-foreground"
+          : "text-muted-foreground hover:text-foreground/90"
       }`}
+      style={isActive ? { background: "oklch(0.18 0.012 265)" } : undefined}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
+      {isActive && (
+        <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 rounded-r-full"
+          style={{ background: "linear-gradient(to bottom, oklch(0.62 0.22 265), oklch(0.55 0.22 295))" }} />
+      )}
       <button onClick={onSelect} className="flex-1 text-left px-3 py-2 min-w-0">
         <div className="flex items-center justify-between gap-1">
-          <span className="text-sm truncate">{thread.title}</span>
+          <span className="text-xs truncate font-medium">{thread.title}</span>
           {timeLabel && !hovered && !isActive && (
-            <span className="text-[10px] text-muted-foreground/60 shrink-0 tabular-nums">{timeLabel}</span>
+            <span className="text-[10px] text-muted-foreground/50 shrink-0 tabular-nums">{timeLabel}</span>
           )}
         </div>
       </button>
@@ -1034,14 +1161,14 @@ function ThreadItem({
         <div className="flex items-center gap-0.5 pr-1.5 shrink-0">
           <button
             onClick={(e) => { e.stopPropagation(); onStartRename(); }}
-            className="p-1 rounded hover:bg-muted/60 text-muted-foreground hover:text-foreground transition-colors"
+            className="p-1 rounded hover:bg-white/8 text-muted-foreground/60 hover:text-foreground transition-colors"
             title="Rename"
           >
             <PencilIcon className="size-3" />
           </button>
           <button
             onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="p-1 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
+            className="p-1 rounded hover:bg-destructive/20 text-muted-foreground/60 hover:text-destructive transition-colors"
             title="Delete"
           >
             <TrashIcon className="size-3" />
@@ -1050,7 +1177,7 @@ function ThreadItem({
       )}
     </div>
   );
-}
+});
 
 // ── Date grouping helpers ─────────────────────────────────────────────────────
 

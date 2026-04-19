@@ -4,7 +4,7 @@ Usage:
     from openclow.services.audit_service import audit
 
     # Log a command
-    await audit.log("doctor", "bash", "docker logs my-container", workspace="/workspaces/trade-bot")
+    await audit.log("doctor", "bash", "docker logs my-container", workspace="/path/to/workspace/trade-bot")
 
     # Log a blocked command
     await audit.log_blocked("coder", "docker", "docker system prune -af")
