@@ -1,0 +1,88 @@
+# Staging / production override — use with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml ...
+#
+# This file intentionally drops the dev-only niceties from
+# docker-compose.override.yml (which compose only auto-loads when NO -f flags
+# are passed): no source bind-mounts, no watchfiles reload, no public Postgres
+# or Redis ports. The api binds only to 127.0.0.1 so nginx is the single
+# public entry point.
+services:
+  api:
+    command: >
+      bash -c "
+        if [ -z \"$$WEB_CHAT_JWT_SECRET\" ]; then
+          JWT_FILE=/home/openclow/.claude/.jwt_secret;
+          [ -f $$JWT_FILE ] || openssl rand -hex 32 > $$JWT_FILE;
+          export WEB_CHAT_JWT_SECRET=$$(cat $$JWT_FILE);
+          echo '[api] WEB_CHAT_JWT_SECRET loaded from volume';
+        fi;
+        exec uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 10
+      "
+    ports:
+      - "127.0.0.1:8000:8000"
+    # override base: drop ./src and ./chat_frontend/dist bind-mounts (prod uses
+    # the image). Keep the docker.sock, claude_auth, activity_logs, workspaces,
+    # and auth.json mounts — those are runtime data, not source.
+    volumes:
+      - activity_logs:/app/logs
+      - workspaces:/workspaces
+      - claude_auth:/home/openclow/.claude
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./auth.json:/app/auth.json:ro
+    environment:
+      - LOG_LEVEL=INFO
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  bot:
+    # base already uses the image's CMD; just pin limits and log level.
+    environment:
+      - LOG_LEVEL=INFO
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+  worker:
+    command: >
+      bash -c "
+        chmod 666 /var/run/docker.sock 2>/dev/null || true;
+        exec su -l openclow -c 'arq openclow.worker.arq_app.WorkerSettings'
+      "
+    user: root
+    volumes:
+      - workspaces:/workspaces
+      - claude_auth:/home/openclow/.claude
+      - activity_logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./auth.json:/app/auth.json:ro
+    environment:
+      - LOG_LEVEL=INFO
+      - DOCKER_BIN=/usr/bin/docker
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  postgres:
+    # Remove any host port published by override files — only reachable on the
+    # compose network. Cap memory so a runaway query can't OOM the host.
+    ports: !reset []
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  redis:
+    ports: !reset []
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  dozzle:
+    # Log viewer — loopback only, reach it via SSH tunnel.
+    ports:
+      - "127.0.0.1:9999:8080"
