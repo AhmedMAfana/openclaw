@@ -120,12 +120,26 @@ const standaloneComponents: Components = {
   hr: ({ className, ...props }) => <hr className={cn("my-2 border-muted-foreground/20", className)} {...props} />,
 };
 
+// Memo-keyed on its own text — earlier paragraphs of a streaming message stay
+// stable while only the last one re-parses per tick, so ReactMarkdown+remarkGfm
+// don't re-run across the entire message on every chunk.
+const MarkdownParagraph = memo(function MarkdownParagraph({ text }: { text: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={standaloneComponents}>
+      {text}
+    </ReactMarkdown>
+  );
+});
+
 export const StandaloneMarkdown = memo(function StandaloneMarkdown({ text }: { text: string }) {
+  // Split on blank lines so each paragraph is its own memoized subtree. During
+  // streaming only the last paragraph's text prop changes → React skips the rest.
+  const paragraphs = text.split(/\n{2,}/);
   return (
     <div className="aui-md">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={standaloneComponents}>
-        {text}
-      </ReactMarkdown>
+      {paragraphs.map((p, i) => (
+        <MarkdownParagraph key={i} text={p} />
+      ))}
     </div>
   );
 });

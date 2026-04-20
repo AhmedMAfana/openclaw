@@ -55,7 +55,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Thread } from "@/components/assistant-ui/thread";
 import { ThinkingContext } from "@/lib/thinking-context";
 import { TaskModeContext } from "@/lib/task-mode-context";
-import { PlusIcon, SettingsIcon, LogOutIcon, PencilIcon, TrashIcon, CheckIcon, XIcon, ShieldIcon, AlertCircleIcon } from "lucide-react";
+import { PlusIcon, SettingsIcon, LogOutIcon, PencilIcon, TrashIcon, CheckIcon, XIcon, ShieldIcon, AlertCircleIcon, Loader2 } from "lucide-react";
 import { AccessPanel } from "@/components/AccessPanel";
 import { SettingsPanel } from "@/components/SettingsPanel"; // admin-only settings
 
@@ -174,7 +174,13 @@ export default function App() {
   const [taskMode, setTaskMode] = useState<"quick" | "plan">("quick");
 
   // Pending plan approval (set when worker sends a plan_preview event)
-  const [pendingPlan, setPendingPlan] = useState<{ taskId: string; messageId: string } | null>(null);
+  type PlanStatus = "idle" | "approving" | "rejecting" | "approved" | "rejected" | "error";
+  const [pendingPlan, setPendingPlan] = useState<{
+    taskId: string;
+    messageId: string;
+    status?: PlanStatus;
+    errorMsg?: string;
+  } | null>(null);
 
   // Abort controller for in-progress streams
   const abortRef = useRef<AbortController | null>(null);
@@ -205,31 +211,45 @@ export default function App() {
     }
   }, [renamingId]);
 
-  async function approvePlan(taskId: string) {
+  async function _submitPlanAction(
+    kind: "approve" | "reject",
+    taskId: string,
+  ) {
     const chatId = `web:${myUserId}:${activeThreadId}`;
-    setPendingPlan(null);
+    const pendingStatus: PlanStatus = kind === "approve" ? "approving" : "rejecting";
+    const doneStatus: PlanStatus = kind === "approve" ? "approved" : "rejected";
+    setPendingPlan((p) => (p ? { ...p, status: pendingStatus, errorMsg: undefined } : p));
     try {
-      await fetch("/api/web-action", {
+      const res = await fetch("/api/web-action", {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action_id: `approve_plan:${taskId}`, chat_id: chatId, message_id: "" }),
+        body: JSON.stringify({
+          action_id: `${kind}_plan:${taskId}`,
+          chat_id: chatId,
+          message_id: "",
+        }),
       });
-    } catch { /* best-effort */ }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setPendingPlan((p) => (p ? { ...p, status: doneStatus } : p));
+      // Auto-clear the banner after a short confirmation so the subsequent
+      // task progress card has the viewport to itself.
+      setTimeout(() => {
+        setPendingPlan((p) =>
+          p && p.taskId === taskId && (p.status === "approved" || p.status === "rejected")
+            ? null
+            : p,
+        );
+      }, 1500);
+    } catch (e) {
+      setPendingPlan((p) =>
+        p ? { ...p, status: "error", errorMsg: (e as Error)?.message ?? "Request failed" } : p,
+      );
+    }
   }
 
-  async function rejectPlan(taskId: string) {
-    const chatId = `web:${myUserId}:${activeThreadId}`;
-    setPendingPlan(null);
-    try {
-      await fetch("/api/web-action", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action_id: `reject_plan:${taskId}`, chat_id: chatId, message_id: "" }),
-      });
-    } catch { /* best-effort */ }
-  }
+  function approvePlan(taskId: string) { return _submitPlanAction("approve", taskId); }
+  function rejectPlan(taskId: string) { return _submitPlanAction("reject", taskId); }
 
   // Cancel any in-flight stream
   function cancelStream() {
@@ -616,30 +636,37 @@ export default function App() {
 
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
-    // Animation queue: network text accumulates in a plain ref,
-    // Throttled loop drains it at ~15fps (every ~66ms) instead of 60fps to reduce
-    // React reconciliation overhead on long message lists.
+    // Animation queue: network text accumulates in a plain ref; a RAF loop drains
+    // it smoothly at ~30fps (every ~32ms) revealing ~6 chars per tick. That's a
+    // steady word-per-tick cadence — feels like ChatGPT instead of big 80-char
+    // blocks landing at 15fps. stickyScrollToBottom() is throttled separately so
+    // scroll reflow doesn't compound the per-tick render cost.
     const pendingRef = { current: "" };   // full received text (updated by network)
     const displayedRef = { current: 0 };  // how many chars are currently shown
     const liveIdRef = { current: asstMsgId };
     let rafId: number | null = null;
     let streamDone = false;
     let lastRenderTime = 0;
-    const RENDER_INTERVAL = 66; // ~15fps
+    let lastScrollTime = 0;
+    const RENDER_INTERVAL = 32; // ~30fps — smooth token reveal
+    const CHARS_PER_TICK = 6;   // ~one short word per tick
+    const SCROLL_INTERVAL = 120; // throttle scroll reflow independently
 
     function animateTick(now: number) {
       const full = pendingRef.current;
       const shown = displayedRef.current;
       const elapsed = now - lastRenderTime;
       if (shown < full.length && elapsed >= RENDER_INTERVAL) {
-        // Advance by more chars per tick to compensate for lower frame rate
-        const next = Math.min(full.length, shown + 24);
+        const next = Math.min(full.length, shown + CHARS_PER_TICK);
         displayedRef.current = next;
         lastRenderTime = now;
         setMessages((prev) =>
           prev.map((m) => m.id === liveIdRef.current ? { ...m, content: full.slice(0, next) } : m)
         );
-        stickyScrollToBottom();
+        if (now - lastScrollTime >= SCROLL_INTERVAL) {
+          stickyScrollToBottom();
+          lastScrollTime = now;
+        }
       }
       if (!streamDone || displayedRef.current < pendingRef.current.length) {
         rafId = requestAnimationFrame(animateTick);
@@ -1002,31 +1029,81 @@ export default function App() {
         <SettingsPanel onClose={() => setShowSettingsPanel(false)} />
       ) : (
         <main className="flex-1 overflow-hidden bg-background relative flex flex-col">
-          {pendingPlan && (
-            <div className="shrink-0 px-4 pt-3 z-10">
-              <div className="flex items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-700 px-4 py-3 text-sm">
-                <AlertCircleIcon className="size-5 text-amber-500 shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  <p className="font-semibold text-amber-900 dark:text-amber-200">Plan ready for review</p>
-                  <p className="text-amber-700 dark:text-amber-400 text-xs mt-0.5">Approve to start implementation, or reject to cancel.</p>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    onClick={() => rejectPlan(pendingPlan.taskId)}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium border border-border bg-background hover:bg-accent text-foreground transition-colors"
-                  >
-                    Reject
-                  </button>
-                  <button
-                    onClick={() => approvePlan(pendingPlan.taskId)}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium bg-primary hover:bg-primary/90 text-primary-foreground transition-colors"
-                  >
-                    Approve Plan
-                  </button>
+          {pendingPlan && (() => {
+            const st = pendingPlan.status ?? "idle";
+            const busy = st === "approving" || st === "rejecting";
+            const isApproved = st === "approved";
+            const isRejected = st === "rejected";
+            const isError = st === "error";
+            // Terminal success/failure states swap the banner color so the click
+            // gives an unambiguous visual landing.
+            const wrap =
+              isApproved
+                ? "border-emerald-300 bg-emerald-50 dark:bg-emerald-950/30 dark:border-emerald-700"
+                : isRejected
+                ? "border-border bg-muted"
+                : isError
+                ? "border-red-300 bg-red-50 dark:bg-red-950/30 dark:border-red-700"
+                : "border-amber-300 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-700";
+            return (
+              <div className="shrink-0 px-4 pt-3 z-10">
+                <div className={`flex items-start gap-3 rounded-xl border px-4 py-3 text-sm transition-colors ${wrap}`}>
+                  {isApproved ? (
+                    <CheckIcon className="size-5 text-emerald-600 shrink-0 mt-0.5" />
+                  ) : isRejected ? (
+                    <XIcon className="size-5 text-muted-foreground shrink-0 mt-0.5" />
+                  ) : isError ? (
+                    <AlertCircleIcon className="size-5 text-red-500 shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertCircleIcon className="size-5 text-amber-500 shrink-0 mt-0.5" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    {isApproved ? (
+                      <>
+                        <p className="font-semibold text-emerald-900 dark:text-emerald-200">Plan approved</p>
+                        <p className="text-emerald-700 dark:text-emerald-400 text-xs mt-0.5">Starting implementation…</p>
+                      </>
+                    ) : isRejected ? (
+                      <>
+                        <p className="font-semibold text-foreground">Plan rejected</p>
+                        <p className="text-muted-foreground text-xs mt-0.5">The task has been cancelled.</p>
+                      </>
+                    ) : isError ? (
+                      <>
+                        <p className="font-semibold text-red-900 dark:text-red-200">Couldn’t submit your decision</p>
+                        <p className="text-red-700 dark:text-red-400 text-xs mt-0.5 break-all">{pendingPlan.errorMsg}</p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="font-semibold text-amber-900 dark:text-amber-200">Plan ready for review</p>
+                        <p className="text-amber-700 dark:text-amber-400 text-xs mt-0.5">Approve to start implementation, or reject to cancel.</p>
+                      </>
+                    )}
+                  </div>
+                  {!isApproved && !isRejected && (
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        onClick={() => rejectPlan(pendingPlan.taskId)}
+                        disabled={busy}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium border border-border bg-background hover:bg-accent text-foreground transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+                      >
+                        {st === "rejecting" && <Loader2 className="size-3 animate-spin" />}
+                        {isError ? "Retry reject" : "Reject"}
+                      </button>
+                      <button
+                        onClick={() => approvePlan(pendingPlan.taskId)}
+                        disabled={busy}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-primary hover:bg-primary/90 text-primary-foreground transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+                      >
+                        {st === "approving" && <Loader2 className="size-3 animate-spin" />}
+                        {isError ? "Retry approve" : "Approve Plan"}
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
           <ThreadErrorBoundary key={activeThreadId ?? "no-thread"}>
             <ThinkingContext.Provider value={{ steps: thinkingSteps }}>
               <TaskModeContext.Provider value={{ mode: taskMode, setMode: setTaskMode }}>

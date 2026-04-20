@@ -602,7 +602,11 @@ async def assistant_endpoint(
             options = ClaudeAgentOptions(
                 cwd=workspace,
                 system_prompt=system_prompt,
-                model="claude-sonnet-4-6",
+                # Haiku 4.5 for routing: the inline assistant only decides whether to call
+                # trigger_task + writes a short intro. Coding / planning / reviewing still use
+                # Sonnet (see providers/llm/claude.py). Swap back to sonnet-4-6 here if the
+                # intro quality regresses.
+                model="claude-haiku-4-5",
                 allowed_tools=base_tools,
                 mcp_servers=mcp_servers,
                 permission_mode="bypassPermissions",
