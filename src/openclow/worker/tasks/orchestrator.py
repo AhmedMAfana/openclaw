@@ -1711,7 +1711,11 @@ async def execute_plan(ctx: dict, task_id: str):
             await _log_to_db(task_id_str, "reviewer", "info",
                              f"Review: {'ISSUES' if review_result.has_issues else 'APPROVED'} ({review_turns} turns)")
 
-            # Fix loop
+            # Fix loop — best-effort. Reviewer issues are advisory; if the
+            # fix-coder can't address them (SDK crash, MCP startup race, etc),
+            # we log and continue to Deploy with the original coder's changes
+            # rather than aborting the whole pipeline. The user can review the
+            # deployed result and rerun if the issues matter.
             if review_result.has_issues:
                 for retry in range(2):
                     await reporter.update_step(3, f"fixing issues (attempt {retry + 1})")
@@ -1729,10 +1733,26 @@ async def execute_plan(ctx: dict, task_id: str):
                         mode=getattr(task.project, "mode", "docker") or "docker",
                         project_dir=getattr(task.project, "project_dir", None),
                     )
-                    await _run_agent_with_streaming(
-                        fix_gen, reporter, 3, _stream_to_web, _is_web,
-                        label="fix", idle_timeout=120,
-                    )
+                    try:
+                        await _run_agent_with_streaming(
+                            fix_gen, reporter, 3, _stream_to_web, _is_web,
+                            label="fix", idle_timeout=120,
+                        )
+                    except Exception as fix_err:
+                        log.warning(
+                            "orchestrator.fix_loop_skipped",
+                            task_id=task_id_str, attempt=retry + 1,
+                            error=str(fix_err)[:300],
+                        )
+                        await _log_to_db(
+                            task_id_str, "system", "warning",
+                            f"Fix attempt {retry + 1} failed — continuing to deploy with original coder changes. {str(fix_err)[:200]}",
+                        )
+                        await reporter.update_step(3, f"fix attempt {retry + 1} failed — continuing")
+                        # Treat as 'no issues left' so we exit the loop and
+                        # proceed to Deploy. The user gets the original work.
+                        review_result = ReviewResult(has_issues=False, issues="", raw_output=review_output)
+                        break
                     re_review_gen = llm.run_reviewer(
                         workspace_path=workspace_path,
                         task_description=task.description,
