@@ -37,8 +37,13 @@ app.include_router(ws.router)
 app.include_router(actions.router)
 app.include_router(access.router)
 
-# HTML page routes (settings dashboard + web chat login)
-from openclow.api.pages import router as pages_router  # noqa: E402
+# HTML page routes
+# - pages_router: /settings* — admin-only via verify_settings_auth dep
+# - chat_router:  /chat/login, /chat/logout — public (no auth dep) so users
+#   can actually log in. Mounted as a top-level router to avoid the
+#   verify_settings_auth dep cascading from pages_router.
+from openclow.api.pages import router as pages_router, chat_router  # noqa: E402
+app.include_router(chat_router)
 app.include_router(pages_router)
 
 # Mount static files (AFTER routes so /chat/login etc. work)

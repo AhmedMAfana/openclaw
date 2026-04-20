@@ -345,5 +345,7 @@ async def chat_logout():
     return response
 
 
-# Add web chat routes without auth
-router.include_router(chat_router)
+# NOTE: chat_router is exported separately and included by main.py as a
+# top-level router so the auth dep on `router` (verify_settings_auth) does
+# NOT cascade onto /chat/login. Including chat_router here as a sub-router
+# makes login require admin auth — which is impossible (chicken/egg).
