@@ -1876,14 +1876,21 @@ async def execute_plan(ctx: dict, task_id: str):
         if not summary:
             summary = f"Task completed in {turn_count} turns, {duration}s"
 
-        # Verify tunnel is actually reachable before showing it
-        if tunnel_url:
+        # Always show an Open App link at the end, in priority order:
+        # 1. project.public_url for host-mode (it's the real, stable URL)
+        # 2. live tunnel_url for docker-mode (verified before show)
+        # The user shouldn't have to dig for the URL — it lives at the bottom
+        # of every completion summary.
+        open_app_url = task.project.public_url or None
+        if open_app_url:
+            summary += f"\n\n🌐 **Open App:** {open_app_url}"
+        elif tunnel_url:
             try:
                 import httpx
                 async with httpx.AsyncClient(timeout=5, follow_redirects=True) as hc:
                     probe = await hc.get(tunnel_url)
                     if probe.status_code < 502:
-                        summary += f"\n\n🌐 Review: {tunnel_url}"
+                        summary += f"\n\n🌐 **Open App:** {tunnel_url}"
                     else:
                         summary += "\n\n⚠️ App may not be responding — check container health"
             except Exception:
