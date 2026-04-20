@@ -356,6 +356,68 @@ async def _run_frontend_build(
         return f"build error: {str(e)[:60]}"
 
 
+async def _run_lightweight_deploy_host(
+    task, workspace_path: str, diff_summary: str,
+) -> str:
+    """Host-mode deploy: files are already on the host filesystem; just rebuild
+    frontend assets if they changed, refresh framework caches, and verify the
+    public URL responds. No docker cp, no docker exec — straight subprocess in
+    the project directory via the host_guard allowlist."""
+    from openclow.services.host_guard import run_host
+
+    project_dir = task.project.project_dir
+    if not project_dir or not os.path.isdir(project_dir):
+        return f"host deploy skipped: project_dir missing ({project_dir!r})"
+
+    actor_name = "deploy_lite_host"
+
+    # Frontend rebuild if needed
+    changed = await git_ops.changed_files(workspace_path)
+    has_frontend = any(f.endswith(ext) for ext in _FRONTEND_EXTS for f in changed)
+    if has_frontend:
+        rc, out = await run_host(
+            "npm run build", cwd=project_dir, timeout=300,
+            actor=actor_name, project_name=task.project.name,
+        )
+        if rc != 0:
+            log.warning("deploy.host_build_failed",
+                        project=task.project.name, output=out[-400:])
+            # Don't abort — surface the failure but let cache/verify continue.
+            # The agent's source edit landed; a build failure is recoverable.
+
+    # Laravel cache refresh — best-effort, harmless on non-Laravel apps.
+    if os.path.isfile(os.path.join(project_dir, "artisan")):
+        await run_host(
+            "php artisan config:cache",
+            cwd=project_dir, timeout=20,
+            actor=actor_name, project_name=task.project.name,
+        )
+        await run_host(
+            "php artisan view:cache",
+            cwd=project_dir, timeout=20,
+            actor=actor_name, project_name=task.project.name,
+        )
+        await run_host(
+            "php artisan route:cache",
+            cwd=project_dir, timeout=20,
+            actor=actor_name, project_name=task.project.name,
+        )
+
+    # HTTP verify — hit the public URL (or health URL if configured).
+    url = task.project.health_url or task.project.public_url
+    if url:
+        rc, code = await run_host(
+            f"curl -sS -o /dev/null -w '%{{http_code}}' -L {url}",
+            cwd=project_dir, timeout=15,
+            actor=actor_name, project_name=task.project.name,
+        )
+        code = (code or "").strip()
+        if rc == 0 and code.startswith(("2", "3")):
+            return f"built, verified {code}"
+        return f"built, HTTP {code or 'unknown'}"
+    return "built, no public_url to verify"
+
+
 async def _run_lightweight_deploy(
     task, workspace_path: str, diff_summary: str, tunnel_url: str | None,
 ) -> str:
@@ -364,6 +426,10 @@ async def _run_lightweight_deploy(
     No LLM agent — direct subprocess calls, ~2-5s total.
     Used for subsequent tasks where health was cached (containers known-good).
     """
+    # Host-mode projects bypass the entire docker pipeline.
+    if (task.project.mode or "docker").lower() == "host":
+        return await _run_lightweight_deploy_host(task, workspace_path, diff_summary)
+
     from openclow.services.docker_guard import run_docker
 
     compose_project = f"openclow-{task.project.name}"
@@ -1713,7 +1779,27 @@ async def execute_plan(ctx: dict, task_id: str):
                 "migration", "alembic", "seeder", "config/", ".env",
             )
         )
-        if _needs_post_deploy:
+        # Host mode: the post-deploy agent is docker-only today (uses
+        # _mcp_docker, references the project's compose container by name).
+        # Skip with a clear log; migrations / config changes for host-mode
+        # projects need to be triggered explicitly until we ship a host
+        # post-deploy agent.
+        _is_host_mode = (task.project.mode or "docker").lower() == "host"
+        if _needs_post_deploy and _is_host_mode:
+            log.info(
+                "orchestrator.host_post_deploy_skipped",
+                project=task.project.name,
+                diff_summary=diff_summary[:200],
+                hint="Run migrations/config changes via the next chat turn — "
+                     "the coder agent has host_run_command access.",
+            )
+            await _log_to_db(
+                task_id_str, "system", "info",
+                "Post-deploy actions detected (migrations/.env) but skipped — "
+                "host-mode post-deploy agent not implemented yet. Run them via "
+                "a follow-up chat task.",
+            )
+        elif _needs_post_deploy:
             await reporter.update_step(4, "post-deploy actions")
             deploy_gen = _deploy_agent_gen(task, workspace_path, diff_summary, tunnel_url)
             deploy_output, deploy_turns = await _run_agent_with_streaming(
