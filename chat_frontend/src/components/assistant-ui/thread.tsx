@@ -385,7 +385,7 @@ const AgentLogPanel: FC<{ text: string; isRunning: boolean }> = ({ text, isRunni
       {expanded && (
         <div
           ref={scrollRef}
-          className="mt-1.5 text-xs font-mono text-foreground/75 whitespace-pre-wrap max-h-44 overflow-y-auto rounded bg-black/25 dark:bg-black/50 p-2 leading-relaxed"
+          className="mt-1.5 text-[11px] sm:text-xs font-mono text-foreground/75 whitespace-pre-wrap break-words [overflow-wrap:anywhere] max-h-44 overflow-y-auto overflow-x-auto rounded bg-black/25 dark:bg-black/50 p-2 leading-[1.55]"
         >
           {text}
         </div>
@@ -440,30 +440,32 @@ const WorkerProgressCard: FC<{ card: CardData }> = ({ card }) => {
 
   return (
     <div className={cn(
-      "rounded-xl border p-4 text-sm my-1",
+      "rounded-xl border p-3 sm:p-4 text-sm my-1 w-full min-w-0",
       isDone && "border-green-500/20",
       isFailed && "border-destructive/20",
       !isDone && !isFailed && "border-border",
     )}>
       {/* Header */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          {isDone ? (
-            <div className="size-4 rounded-full bg-green-500 flex items-center justify-center">
-              <CheckIcon className="size-2.5 text-white" />
-            </div>
-          ) : isFailed ? (
-            <div className="size-4 rounded-full bg-destructive" />
-          ) : (
-            <svg className="animate-spin size-4 text-primary" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
-            </svg>
-          )}
-          <span className="font-semibold text-foreground">{card.title}</span>
+      <div className="flex items-start justify-between gap-2 mb-3">
+        <div className="flex items-start gap-2 min-w-0 flex-1">
+          <div className="shrink-0 mt-0.5">
+            {isDone ? (
+              <div className="size-4 rounded-full bg-green-500 flex items-center justify-center">
+                <CheckIcon className="size-2.5 text-white" />
+              </div>
+            ) : isFailed ? (
+              <div className="size-4 rounded-full bg-destructive" />
+            ) : (
+              <svg className="animate-spin size-4 text-primary" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+              </svg>
+            )}
+          </div>
+          <span className="font-semibold text-foreground break-words [overflow-wrap:anywhere] min-w-0">{card.title}</span>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-muted/60 text-foreground/50">{card.elapsed}s</span>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-muted/60 text-foreground/50 tabular-nums">{card.elapsed}s</span>
           {isStillRunning && card.session_id && (
             <button
               onClick={handleCancel}
@@ -640,8 +642,10 @@ const AssistantMessage: FC = () => {
           </ErrorPrimitive.Root>
         </MessagePrimitive.Error>
       </div>
-      {/* Fixed-height row so icons appearing/disappearing never shift the layout */}
-      <div className="mt-1 ml-2 h-7 flex items-center gap-2">
+      {/* Min-height row so icons appearing/disappearing never shift the layout.
+          flex-wrap so on narrow viewports the timestamp drops to the next line
+          instead of mashing into the actions. */}
+      <div className="mt-1 ml-2 min-h-7 flex flex-wrap items-center gap-x-3 gap-y-1">
         <BranchPicker />
         <AssistantActionBar />
         {!isRunning && createdAt && (
