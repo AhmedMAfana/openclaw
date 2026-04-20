@@ -8,14 +8,26 @@ log = get_logger()
 
 
 async def _get_git_env() -> dict:
-    """Get environment with GitHub token from DB."""
+    """Get environment with GitHub token from DB.
+
+    Also injects an `insteadOf` URL rewrite via GIT_CONFIG_* env vars so
+    SSH remotes (git@github.com:owner/repo.git) transparently route through
+    HTTPS using the token. This is critical on staging/host-mode where the
+    container's user has no SSH key — the token is the only way to push.
+    """
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     try:
         from openclow.services.config_service import get_config
         config = await get_config("git", "provider")
         if config and config.get("token"):
-            env["GH_TOKEN"] = config["token"]
-            env["GITHUB_TOKEN"] = config["token"]
+            token = config["token"]
+            env["GH_TOKEN"] = token
+            env["GITHUB_TOKEN"] = token
+            # Rewrite git@github.com:owner/repo → https://...@github.com/owner/repo
+            # so push works without an SSH key in the container.
+            env["GIT_CONFIG_COUNT"] = "1"
+            env["GIT_CONFIG_KEY_0"] = f"url.https://x-access-token:{token}@github.com/.insteadOf"
+            env["GIT_CONFIG_VALUE_0"] = "git@github.com:"
     except Exception:
         pass
     return env
