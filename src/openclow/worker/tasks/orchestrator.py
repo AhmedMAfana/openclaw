@@ -1672,14 +1672,64 @@ async def execute_plan(ctx: dict, task_id: str):
             await reporter.start_step(2)
             await reporter.complete_step(2, "no build needed")
 
-        # ── Step 3: Run Reviewer (skip for quick mode subsequent tasks) ──
+        # ── Step 3: Run Reviewer (skip for quick mode subsequent tasks OR
+        #            tiny/cosmetic diffs OR when the coder explicitly said
+        #            "Tests: SKIPPED — CSS-only/cosmetic"). Reviewer is the
+        #            single longest non-build step (~40-90s) and adds little
+        #            on a 1-line CSS swap. Skipping safely shaves ~half the
+        #            wall clock for trivial tasks. ──
         _is_quick_mode = task.status == "coding"
-        _skip_review = _is_quick_mode and is_subsequent_task
+
+        # Heuristic: classify the diff. Cosmetic if all changed files are
+        # CSS / stylesheet / Vue-template-only AND total touched lines are small.
+        _changed_files: list[str] = []
+        _total_lines = 0
+        try:
+            _changed_files = await git_ops.changed_files(workspace_path)
+            # diff --shortstat -> "1 file changed, 1 insertion(+), 1 deletion(-)"
+            _shortstat = await git_ops.run_exec(
+                "git", "diff", "--shortstat", "HEAD", cwd=workspace_path,
+                ignore_errors=True,
+            )
+            import re as _re
+            for m in _re.finditer(r"(\d+)\s+(insertion|deletion)", _shortstat):
+                _total_lines += int(m.group(1))
+        except Exception:
+            pass
+        _COSMETIC_EXTS = (".css", ".scss", ".sass", ".less", ".vue", ".html")
+        _is_cosmetic = (
+            bool(_changed_files)
+            and all(f.endswith(_COSMETIC_EXTS) for f in _changed_files)
+            and _total_lines <= 30
+        )
+        # The coder agent often signals trivial scope itself with "Tests: SKIPPED"
+        # ("CSS-only", "cosmetic", "no logic", etc).
+        _coder_signaled_trivial = (
+            "tests: skipped" in (full_output or "").lower()
+            and any(
+                kw in (full_output or "").lower()
+                for kw in ("css-only", "cosmetic", "no backend logic", "no logic")
+            )
+        )
+
+        _skip_review = (
+            (_is_quick_mode and is_subsequent_task)
+            or _is_cosmetic
+            or _coder_signaled_trivial
+        )
 
         if _skip_review:
-            await reporter.skip_step(3, "quick mode")
+            _reason = (
+                "quick mode subsequent" if (_is_quick_mode and is_subsequent_task)
+                else f"cosmetic ({len(_changed_files)} files, {_total_lines} lines)"
+                if _is_cosmetic
+                else "coder signaled trivial"
+            )
+            await reporter.skip_step(3, _reason)
             await _log_to_db(task_id_str, "system", "info",
-                             "Review: skipped (quick mode, subsequent task)")
+                             f"Review: skipped ({_reason})")
+            from openclow.providers.base import ReviewResult
+            review_result = ReviewResult(has_issues=False, issues="", raw_output="")
         else:
             await _update_task(task_id_str, status="reviewing")
             await reporter.start_step(3)

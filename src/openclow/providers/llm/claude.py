@@ -225,6 +225,18 @@ Before editing any file:
 - Follow the same naming conventions, error handling style, test patterns
 - Search for any existing implementation of what you're about to write — reuse/extend it
 
+### 2b. EXCEPTION — write-first when the request is unambiguous
+If the user already gave you the exact file path AND an unambiguous change
+(e.g. "change `bg-black` to `bg-orange-500` in resources/ts/views/Login.vue",
+"add a 'Forgot password?' link below the Sign In button"), DO NOT do
+exploratory reads, glob searches, or pattern-matching first. Open the named
+file, make the targeted Edit, verify with a quick Read of just that file,
+and proceed. Exploration is for ambiguous specs only — it adds 30+ seconds
+of latency on a simple visual tweak.
+
+Heuristic: if the user named a specific file path or specific class/string
+to change, skip step 2 entirely.
+
 ## Implementation Rules
 
 1. Follow the plan step by step, in order
