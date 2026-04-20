@@ -144,7 +144,8 @@ export default function App() {
   // Projects
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<number | null>(null);
-  const [activeGitMode, setActiveGitMode] = useState<string>("branch_per_task");
+  // Git mode selector was removed from the UI — every chat uses session_branch
+  // by default (one branch per chat, every task = a commit on it).
 
   // Current user id (for WebSocket URL)
   const [myUserId, setMyUserId] = useState<number | null>(null);
@@ -486,23 +487,6 @@ export default function App() {
     } catch { /* best-effort */ }
   }
 
-  async function updateGitMode(threadId: string, gitMode: string) {
-    try {
-      const res = await fetch(`/api/threads/${threadId}/git-mode`, {
-        method: "PATCH",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ git_mode: gitMode }),
-      });
-      if (res.ok) {
-        setActiveGitMode(gitMode);
-        setThreads((prev) => prev.map((t) =>
-          t.remoteId === threadId ? { ...t, gitMode } : t
-        ));
-      }
-    } catch { /* best-effort */ }
-  }
-
   async function selectThread(id: string, fromList?: ChatThread[]) {
     if (id === activeThreadId) return; // already on this thread
     cancelStream();
@@ -514,7 +498,8 @@ export default function App() {
     const thread = lookup.find((t) => t.remoteId === id);
     if (thread !== undefined) {
       setActiveProjectId(thread.projectId ?? null);
-      setActiveGitMode(thread.gitMode ?? "branch_per_task");
+      // gitMode tracking removed; backend defaults to session_branch.
+      void thread;
     }
     try {
       const res = await fetch(`/api/threads/${id}/messages`, { credentials: "include" });
@@ -941,22 +926,8 @@ export default function App() {
             </select>
           )}
 
-          {/* Git mode selector */}
-          {activeThreadId && (
-            <select
-              value={activeGitMode}
-              onChange={(e) => {
-                updateGitMode(activeThreadId, e.target.value);
-              }}
-              className="mt-2 w-full px-3 py-1.5 rounded-lg text-xs border border-border/60 text-foreground/80 focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/40 transition-colors"
-              style={{ background: "oklch(0.13 0.008 265)" }}
-              title="Git workflow mode"
-            >
-              <option value="branch_per_task">Branch per Task</option>
-              <option value="direct_commit">Direct Commit</option>
-              <option value="session_branch">Session Branch</option>
-            </select>
-          )}
+          {/* Git workflow is fixed: every chat = one branch, every task in
+              that chat = a commit on it. No user selector. */}
         </div>
 
         {/* Thread list */}

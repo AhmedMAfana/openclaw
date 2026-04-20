@@ -23,7 +23,7 @@ class Task(Base):
     chat_id: Mapped[str] = mapped_column(String(255), nullable=False)
     chat_message_id: Mapped[str | None] = mapped_column(String(255))
     chat_provider_type: Mapped[str] = mapped_column(String(50), nullable=False, default="telegram")
-    git_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="branch_per_task")
+    git_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="session_branch")
     error_message: Mapped[str | None] = mapped_column(Text)
     agent_turns: Mapped[int | None] = mapped_column(Integer)
     duration_seconds: Mapped[int | None] = mapped_column(Integer)

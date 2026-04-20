@@ -116,7 +116,7 @@ async def rename_thread(thread_id: int, body: dict, user: User = Depends(web_use
 async def set_thread_git_mode(thread_id: int, body: dict, user: User = Depends(web_user_dep)):
     """Update the git mode for a session."""
     valid_modes = {"branch_per_task", "direct_commit", "session_branch"}
-    new_mode = body.get("git_mode", "branch_per_task")
+    new_mode = body.get("git_mode", "session_branch")
     if new_mode not in valid_modes:
         raise HTTPException(400, f"Invalid git_mode. Must be one of: {', '.join(valid_modes)}")
 

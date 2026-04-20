@@ -2042,7 +2042,11 @@ async def approve_task(ctx: dict, task_id: str):
         await checklist.start()
 
         try:
-            workspace = ws.get_path(task_id_str)
+            # Host-mode: project_dir IS the workspace.
+            if (task.project.mode or "docker").lower() == "host":
+                workspace = task.project.project_dir
+            else:
+                workspace = ws.get_path(task_id_str)
             await _update_task(task_id_str, status="pushing")
 
             await checklist.start_step(0)
@@ -2094,7 +2098,11 @@ async def approve_task(ctx: dict, task_id: str):
     await checklist.start()
 
     try:
-        workspace = ws.get_path(task_id_str)
+        # Host-mode: project_dir IS the workspace.
+        if (task.project.mode or "docker").lower() == "host":
+            workspace = task.project.project_dir
+        else:
+            workspace = ws.get_path(task_id_str)
         await _update_task(task_id_str, status="pushing")
 
         # Step 1: Commit
@@ -2216,11 +2224,16 @@ async def merge_task(ctx: dict, task_id: str):
         # Step 3: Sync live (pull latest + rebuild)
         await checklist.start_step(2)
         try:
-            project_workspace = os.path.join(settings.workspace_base_path, "_cache", task.project.name)
-            if os.path.exists(project_workspace):
+            # Host-mode: pull straight into the live project_dir.
+            # Docker-mode: pull into the project _cache so the next task starts fresh.
+            if (task.project.mode or "docker").lower() == "host":
+                sync_dir = task.project.project_dir
+            else:
+                sync_dir = os.path.join(settings.workspace_base_path, "_cache", task.project.name)
+            if sync_dir and os.path.exists(sync_dir):
                 proc = await asyncio.create_subprocess_exec(
                     "git", "pull", "origin", task.project.default_branch or "main",
-                    cwd=project_workspace,
+                    cwd=sync_dir,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 )
                 await asyncio.wait_for(proc.communicate(), timeout=30)

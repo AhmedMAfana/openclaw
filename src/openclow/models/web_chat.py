@@ -15,7 +15,10 @@ class WebChatSession(Base):
     project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), nullable=True)
     title: Mapped[str] = mapped_column(String(255), default="New Chat")
     mode: Mapped[str] = mapped_column(String(20), default="quick")  # "quick" | "plan"
-    git_mode: Mapped[str] = mapped_column(String(20), default="branch_per_task")  # "branch_per_task" | "direct_commit" | "session_branch"
+    # session_branch is the only sane default for chat-driven dev: every chat
+    # gets one branch, every task in that chat = a commit on it. Other modes
+    # exist for compatibility but are no longer surfaced in the UI.
+    git_mode: Mapped[str] = mapped_column(String(20), default="session_branch")  # "branch_per_task" | "direct_commit" | "session_branch"
     session_branch_name: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     last_message_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
