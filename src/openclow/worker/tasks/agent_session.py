@@ -280,27 +280,43 @@ async def _build_context(chat_id: str, project_context: str, user_id: str):
             if len(projects) == 1:
                 p = projects[0]
                 project_name = p.name
-                context_parts.append(f"FOCUSED PROJECT: {p.name} ({p.tech_stack or 'N/A'})")
+                p_mode = (p.mode or "docker").lower()
+                # Mode-aware project header so the assistant uses the right vocabulary
+                # (host-mode projects run on the VPS host behind nginx — no Docker,
+                # no cloudflared tunnel). Without this tag the LLM defaults to
+                # "start containers" advice for apps that are already live.
+                mode_tag = "HOST-MODE PROJECT" if p_mode == "host" else "FOCUSED PROJECT"
+                context_parts.append(f"{mode_tag}: {p.name} ({p.tech_stack or 'N/A'})")
                 if p.description:
                     context_parts.append(f"Description: {p.description}")
                 if p.agent_system_prompt:
                     context_parts.append(f"Conventions:\n{p.agent_system_prompt}")
-                # Get tunnel URL without health check (fast path)
-                try:
-                    from openclow.services.tunnel_service import get_tunnel_url
-                    t_url = await get_tunnel_url(p.name)
-                    if t_url:
-                        tunnel_url = t_url
-                        t_url_display = t_url
-                    else:
-                        t_url_display = "no tunnel"
-                except Exception as e:
-                    log.warning("agent_session.tunnel_fetch_failed", project=p.name, error=str(e))
-                    t_url_display = "error fetching tunnel"
-                context_parts.append(
-                    f"Container: openclow-{p.name}-{p.app_container_name or 'app'}-1 | tunnel: {t_url_display}"
-                )
-                workspace = f"{settings.workspace_base_path}/_cache/{p.name}"
+
+                if p_mode == "host":
+                    url = p.public_url or "(no public_url configured)"
+                    context_parts.append(
+                        f"Runtime: already running on the VPS host (nginx / process manager — no Docker). "
+                        f"Public URL: {url} | Path: {p.project_dir or '(no project_dir set)'}"
+                    )
+                    tunnel_url = p.public_url  # surface the public URL where docker-mode uses tunnel_url
+                    workspace = p.project_dir or f"{settings.workspace_base_path}/_cache/{p.name}"
+                else:
+                    # Docker mode — tunnel URL lookup (fast path, no health check)
+                    try:
+                        from openclow.services.tunnel_service import get_tunnel_url
+                        t_url = await get_tunnel_url(p.name)
+                        if t_url:
+                            tunnel_url = t_url
+                            t_url_display = t_url
+                        else:
+                            t_url_display = "no tunnel"
+                    except Exception as e:
+                        log.warning("agent_session.tunnel_fetch_failed", project=p.name, error=str(e))
+                        t_url_display = "error fetching tunnel"
+                    context_parts.append(
+                        f"Container: openclow-{p.name}-{p.app_container_name or 'app'}-1 | tunnel: {t_url_display}"
+                    )
+                    workspace = f"{settings.workspace_base_path}/_cache/{p.name}"
             else:
                 context_parts.append(
                     "GENERAL MODE — No project is selected for this conversation.\n"
