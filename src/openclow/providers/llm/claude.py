@@ -408,6 +408,7 @@ class ClaudeProvider(LLMProvider):
             max_turns=5,  # Tight cap — plans should be a few targeted reads, not exhaustive archaeology
             setting_sources=["project"],
             stderr=stderr_cb,
+            extra_args={"debug-to-stderr": None},
         )
 
         log.info("claude.planner.started", workspace=workspace_path)
@@ -478,6 +479,7 @@ class ClaudeProvider(LLMProvider):
             setting_sources=["project"],
             include_partial_messages=True,
             stderr=stderr_cb,
+            extra_args={"debug-to-stderr": None},  # so silent-exit crashes still leave a trail
         )
 
         log.info("claude.coder.started", workspace=workspace_path)
@@ -515,6 +517,7 @@ class ClaudeProvider(LLMProvider):
             mode, workspace_path, project_dir, project_name, app_container, app_port,
         )
         # Fix agent: Sonnet is fast enough, fewer turns
+        stderr_buf, stderr_cb = _make_stderr_collector("coder_fix")
         options = ClaudeAgentOptions(
             cwd=project_dir if mode == "host" and project_dir else workspace_path,
             system_prompt=(
@@ -530,6 +533,8 @@ class ClaudeProvider(LLMProvider):
             permission_mode="bypassPermissions",
             max_turns=max_turns or 10,
             include_partial_messages=True,
+            stderr=stderr_cb,
+            extra_args={"debug-to-stderr": None},  # so silent-exit crashes still leave a trail
         )
 
         prompt = FIX_PROMPT.format(issues=issues)
@@ -539,6 +544,9 @@ class ClaudeProvider(LLMProvider):
                 yield message
         except Exception as e:
             _check_auth_error(e)
+            tail = "\n".join(list(stderr_buf)[-20:])
+            if tail:
+                raise RuntimeError(f"coder_fix crashed: {e}\n--- last stderr ---\n{tail}") from e
             raise
 
     async def run_reviewer(
@@ -587,6 +595,7 @@ class ClaudeProvider(LLMProvider):
             max_turns=max_turns or self.reviewer_max_turns,
             include_partial_messages=True,
             stderr=stderr_cb,
+            extra_args={"debug-to-stderr": None},  # so silent-exit crashes still leave a trail
         )
 
         log.info("claude.reviewer.started", workspace=workspace_path)
