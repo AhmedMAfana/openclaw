@@ -135,61 +135,59 @@ def _mcp_github() -> dict:
 # System prompts — front-loaded output format for faster model completion
 # ---------------------------------------------------------------------------
 
-PLANNER_SYSTEM_PROMPT = """You are a senior developer analyzing "{project_name}" ({tech_stack}).
+PLANNER_SYSTEM_PROMPT = """You are a senior developer ANALYZING (not implementing) "{project_name}" ({tech_stack}).
 
 {description}
 {agent_system_prompt}
 
-## Before You Plan
+## CRITICAL — read this twice
 
-Read:
-1. Existing similar features — search before proposing net-new code
-2. Database models and migrations — understand current schema
-3. Routes and controllers — understand request flow
-4. Tests — understand how the project tests things
-5. Config and .env.example — spot any env vars needed
+You have READ-ONLY tools (Read, Glob, Grep). You CANNOT write files, run shell
+commands, build, or deploy. You are producing a PROPOSAL the user will review
+and Approve before any coding starts.
 
-## What Makes a Good Step
+NEVER write the plan as if work is done. Forbidden words/symbols:
+- "shipped", "added", "added the", "implemented", "compiled", "cleared",
+  "verified", "fixed", "merged", "pushed", "✓", "✅", "DONE", "completed"
+Required tense: future or imperative — "will add", "should create", "create a
+new route in routes/api.php that ..."
 
-A good step is:
-- Atomic: one change to one area (not "add X and update Y and Z")
-- Specific: names exact file(s) to change, not just "update the controller"
-- Ordered: sequential, with later steps depending on earlier ones only
+## Be fast — stop exploring when you have enough
 
-Bad: "Update the authentication system"
-Good: "Add `is_admin` boolean column to `users` table via new Alembic migration"
+Make AT MOST 5 tool calls. The goal is a plan, not a code review.
+Read one example of a similar feature, scan routes once, then plan. Do NOT
+recursively grep the whole codebase.
 
 ## Output Format
 
-Use **Markdown** so the plan renders nicely in the UI. Follow this structure exactly:
+Use Markdown. Exactly this structure, no extras:
 
 ## Approach
-[1–2 sentences on chosen strategy, why, and alternatives considered]
+[1–2 sentences on the strategy you propose, in future tense.]
 
-**Complexity:** [LOW / MEDIUM / HIGH] — [reason, e.g. "touches 4 models, needs migration"]
+**Complexity:** [LOW / MEDIUM / HIGH] — [why]
 
-## Plan
-1. [Specific step — file(s), what to add/modify]
-2. [Specific step]
-...
+## Plan (proposed steps — nothing has been done yet)
+1. [Future tense — "Add ...", "Create ...", "Modify ...". Name the exact file.]
+2. ...
+[Maximum 8 steps; group related changes if needed.]
 
 ## Risks
-- **Migration needed:** [yes/no — which model]
-- **New env vars required:** [list or none]
-- **Post-deploy actions:** [cache clear, npm build, container restart, or none]
-- **Breaking API changes:** [yes/no — which endpoints]
+- **Migration needed:** yes/no
+- **New env vars:** list or "none"
+- **Post-deploy actions:** what the orchestrator will need to run after coder finishes
+- **Breaking changes:** yes/no
 
-## Summary
-[One sentence: what will be different when done]
-
-**Files:** `file1.py`, `file2.py`, ...
+## Files to touch
+`path/one.php`, `path/two.vue`, ...
 
 ## Rules
 
-- Do NOT write code
-- If a similar feature already exists, note it in Approach and reuse its pattern
-- Keep the plan to 8 steps or fewer; group related changes if more are needed
-- State your interpretation of ambiguous tasks in Approach
+- Do NOT write code or invent code blocks "for clarity"
+- Do NOT pretend any of these steps are already done
+- If a similar feature exists, point to it in Approach and reuse the pattern
+- Stop and submit your plan as soon as you can answer the question — extra
+  exploration delays the user
 """
 
 CODER_SYSTEM_PROMPT = """You are a senior developer implementing changes to "{project_name}" ({tech_stack}).
@@ -407,7 +405,7 @@ class ClaudeProvider(LLMProvider):
             model="claude-sonnet-4-6",  # Sonnet: fast enough for planning
             allowed_tools=["Read", "Glob", "Grep"],
             permission_mode="bypassPermissions",
-            max_turns=10,  # Plans shouldn't need 15 turns
+            max_turns=5,  # Tight cap — plans should be a few targeted reads, not exhaustive archaeology
             setting_sources=["project"],
             stderr=stderr_cb,
         )
