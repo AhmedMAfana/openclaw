@@ -128,7 +128,18 @@ def is_allowed(cmd: str) -> tuple[bool, str]:
 
 
 def _is_within(base: str, path: str) -> bool:
+    """Allow the path if it sits under base — by either lexical OR realpath
+    comparison. The lexical pass handles the common staging layout where
+    /srv/projects/<name> is a symlink to /home/web/vhosts/<name>/htdocs/live;
+    realpath alone would reject that because the target is outside base. The
+    realpath pass is kept as a backstop for the case where base itself is a
+    symlink. Sandbox-safe: both forms must START with base, no '..' escape.
+    """
     try:
+        base_norm = os.path.normpath(base)
+        path_norm = os.path.normpath(path)
+        if path_norm == base_norm or path_norm.startswith(base_norm + os.sep):
+            return True
         base_r = os.path.realpath(base)
         path_r = os.path.realpath(path)
         return path_r == base_r or path_r.startswith(base_r + os.sep)
