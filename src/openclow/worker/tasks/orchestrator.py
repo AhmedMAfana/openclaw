@@ -1693,23 +1693,39 @@ async def execute_plan(ctx: dict, task_id: str):
                 description=task.project.description or "",
                 agent_system_prompt=task.project.agent_system_prompt or "",
             )
-            review_output, review_turns = await _run_agent_with_streaming(
-                review_gen, reporter, 3, _stream_to_web, _is_web,
-                label="review", idle_timeout=90,
-            )
-            await reporter.update_step(3, f"reviewed ({review_turns} turns)")
-
-            # Parse ReviewResult from collected output
             from openclow.providers.base import ReviewResult
-            has_issues = "STATUS: ISSUES" in review_output
-            issues = ""
-            if has_issues:
-                parts = review_output.split("STATUS: ISSUES", 1)
-                if len(parts) > 1:
-                    issues = parts[1].strip()
-            review_result = ReviewResult(has_issues=has_issues, issues=issues, raw_output=review_output)
-            await _log_to_db(task_id_str, "reviewer", "info",
-                             f"Review: {'ISSUES' if review_result.has_issues else 'APPROVED'} ({review_turns} turns)")
+            try:
+                review_output, review_turns = await _run_agent_with_streaming(
+                    review_gen, reporter, 3, _stream_to_web, _is_web,
+                    label="review", idle_timeout=90,
+                )
+                await reporter.update_step(3, f"reviewed ({review_turns} turns)")
+                has_issues = "STATUS: ISSUES" in review_output
+                issues = ""
+                if has_issues:
+                    parts = review_output.split("STATUS: ISSUES", 1)
+                    if len(parts) > 1:
+                        issues = parts[1].strip()
+                review_result = ReviewResult(has_issues=has_issues, issues=issues, raw_output=review_output)
+                await _log_to_db(task_id_str, "reviewer", "info",
+                                 f"Review: {'ISSUES' if review_result.has_issues else 'APPROVED'} ({review_turns} turns)")
+            except Exception as rev_err:
+                # Reviewer occasionally exits SDK with silent rc=1. Code is
+                # already on disk; reviewer is advisory polish. Don't abort
+                # the pipeline — log, mark as 'review skipped', proceed to
+                # Deploy with the original coder's output.
+                log.warning(
+                    "orchestrator.review_skipped",
+                    task_id=task_id_str, error=str(rev_err)[:300],
+                )
+                await _log_to_db(
+                    task_id_str, "system", "warning",
+                    f"Review crashed — continuing to Deploy with coder's changes. {str(rev_err)[:200]}",
+                )
+                await reporter.update_step(3, "review skipped (sdk crash)")
+                review_output = ""
+                review_turns = 0
+                review_result = ReviewResult(has_issues=False, issues="", raw_output="")
 
             # Fix loop — best-effort. Reviewer issues are advisory; if the
             # fix-coder can't address them (SDK crash, MCP startup race, etc),
