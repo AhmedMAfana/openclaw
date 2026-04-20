@@ -2,6 +2,11 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Tailwind v4's auto-scanner was skipping src/components/assistant-ui/** (path
+   matches a package-like name), so utilities used only in thread.tsx — h-1.5,
+   min-h-7, max-h-40/44, min-h-12/14 — were never emitted. Force-scan it. */
+@source "./components/assistant-ui/**/*.{ts,tsx,js,jsx}";
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
@@ -75,6 +80,21 @@
     width: 100%;
     height: 100vh;
   }
+}
+
+/* Screen-reader-only: Tailwind v4 wasn't emitting this utility for us,
+   causing aria-label spans (e.g. the Scroll-to-bottom button) to render
+   as visible text under the composer. Define it explicitly. */
+.sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
 }
 
 /* Subtle scrollbar styling */

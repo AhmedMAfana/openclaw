@@ -1167,32 +1167,34 @@ const ThreadItem = memo(function ThreadItem({
           style={{ background: "linear-gradient(to bottom, oklch(0.62 0.22 265), oklch(0.55 0.22 295))" }} />
       )}
       <button onClick={onSelect} className="flex-1 text-left px-3 py-2 min-w-0">
-        <div className="flex items-center justify-between gap-1">
-          <span className="text-xs truncate font-medium">{thread.title}</span>
-          {timeLabel && !hovered && !isActive && (
-            <span className="text-[10px] text-muted-foreground/50 shrink-0 tabular-nums">{timeLabel}</span>
-          )}
-        </div>
+        <span className="block text-xs truncate font-medium pr-11">{thread.title}</span>
       </button>
 
-      {(hovered || isActive) && (
-        <div className="flex items-center gap-0.5 pr-1.5 shrink-0">
-          <button
-            onClick={(e) => { e.stopPropagation(); onStartRename(); }}
-            className="p-1 rounded hover:bg-white/8 text-muted-foreground/60 hover:text-foreground transition-colors"
-            title="Rename"
-          >
-            <PencilIcon className="size-3" />
-          </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="p-1 rounded hover:bg-destructive/20 text-muted-foreground/60 hover:text-destructive transition-colors"
-            title="Delete"
-          >
-            <TrashIcon className="size-3" />
-          </button>
-        </div>
-      )}
+      {/* Fixed-width right slot: timestamp shown when idle, rename/delete shown on hover or active.
+          Both overlay the same space so the title never reflows on hover. */}
+      <div className="absolute right-1.5 top-1/2 -translate-y-1/2 w-10 h-6 flex items-center justify-end pointer-events-none">
+        {timeLabel && !hovered && !isActive && (
+          <span className="text-[10px] text-muted-foreground/50 tabular-nums">{timeLabel}</span>
+        )}
+        {(hovered || isActive) && (
+          <div className="flex items-center gap-0.5 pointer-events-auto">
+            <button
+              onClick={(e) => { e.stopPropagation(); onStartRename(); }}
+              className="p-1 rounded hover:bg-white/8 text-muted-foreground/60 hover:text-foreground transition-colors"
+              title="Rename"
+            >
+              <PencilIcon className="size-3" />
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              className="p-1 rounded hover:bg-destructive/20 text-muted-foreground/60 hover:text-destructive transition-colors"
+              title="Delete"
+            >
+              <TrashIcon className="size-3" />
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 });
