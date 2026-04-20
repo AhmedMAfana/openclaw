@@ -181,6 +181,17 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
+
+        # Streaming endpoints (/api/assistant) send chunked Claude responses.
+        # Without these, nginx accumulates the FULL upstream body into its own
+        # buffer before flushing to the client — so the user sees nothing for
+        # 5-15 seconds, then the entire reply lands in one chunk, killing the
+        # token-by-token streaming UX. Keep these off for the whole vhost; the
+        # static asset perf impact is negligible (the browser still caches).
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_request_buffering off;
+        chunked_transfer_encoding on;
     }
 }
 NGINX
