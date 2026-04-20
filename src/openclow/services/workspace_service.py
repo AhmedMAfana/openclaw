@@ -128,13 +128,17 @@ class WorkspaceService:
                 f"Mount it via docker-compose.prod.yml (worker.volumes + api.volumes)."
             )
         if os.path.isdir(os.path.join(project.project_dir, ".git")):
-            rc, out = await git_ops.run_exec(
-                "git", "pull", "--ff-only", "--quiet",
-                cwd=project.project_dir, ignore_errors=True,
-            )
-            if rc != 0:
+            try:
+                # run_exec returns stdout as a str; raises on non-zero unless
+                # ignore_errors=True. We want best-effort: log on failure, never
+                # block the task — staging often has dirty working trees.
+                await git_ops.run_exec(
+                    "git", "pull", "--ff-only", "--quiet",
+                    cwd=project.project_dir, ignore_errors=True,
+                )
+            except Exception as e:
                 log.warning("workspace.host_pull_failed",
-                            project=project.name, output=out[:200])
+                            project=project.name, error=str(e)[:200])
         log.info("workspace.host_ready", path=project.project_dir, project=project.name)
         return Workspace(path=project.project_dir, from_cache=True, deps_changed=False)
 
