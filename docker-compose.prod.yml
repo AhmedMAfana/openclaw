@@ -29,12 +29,19 @@ services:
       - claude_auth:/home/openclow/.claude
       - /var/run/docker.sock:/var/run/docker.sock
       - ./auth.json:/app/auth.json:ro
+      # Bind-mount source + alembic + frontend dist so Python / migration /
+      # built-frontend changes ship via `git pull && docker compose restart`,
+      # no image rebuild. Tradeoff: the running code is whatever's at
+      # /home/web/vhosts/openclow/app on the host, not what was baked into
+      # the image. For staging that's the right call (5 s restart vs 5+ min
+      # rebuild). For real prod, drop these mounts and rebuild on every
+      # change — the image becomes the immutable source of truth.
+      - ./src:/app/src
+      - ./alembic:/app/alembic
+      - ./chat_frontend/dist:/app/chat_frontend/dist
       # Host-mode projects live at /srv/projects/<name> on the host
       # (typically symlinked to /home/web/vhosts/<name>/htdocs/live).
-      # Mount RW so Read/Edit/Write tools can touch the real source.
       - /srv/projects:/srv/projects:rw
-      # /srv/projects/<name> is typically a symlink to /home/web/vhosts/<name>/htdocs/live —
-      # mount the symlink target too so the link resolves inside the container.
       - /home/web/vhosts:/home/web/vhosts:rw
     environment:
       - LOG_LEVEL=INFO
@@ -67,6 +74,9 @@ services:
       - activity_logs:/app/logs
       - /var/run/docker.sock:/var/run/docker.sock
       - ./auth.json:/app/auth.json:ro
+      # Bind-mount source + alembic so Python edits ship via restart, not rebuild.
+      - ./src:/app/src
+      - ./alembic:/app/alembic
       # Host-mode projects — see api.volumes for context.
       - /srv/projects:/srv/projects:rw
       # /srv/projects/<name> is typically a symlink to /home/web/vhosts/<name>/htdocs/live —
