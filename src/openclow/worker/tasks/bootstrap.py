@@ -1099,6 +1099,10 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
 
     Uses ChecklistReporter for UX and Claude Agent for smart setup.
     The LLM reads the project, plans steps, executes them, fixes errors.
+
+    For mode="host" projects, dispatches to `_bootstrap_project_host` which
+    works against an already-on-disk directory on the VPS host instead of
+    spinning up Docker containers.
     """
     chat = await factory.get_chat_by_type(chat_provider_type)
 
@@ -1109,6 +1113,11 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
     if not project:
         await chat.send_error(chat_id, message_id, "Project not found")
         return
+
+    if (getattr(project, "mode", "docker") or "docker") == "host":
+        return await _bootstrap_project_host(
+            ctx, project, chat, chat_id, message_id,
+        )
 
     from openclow.services.project_lock import acquire_project_lock, get_lock_holder
     lock = await acquire_project_lock(project_id, task_id=f"bootstrap-{project.name}", wait=5)
@@ -1504,6 +1513,361 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
                     ActionButton("🔗 Unlink", f"project_unlink:{project.id}"),
                     ActionButton("🗑 Remove", f"project_remove:{project.id}", style="danger"),
                 ]),
+                ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+            ]))
+        except Exception:
+            pass
+    finally:
+        if lock:
+            await lock.release()
+        from openclow.services.audit_service import flush
+        await flush()
+        await chat.close()
+
+
+# ===========================================================================
+# Host-mode bootstrap: mode="host" projects (already-running app on VPS host)
+# ===========================================================================
+
+HOST_MASTER_BOOTSTRAP_PROMPT = """You are a senior DevOps engineer bringing up a project on a VPS host.
+
+PROJECT: {project_name}
+TECH STACK: {tech_stack}
+PROJECT DIR: {project_dir}
+INSTALL GUIDE: {install_guide_path}
+START COMMAND: {start_command}
+APP PORT: {app_port}
+HEALTH URL: {health_url}
+PROCESS MANAGER: {process_manager}
+
+INSTALL GUIDE CONTENTS (first 4KB):
+---
+{install_guide_body}
+---
+
+MISSION — execute the steps below IN ORDER. Stream narration with STATUS:, DIAGNOSIS:,
+ACTION: and STEP_DONE: N <summary> lines so the user can follow what you're doing.
+
+RULES:
+- MCP-first: always attempt with the host_* tools before reasoning alone. Available host
+  tools: host_cd, host_git_pull, host_read_install_guide, host_run_command (allowlisted
+  shell), host_check_port, host_curl, host_process_status, host_tail_log, host_start_app,
+  host_stop_app, host_service_status.
+- Work INSIDE the project dir. Every host_run_command call takes project_dir as its cwd.
+- Read the install guide carefully and follow the commands it specifies — do not invent
+  a different install path unless the guide's commands fail.
+- Narrate before AND after each tool call. Before: one sentence on what you're about to
+  do. After: 2-3 sentences on what actually happened.
+- NEVER GIVE UP. If a command fails, read the output, form a concrete hypothesis, try a
+  DIFFERENT approach. "The tool kept failing" is not a reason — understand WHY and fix
+  THAT first. Document at least three concretely-different attempts before marking
+  STEP_FAIL.
+
+STEPS:
+
+STEP 1 — Sync code
+  host_git_pull("{project_dir}")
+  STEP_DONE: 1 <short git log line>
+
+STEP 2 — Read the install guide
+  host_read_install_guide("{project_dir}")
+  STEP_DONE: 2 <guide summary in ~20 words>
+
+STEP 3 — Run setup commands (install deps, migrate, etc.)
+  Use host_run_command for each command from the guide in order.
+  If a command fails, diagnose (missing binary? wrong dir? permissions?) and try a
+  different approach.
+  STEP_DONE: 3 <what you installed / configured>
+
+STEP 4 — Ensure the app is running
+  host_process_status("{project_name}") — see if it's already up.
+  If not: host_start_app("{project_dir}", "{start_command}")
+  STEP_DONE: 4 <PID + what you started>
+
+STEP 5 — Health check
+  host_curl("{health_url}") — expect 2xx/3xx.
+  If failed: host_tail_log (check .openclow-start.log and any app log), diagnose, fix,
+  restart via host_stop_app + host_start_app, re-verify.
+  STEP_DONE: 5 HTTP <code>
+
+STEP 6 — Done
+  Output the marker: BOOTSTRAP_COMPLETE
+
+If you cannot get past a step after three concrete attempts, output:
+  BOOTSTRAP_FAILED: <step number> — <exact reason + what each attempt returned>
+"""
+
+
+async def _bootstrap_project_host(
+    ctx: dict, project, chat, chat_id: str, message_id: str,
+):
+    """Host-mode bootstrap. Uses host_* MCP tools instead of Docker compose.
+    Tunnel still runs via tunnel_service (targets http://host.docker.internal:PORT
+    from inside the worker container — the same address works both in the local
+    simulation and on a production VPS where docker-compose adds the
+    host-gateway extra_host)."""
+    import asyncio
+    import os
+
+    from openclow.services.checklist_reporter import ChecklistReporter
+    from openclow.services.host_guard import run_host
+    from openclow.services.project_lock import acquire_project_lock, get_lock_holder
+
+    project_id = project.id
+    lock = await acquire_project_lock(project_id, task_id=f"bootstrap-{project.name}", wait=5)
+    if lock is None:
+        holder = await get_lock_holder(project_id)
+        await chat.edit_message(
+            chat_id, message_id,
+            f"Cannot bootstrap — project is locked by task {holder}.",
+        )
+        await chat.close()
+        return
+
+    await _set_project_status(project_id, "bootstrapping")
+
+    if not project.project_dir:
+        await chat.edit_message(chat_id, message_id,
+                                f"Project {project.name} has no project_dir set.")
+        await _set_project_status(project_id, "failed")
+        if lock:
+            await lock.release()
+        return
+
+    if not os.path.isdir(project.project_dir):
+        await chat.edit_message(chat_id, message_id,
+                                f"Project dir {project.project_dir} does not exist on the host.")
+        await _set_project_status(project_id, "failed")
+        if lock:
+            await lock.release()
+        return
+
+    if not message_id or message_id == "0":
+        message_id = await chat.send_message(chat_id, f"Setting up {project.name}...")
+        message_id = str(message_id)
+
+    checklist = ChecklistReporter(
+        chat, chat_id, message_id,
+        title=f"Setting up {project.name} (host mode)",
+        subtitle=project.tech_stack or "",
+    )
+    HOST_STEPS = [
+        "Sync code",
+        "Read install guide",
+        "Install dependencies",
+        "Start app",
+        "Health check",
+        "Create public URL",
+    ]
+    checklist.set_steps(HOST_STEPS)
+    await checklist._force_render()
+    await checklist.start()
+
+    tunnel_url = ""
+    master_success = False
+
+    try:
+        from claude_agent_sdk import query, ClaudeAgentOptions
+        from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
+        from openclow.providers.llm.claude import _mcp_host
+
+        # Load install guide contents for the prompt
+        install_body = ""
+        if project.install_guide_path:
+            guide_full = os.path.join(project.project_dir, project.install_guide_path)
+            if os.path.isfile(guide_full):
+                try:
+                    with open(guide_full, encoding="utf-8", errors="replace") as f:
+                        install_body = f.read(4096)
+                except Exception:
+                    install_body = ""
+
+        health_url = project.health_url or (
+            f"http://localhost:{project.app_port}/" if project.app_port else ""
+        )
+
+        prompt = HOST_MASTER_BOOTSTRAP_PROMPT.format(
+            project_name=project.name,
+            tech_stack=project.tech_stack or "unknown",
+            project_dir=project.project_dir,
+            install_guide_path=project.install_guide_path or "(none)",
+            start_command=project.start_command or "(not set — infer from the install guide)",
+            app_port=project.app_port or "(not set)",
+            health_url=health_url or "(not set)",
+            process_manager=project.process_manager or "manual",
+            install_guide_body=install_body or "(install guide not found)",
+        )
+
+        # Optional Redis stream channel for tool-output streaming to the web UI.
+        env = dict(os.environ)
+        if chat_id.startswith("web:"):
+            _parts = chat_id.split(":")
+            if len(_parts) == 3:
+                env["HOST_STREAM_CHANNEL"] = f"wc:{_parts[1]}:{_parts[2]}"
+
+        mcp_host_def = _mcp_host()
+        mcp_host_def["env"] = env  # propagate HOST_STREAM_CHANNEL to the MCP subprocess
+
+        options = ClaudeAgentOptions(
+            cwd=project.project_dir,
+            system_prompt=(
+                "You are a Senior DevOps Engineer and AI Chat Support Engineer. "
+                "Use the host_* MCP tools to install and run an already-on-disk project. "
+                "Stream narration before and after every tool call. Never give up."
+            ),
+            model="claude-sonnet-4-6",
+            allowed_tools=[
+                "Read", "Glob", "Grep",
+                "mcp__host__host_cd",
+                "mcp__host__host_git_pull",
+                "mcp__host__host_read_install_guide",
+                "mcp__host__host_run_command",
+                "mcp__host__host_check_port",
+                "mcp__host__host_curl",
+                "mcp__host__host_process_status",
+                "mcp__host__host_tail_log",
+                "mcp__host__host_start_app",
+                "mcp__host__host_stop_app",
+                "mcp__host__host_service_status",
+            ],
+            mcp_servers={"host": mcp_host_def},
+            permission_mode="bypassPermissions",
+            max_turns=40,
+        )
+
+        await checklist.start_step(0)
+
+        full_output = ""
+        last_step = -1
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        full_output += block.text
+                        # Advance checklist on STEP_DONE: N markers
+                        for m in re.finditer(r"STEP_DONE:\s*(\d+)\s*(.*)", block.text):
+                            n = int(m.group(1))
+                            detail = m.group(2).strip()[:60]
+                            if 1 <= n <= 5 and n - 1 > last_step:
+                                # Fill in any skipped steps as completed too
+                                for i in range(last_step + 1, n):
+                                    if checklist.steps[i]["status"] != "done":
+                                        await checklist.complete_step(i, "ok")
+                                await checklist.complete_step(n - 1, detail or "ok")
+                                last_step = n - 1
+                                if n < 5:
+                                    await checklist.start_step(n)
+                    elif isinstance(block, ToolUseBlock):
+                        try:
+                            from openclow.worker.tasks._agent_base import describe_tool
+                            desc = describe_tool(block)
+                            running_idx = next(
+                                (i for i, s in enumerate(checklist.steps)
+                                 if s["status"] == "running"),
+                                last_step + 1,
+                            )
+                            await checklist.update_step(
+                                max(0, min(running_idx, 4)), desc[:80],
+                            )
+                        except Exception:
+                            pass
+
+        if "BOOTSTRAP_COMPLETE" in full_output:
+            master_success = True
+            for i in range(5):
+                if checklist.steps[i]["status"] != "done":
+                    await checklist.complete_step(i, "completed")
+        elif "BOOTSTRAP_FAILED" in full_output:
+            # find running and mark as failed with extracted reason
+            reason_m = re.search(r"BOOTSTRAP_FAILED:\s*\d+\s*[—-]\s*(.+)", full_output)
+            reason = (reason_m.group(1) if reason_m else "agent reported failure").strip()[:150]
+            for i in range(5):
+                if checklist.steps[i]["status"] == "running":
+                    await checklist.fail_step(i, reason[:40])
+            checklist._footer = f"❌ {reason}"
+        else:
+            # Verify by curl regardless — agent may have stopped emitting markers
+            if health_url:
+                rc, out = await run_host(
+                    f"curl -sS -o /dev/null -w '%{{http_code}}' --max-time 5 {health_url}",
+                    cwd=project.project_dir, actor="bootstrap", timeout=8,
+                    project_name=project.name, project_id=project.id,
+                )
+                if rc == 0 and out.strip() and out.strip()[0] in "23":
+                    master_success = True
+                    for i in range(5):
+                        if checklist.steps[i]["status"] != "done":
+                            await checklist.complete_step(i, "verified running")
+
+        if not master_success:
+            await _set_project_status(project_id, "failed")
+            from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+            await checklist.stop()
+            await checklist._force_render(keyboard=ActionKeyboard(rows=[
+                ActionRow([ActionButton("🔄 Retry", f"project_bootstrap:{project.id}")]),
+                ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+            ]))
+            log.warning("bootstrap.host_failed", project=project.name)
+            return
+
+        # ── Step 6 (index 5): public URL ──
+        # If the project has its own domain (nginx + owned domain on the VPS),
+        # skip cloudflared entirely — just return the configured public_url.
+        # Otherwise fall back to spinning up a cloudflared tunnel.
+        await checklist.start_step(5)
+        tunnel_enabled = getattr(project, "tunnel_enabled", True)
+        configured_url = getattr(project, "public_url", None)
+        if configured_url and not tunnel_enabled:
+            tunnel_url = configured_url
+            await checklist.complete_step(5, f"domain: {configured_url[:48]}")
+        elif project.app_port:
+            tunnel_target = f"http://host.docker.internal:{project.app_port}"
+            try:
+                from openclow.services.tunnel_service import start_tunnel, stop_tunnel, verify_tunnel_url
+                url = await start_tunnel(project.name, tunnel_target)
+                if url:
+                    if not await verify_tunnel_url(url):
+                        await stop_tunnel(project.name)
+                        await asyncio.sleep(3)
+                        url = await start_tunnel(project.name, tunnel_target)
+                if url:
+                    tunnel_url = url
+                    await checklist.complete_step(5, url[:50])
+                else:
+                    await checklist.fail_step(5, "tunnel failed")
+            except Exception as e:
+                await checklist.fail_step(5, str(e)[:40])
+        else:
+            await checklist.fail_step(5, "no app_port set")
+
+        await _set_project_status(project_id, "active")
+
+        checklist._footer = "🚀 Host-mode project ready!"
+        if tunnel_url:
+            checklist._footer += f"\n🌐 {tunnel_url}"
+
+        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow, open_app_btns
+        rows = [
+            ActionRow(open_app_btns(project.id, tunnel_url=tunnel_url)),
+            ActionRow([
+                ActionButton("🚀 New Task", "menu:task"),
+                ActionButton("💚 Health", f"health:{project.id}"),
+            ]),
+        ]
+        await checklist.stop()
+        await checklist._force_render(keyboard=ActionKeyboard(rows=rows))
+        log.info("bootstrap.host_complete", project=project.name, tunnel=tunnel_url)
+
+    except (Exception, asyncio.CancelledError, TimeoutError) as e:
+        await _set_project_status(project_id, "failed")
+        await checklist.stop()
+        error_msg = "Cancelled" if isinstance(e, (asyncio.CancelledError, TimeoutError)) else str(e)[:150]
+        checklist._footer = f"❌ {error_msg}"
+        log.error("bootstrap.host_failed", project=project.name, error=error_msg)
+        try:
+            from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+            await checklist._force_render(keyboard=ActionKeyboard(rows=[
+                ActionRow([ActionButton("🔄 Retry", f"project_bootstrap:{project.id}")]),
                 ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
             ]))
         except Exception:

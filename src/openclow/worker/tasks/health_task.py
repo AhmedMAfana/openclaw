@@ -618,6 +618,9 @@ async def check_project_health(ctx: dict, project_id: int, chat_id: str, message
             await chat.edit_message(chat_id, message_id, "Project not found.")
             return
 
+        if (getattr(project, "mode", "docker") or "docker") == "host":
+            return await _check_project_health_host(project, chat, chat_id, message_id)
+
         from openclow.settings import settings
         from openclow.services.checklist_reporter import ChecklistReporter
         from openclow.services.tunnel_service import get_tunnel_url, check_tunnel_health, ensure_tunnel
@@ -815,3 +818,133 @@ async def stop_tunnel_task(ctx: dict, project_id: int, chat_id: str, message_id:
         from openclow.providers.actions import project_nav_keyboard
         await _notify(chat, chat_id, message_id, f"❌ Failed to stop tunnel: {str(e)[:200]}",
                       keyboard=project_nav_keyboard(project_id))
+
+
+# ---------------------------------------------------------------------------
+# Host-mode health check (mode="host" projects)
+# ---------------------------------------------------------------------------
+
+
+async def _check_project_health_host(project, chat, chat_id: str, message_id: str):
+    """Host-mode health check: no docker-compose, no container inspection.
+    Just: process status → HTTP curl → tunnel refresh. Self-heals by calling
+    host_start_app if the process isn't running."""
+    from openclow.services.checklist_reporter import ChecklistReporter
+    from openclow.services.host_guard import run_host
+    from openclow.services.tunnel_service import get_tunnel_url, ensure_tunnel
+    from openclow.providers.actions import (
+        ActionButton, ActionKeyboard, ActionRow, project_nav_keyboard,
+    )
+
+    checklist = ChecklistReporter(
+        chat, chat_id, message_id,
+        title=f"Opening {project.name} (host mode)",
+    )
+    checklist.set_steps(["Check process", "Verify HTTP", "Connect tunnel"])
+    await checklist._force_render()
+    await checklist.start()
+
+    try:
+        await checklist.start_step(0)
+        if project.project_dir:
+            rc, out = await run_host(
+                f"ps -eo pid,cmd | grep -F {project.name!r} | grep -v grep",
+                cwd=project.project_dir, actor="health", timeout=5,
+                project_name=project.name, project_id=project.id,
+            )
+            process_running = rc == 0 and bool(out.strip())
+        else:
+            process_running = False
+
+        if not process_running and project.project_dir and project.start_command:
+            await checklist.update_step(0, "app down — restarting")
+            log_path = f"{project.project_dir}/.openclow-start.log"
+            rc, _ = await run_host(
+                f"nohup setsid sh -c {project.start_command!r} > {log_path} 2>&1 < /dev/null &",
+                cwd=project.project_dir, actor="health", timeout=10,
+                project_name=project.name, project_id=project.id,
+            )
+            import asyncio as _a
+            await _a.sleep(3)
+        await checklist.complete_step(
+            0, "running" if process_running else "restarted",
+        )
+
+        await checklist.start_step(1)
+        health_url = project.health_url or (
+            f"http://localhost:{project.app_port}/" if project.app_port else ""
+        )
+        http_ok = False
+        http_code = "000"
+        if health_url:
+            rc, out = await run_host(
+                f"curl -sS -o /dev/null -w '%{{http_code}}' --max-time 5 {health_url}",
+                cwd=project.project_dir or "/tmp", actor="health", timeout=8,
+                project_name=project.name, project_id=project.id,
+            )
+            http_code = (out.strip() or "000")[:3]
+            http_ok = rc == 0 and http_code[0] in "23"
+        if http_ok:
+            await checklist.complete_step(1, f"HTTP {http_code}")
+        else:
+            await checklist.fail_step(1, f"HTTP {http_code}")
+
+        await checklist.start_step(2)
+        tunnel_enabled = getattr(project, "tunnel_enabled", True)
+        configured_url = getattr(project, "public_url", None)
+        tunnel_url: str | None = None
+
+        if configured_url and not tunnel_enabled:
+            # nginx + owned domain — skip cloudflared entirely
+            tunnel_url = configured_url
+            await checklist.complete_step(2, f"domain: {configured_url[:48]}")
+        else:
+            tunnel_url = await get_tunnel_url(project.name) if http_ok else None
+            if http_ok and not tunnel_url and project.app_port:
+                try:
+                    import asyncio as _a
+                    tunnel_url = await _a.wait_for(
+                        ensure_tunnel(project.name,
+                                      f"http://host.docker.internal:{project.app_port}"),
+                        timeout=30,
+                    )
+                except Exception as e:
+                    log.warning("health.host_tunnel_failed", error=str(e))
+
+            if tunnel_url:
+                await checklist.complete_step(2, tunnel_url)
+            elif not http_ok:
+                await checklist.fail_step(2, "skipped — app down")
+            else:
+                await checklist.fail_step(2, "tunnel failed")
+
+        await checklist.stop()
+
+        if tunnel_url:
+            kb = ActionKeyboard(rows=[
+                ActionRow([ActionButton("🌐 Open in Browser", "open_browser",
+                                        url=tunnel_url, style="primary")]),
+                ActionRow([
+                    ActionButton("🔄 Refresh", f"health_ref:{project.id}"),
+                    ActionButton("◀️ Menu", "menu:main"),
+                ]),
+            ])
+        else:
+            kb = ActionKeyboard(rows=[
+                ActionRow([ActionButton("🔄 Retry", f"health_ref:{project.id}",
+                                        style="primary")]),
+                ActionRow([ActionButton("◀️ Menu", "menu:main")]),
+            ])
+        await checklist._force_render(keyboard=kb)
+
+    except asyncio.CancelledError:
+        await checklist.stop()
+        raise
+    except Exception as e:
+        log.error("health.host_failed", error=str(e), project=project.name)
+        await checklist.stop()
+        from openclow.providers.actions import ActionButton, project_nav_keyboard
+        kb = project_nav_keyboard(project.id,
+                                  ActionButton("🔄 Retry", f"health_ref:{project.id}",
+                                               style="primary"))
+        await _notify(chat, chat_id, message_id, f"❌ {str(e)[:120]}", keyboard=kb)

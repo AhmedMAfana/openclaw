@@ -1,0 +1,6 @@
+logs/
+env/
+registry.json
+# Developer-local sample apps — populated by `make sim-install`, never checked in.
+# The skeleton of each sample app lives in a separate repo that the Makefile clones.
+sample-apps/

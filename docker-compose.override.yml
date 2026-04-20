@@ -24,6 +24,10 @@ services:
     volumes:
       - ./src:/app/src:cached
       - ./workspaces_dev:/workspaces
+      - ./dev-sandbox:/app/dev-sandbox:cached
+      - ./alembic:/app/alembic:cached
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - LOG_LEVEL=DEBUG
 
@@ -38,7 +42,10 @@ services:
     volumes:
       - ./src:/app/src:cached
       - ./workspaces_dev:/workspaces
+      - ./dev-sandbox:/app/dev-sandbox:cached
       - claude_auth:/home/openclow/.claude
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - LOG_LEVEL=DEBUG
       - DOCKER_BIN=/usr/bin/docker

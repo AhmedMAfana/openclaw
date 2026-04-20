@@ -346,6 +346,24 @@ export default function App() {
               } catch { return m; }
             })
           );
+        } else if (data.type === "tool_output") {
+          // Stream stdout/stderr from a long-running host_run_command into the
+          // same progress-card stream_buffer so the user sees live output.
+          const toolData = data as unknown as { chunk?: string; tool?: string; final?: boolean };
+          const chunk = toolData.chunk ?? "";
+          if (chunk) {
+            setMessages((prev) =>
+              prev.map((m) => {
+                if (!matchesMsg(m.id)) return m;
+                if (!m.content.startsWith("__PROGRESS_CARD__")) return m;
+                try {
+                  const card = JSON.parse(m.content.slice("__PROGRESS_CARD__".length));
+                  const updated = { ...card, stream_buffer: (card.stream_buffer ?? "") + chunk };
+                  return { ...m, content: `__PROGRESS_CARD__${JSON.stringify(updated)}` };
+                } catch { return m; }
+              })
+            );
+          }
         } else if (data.type === "progress_card" && data.card) {
           // Inject session_id so WorkerProgressCard can render a Stop button.
           // Preserve stream_buffer accumulated by agent_token events.

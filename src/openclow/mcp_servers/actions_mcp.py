@@ -352,6 +352,73 @@ async def system_status() -> str:
     return "\n".join(checks)
 
 
+async def _project_health_host(proj) -> str:
+    """Host-mode health check. No Docker — directly curls the project's
+    health_url (usually http://host.docker.internal:<port>/) and looks for a
+    matching process name on the running ps output.
+
+    Internal helper — not exposed as an MCP tool (no @mcp.tool decorator)."""
+    import httpx
+
+    # HTTP probe against the host-mode app
+    health_url = proj.health_url or (
+        f"http://host.docker.internal:{proj.app_port}/" if proj.app_port else ""
+    )
+    http_status = "skipped (no health_url)"
+    http_ok = False
+    if health_url:
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=5) as http:
+                resp = await http.get(health_url)
+                http_ok = 200 <= resp.status_code < 500
+                http_status = f"HTTP {resp.status_code} ({'live' if http_ok else 'bad'})"
+        except httpx.TimeoutException:
+            http_status = "timeout"
+        except Exception as e:
+            http_status = f"unreachable: {str(e)[:60]}"
+
+    # Look for the process — best-effort, host ps table is only visible inside
+    # the api container if mounted; on macOS the container can't see host procs.
+    # So this is diagnostic only.
+    process_line = "not visible from this container"
+    try:
+        import asyncio as _asyncio
+        proc = await _asyncio.create_subprocess_shell(
+            f"ps -eo pid,cmd 2>/dev/null | grep -F {proj.name!r} | grep -v grep | head -1",
+            stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        if out.strip():
+            process_line = out.decode().strip()[:200]
+    except Exception:
+        pass
+
+    # Public URL: if the project has a configured domain (nginx + owned domain),
+    # use it directly; otherwise fall back to the cloudflared tunnel URL.
+    tunnel_enabled = getattr(proj, "tunnel_enabled", True)
+    configured_url = getattr(proj, "public_url", None)
+    public_line: str
+    if configured_url and not tunnel_enabled:
+        public_line = f"domain: {configured_url}"
+    else:
+        from openclow.services.tunnel_service import get_tunnel_url
+        stored_url = await get_tunnel_url(proj.name)
+        public_line = f"tunnel: {stored_url or '(none configured)'}"
+
+    lines = [
+        f"status: {proj.status} (mode=host)",
+        f"project_dir: {proj.project_dir or '(not set)'}",
+        f"health_url: {health_url or '(not set)'}",
+        f"http: {http_status}",
+        f"process: {process_line}",
+        public_line,
+        f"stack: {proj.tech_stack or 'unknown'}",
+    ]
+    if http_ok:
+        lines.append("VERIFIED LIVE — app responding on health_url")
+    return "\n".join(lines)
+
+
 @mcp.tool()
 async def project_health(project_name: str, auto_fix: bool = True) -> str:
     """Health check for a project: DB status, live tunnel verify, container state.
@@ -379,6 +446,10 @@ async def project_health(project_name: str, auto_fix: bool = True) -> str:
 
     if not proj:
         return f"Project '{project_name}' not found in DB."
+
+    # ── Host-mode projects: no Docker, no containers, just process + HTTP ──
+    if (getattr(proj, "mode", "docker") or "docker") == "host":
+        return await _project_health_host(proj)
 
     # Tunnel URL is stored in PlatformConfig, not on Project model
     from openclow.services.tunnel_service import get_tunnel_url, start_tunnel

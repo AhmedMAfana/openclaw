@@ -36,6 +36,90 @@ def _mcp_docker() -> dict:
     return {"command": "python", "args": ["-m", "openclow.mcp_servers.docker_mcp"]}
 
 
+def _mcp_host() -> dict:
+    return {"command": "python", "args": ["-m", "openclow.mcp_servers.host_mcp"]}
+
+
+def _coder_env_spec(
+    mode: str,
+    workspace_path: str,
+    project_dir: str | None,
+    project_name: str,
+    app_container: str,
+    app_port: int,
+) -> tuple[list[str], dict, str]:
+    """Return (allowed_tools, mcp_servers, env_hint) for the coder/fix agents,
+    switching between Docker- and host-mode project runtimes. `env_hint` is a
+    short text block that the system prompt appends to tell the model which
+    environment it is operating in."""
+    common_tools = [
+        "Read", "Write", "Edit", "Glob", "Grep",
+        "mcp__git__git_status",
+        "mcp__git__git_diff_staged",
+        "mcp__git__git_diff_unstaged",
+        "mcp__git__git_add",
+        "mcp__git__git_log",
+    ]
+    if mode == "host":
+        tools = common_tools + [
+            "mcp__host__host_cd",
+            "mcp__host__host_git_pull",
+            "mcp__host__host_read_install_guide",
+            "mcp__host__host_run_command",
+            "mcp__host__host_check_port",
+            "mcp__host__host_curl",
+            "mcp__host__host_process_status",
+            "mcp__host__host_tail_log",
+            "mcp__host__host_start_app",
+            "mcp__host__host_stop_app",
+            "mcp__host__host_service_status",
+        ]
+        mcp_servers = {
+            "git": _mcp_git(workspace_path),
+            "host": _mcp_host(),
+        }
+        env_hint = (
+            f"HOST ENVIRONMENT (mode=host):\n"
+            f"- Project lives at: {project_dir or '(not set)'}\n"
+            f"- App port: {app_port}\n"
+            f"- Run shell commands with mcp__host__host_run_command(project_dir, cmd)\n"
+            f"- Check HTTP with mcp__host__host_curl(url)\n"
+            f"- Tail logs with mcp__host__host_tail_log(path)\n"
+            f"- Never use docker_exec — there is no container for this app.\n"
+        )
+        return tools, mcp_servers, env_hint
+
+    # Docker mode (default)
+    app_container_full = f"openclow-{project_name}-{app_container}-1"
+    tools = common_tools + [
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_take_screenshot",
+        "mcp__playwright__browser_click",
+        "mcp__playwright__browser_fill_form",
+        "mcp__docker__list_containers",
+        "mcp__docker__container_logs",
+        "mcp__docker__docker_exec",
+        "mcp__docker__container_health",
+        "mcp__docker__restart_container",
+        "mcp__docker__tunnel_start",
+        "mcp__docker__tunnel_stop",
+        "mcp__docker__tunnel_get_url",
+    ]
+    mcp_servers = {
+        "git": _mcp_git(workspace_path),
+        "docker": _mcp_docker(),
+    }
+    env_hint = (
+        f"DOCKER ENVIRONMENT:\n"
+        f"- App container: {app_container} (docker_exec via MCP)\n"
+        f"- Full container: {app_container_full}\n"
+        f"- Project compose name: openclow-{project_name}\n"
+        f"- App port: {app_port}\n"
+    )
+    return tools, mcp_servers, env_hint
+
+
 def _mcp_actions() -> dict:
     return {"command": "python", "args": ["-m", "openclow.mcp_servers.actions_mcp"]}
 
@@ -335,14 +419,19 @@ class ClaudeProvider(LLMProvider):
         on_tool_use: Any | None = None,
         app_container_name: str | None = None,
         app_port: int | None = None,
+        mode: str = "docker",
+        project_dir: str | None = None,
     ) -> AsyncIterator[Any]:
         from claude_agent_sdk import query, ClaudeAgentOptions
 
-        # Project Docker info
+        # Project runtime info (Docker container OR host process)
         app_container = app_container_name or "app"
         app_port = app_port or 8000
 
         app_container_full = f"openclow-{project_name}-{app_container}-1" if app_container else ""
+        tools, mcp_servers, env_hint = _coder_env_spec(
+            mode, workspace_path, project_dir, project_name, app_container, app_port,
+        )
         system_prompt = CODER_SYSTEM_PROMPT.format(
             project_name=project_name,
             tech_stack=tech_stack or "Unknown",
@@ -352,42 +441,15 @@ class ClaudeProvider(LLMProvider):
             app_container=app_container,
             app_container_full=app_container_full,
             app_port=app_port,
-        )
+        ) + "\n\n" + env_hint
 
         # Coder: Opus for complex implementation, full MCP suite
         options = ClaudeAgentOptions(
-            cwd=workspace_path,
+            cwd=project_dir if mode == "host" and project_dir else workspace_path,
             system_prompt=system_prompt,
             model="claude-opus-4-6",
-            allowed_tools=[
-                "Read", "Write", "Edit", "Glob", "Grep",
-                # Git: safe wrapper that never crashes SDK
-                "mcp__git__git_status",
-                "mcp__git__git_diff_staged",
-                "mcp__git__git_diff_unstaged",
-                "mcp__git__git_add",
-                "mcp__git__git_log",
-                # Playwright: specific tools, not wildcard
-                "mcp__playwright__browser_navigate",
-                "mcp__playwright__browser_snapshot",
-                "mcp__playwright__browser_take_screenshot",
-                "mcp__playwright__browser_click",
-                "mcp__playwright__browser_fill_form",
-                # Docker: specific tools
-                "mcp__docker__list_containers",
-                "mcp__docker__container_logs",
-                "mcp__docker__docker_exec",
-                "mcp__docker__container_health",
-                "mcp__docker__restart_container",
-                # Tunnel: manage public URLs
-                "mcp__docker__tunnel_start",
-                "mcp__docker__tunnel_stop",
-                "mcp__docker__tunnel_get_url",
-            ],
-            mcp_servers={
-                "git": _mcp_git(workspace_path),
-                "docker": _mcp_docker(),
-            },
+            allowed_tools=tools,
+            mcp_servers=mcp_servers,
             permission_mode="bypassPermissions",
             max_turns=max_turns or self.coder_max_turns,
             setting_sources=["project"],
@@ -414,45 +476,32 @@ class ClaudeProvider(LLMProvider):
         max_turns: int,
         app_container_name: str | None = None,
         app_port: int | None = None,
+        mode: str = "docker",
+        project_dir: str | None = None,
     ) -> AsyncIterator[Any]:
         """Fix reviewer issues. Minimal tools — no Playwright/Docker/GitHub needed."""
         from claude_agent_sdk import query, ClaudeAgentOptions
 
-        app_container=app_container_name or "app"
-        app_container_full = f"openclow-{project_name}-{app_container}-1" if app_container else ""
-        # Fix agent: Sonnet is fast enough, minimal tools, fewer turns
+        app_container = app_container_name or "app"
+        app_port = app_port or 8000
+        tools, mcp_servers, env_hint = _coder_env_spec(
+            mode, workspace_path, project_dir, project_name, app_container, app_port,
+        )
+        # Fix agent: Sonnet is fast enough, fewer turns
         options = ClaudeAgentOptions(
-            cwd=workspace_path,
+            cwd=project_dir if mode == "host" and project_dir else workspace_path,
             system_prompt=(
                 f'You are fixing code review issues in "{project_name}" ({tech_stack}).\n'
                 f"{description or ''}\n\n"
                 f"Project conventions:\n{agent_system_prompt or ''}\n\n"
-                f"Docker environment:\n"
-                f"- App container: {app_container} (docker_exec via MCP)\n"
-                f"- Full container name: {app_container_full}\n"
-                f"- Project compose name: openclow-{project_name}\n\n"
+                f"{env_hint}\n"
                 f"Fix each issue, run tests, stage changes with git add. Do NOT commit."
             ),
-            model="claude-sonnet-4-6",  # Fixes are straightforward — Sonnet is faster
-            allowed_tools=[
-                "Read", "Write", "Edit", "Glob", "Grep",
-                # Git: safe wrapper
-                "mcp__git__git_status",
-                "mcp__git__git_diff_staged",
-                "mcp__git__git_add",
-                # Docker: run commands in containers
-                "mcp__docker__list_containers",
-                "mcp__docker__container_logs",
-                "mcp__docker__docker_exec",
-                "mcp__docker__container_health",
-                "mcp__docker__restart_container",
-            ],
-            mcp_servers={
-                "git": _mcp_git(workspace_path),
-                "docker": _mcp_docker(),
-            },
+            model="claude-sonnet-4-6",
+            allowed_tools=tools,
+            mcp_servers=mcp_servers,
             permission_mode="bypassPermissions",
-            max_turns=max_turns or 10,  # Fixes should be quick — 10 turns max
+            max_turns=max_turns or 10,
             include_partial_messages=True,
         )
 

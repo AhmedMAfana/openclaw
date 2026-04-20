@@ -561,6 +561,43 @@ async def setup_status():
 
 
 # ---------------------------------------------------------------------------
+# Host-mode settings (where user apps live on the VPS host)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/host")
+async def get_host_settings():
+    """Return all host-mode settings: projects_base, mode_default, auto_clone."""
+    from openclow.services import config_service as _cs
+    return await _cs.get_all_host_settings()
+
+
+@router.put("/host")
+async def update_host_settings(body: dict):
+    """Update host-mode settings. Accepts any subset of:
+    projects_base (str), mode_default ("docker"|"host"), auto_clone (bool)."""
+    from openclow.services import config_service as _cs
+
+    allowed = {"projects_base", "mode_default", "auto_clone"}
+    bad = set(body) - allowed
+    if bad:
+        raise HTTPException(400, f"Unknown keys: {sorted(bad)}")
+
+    if "mode_default" in body and body["mode_default"] not in ("docker", "host"):
+        raise HTTPException(400, "mode_default must be 'docker' or 'host'")
+
+    if "projects_base" in body:
+        path = (body["projects_base"] or "").strip()
+        if not path or not path.startswith("/"):
+            raise HTTPException(400, "projects_base must be an absolute path")
+
+    for k, v in body.items():
+        await _cs.set_host_setting(k, v)
+
+    return {"status": "ok", **await _cs.get_all_host_settings()}
+
+
+# ---------------------------------------------------------------------------
 # Project CRUD
 # ---------------------------------------------------------------------------
 

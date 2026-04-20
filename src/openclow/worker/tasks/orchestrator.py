@@ -1462,6 +1462,8 @@ async def execute_plan(ctx: dict, task_id: str):
                     plan=plan_text,
                     app_container_name=task.project.app_container_name,
                     app_port=task.project.app_port,
+                    mode=getattr(task.project, "mode", "docker") or "docker",
+                    project_dir=getattr(task.project, "project_dir", None),
                 )
                 async for message in _agent_gen:
                     from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock, StreamEvent
@@ -1650,6 +1652,8 @@ async def execute_plan(ctx: dict, task_id: str):
                         max_turns=10,
                         app_container_name=task.project.app_container_name,
                         app_port=task.project.app_port,
+                        mode=getattr(task.project, "mode", "docker") or "docker",
+                        project_dir=getattr(task.project, "project_dir", None),
                     )
                     await _run_agent_with_streaming(
                         fix_gen, reporter, 3, _stream_to_web, _is_web,

@@ -140,10 +140,39 @@
       "Read(//dev/**)",
       "Bash(python -m py_compile src/openclow/worker/tasks/bootstrap.py src/openclow/worker/tasks/project_lifecycle.py src/openclow/worker/tasks/health_task.py)",
       "Bash(python -m py_compile src/openclow/mcp_servers/actions_mcp.py src/openclow/worker/tasks/orchestrator.py)",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "Bash(awk '{print $NF}')",
+      "Bash(git -C /Users/ahmedmoh/Desktop/projects/openclow status)",
+      "Bash(git -C /Users/ahmedmoh/Desktop/projects/openclow log --oneline -5)",
+      "Bash(git -C /Users/ahmedmoh/Desktop/projects/openclow add HOST_MODE_PLAN.md)",
+      "Bash(git -C /Users/ahmedmoh/Desktop/projects/openclow commit -m ' *)",
+      "Bash(git -C /Users/ahmedmoh/Desktop/projects/openclow push origin undocker)",
+      "Bash(python -m py_compile src/openclow/models/project.py src/openclow/services/config_service.py src/openclow/providers/llm/claude.py alembic/versions/009_host_mode.py)",
+      "Bash(python -m py_compile src/openclow/services/host_guard.py src/openclow/services/project_exec.py src/openclow/mcp_servers/host_mcp.py src/openclow/worker/tasks/_agent_base.py)",
+      "Bash(python -m py_compile src/openclow/agents/onboarding.py src/openclow/worker/tasks/onboarding.py)",
+      "Bash(python -m py_compile src/openclow/providers/llm/claude.py src/openclow/api/routes/assistant.py src/openclow/worker/tasks/orchestrator.py)",
+      "Bash(python -m py_compile dev-sandbox/local_vps.py dev-sandbox/seed_sim_projects.py dev-sandbox/sample-apps/sim-fastapi/app/main.py)",
+      "Bash(python -m py_compile src/openclow/models/project.py src/openclow/services/config_service.py src/openclow/services/host_guard.py src/openclow/services/project_exec.py src/openclow/mcp_servers/host_mcp.py src/openclow/providers/llm/claude.py src/openclow/providers/chat/web/__init__.py src/openclow/agents/onboarding.py src/openclow/worker/tasks/_agent_base.py src/openclow/worker/tasks/onboarding.py src/openclow/worker/tasks/bootstrap.py src/openclow/worker/tasks/health_task.py src/openclow/worker/tasks/orchestrator.py src/openclow/api/routes/assistant.py src/openclow/api/routes/settings.py alembic/versions/009_host_mode.py)",
+      "Bash(npx --no-install tsc --noEmit)",
+      "Bash(npx --no-install tsc --noEmit -p tsconfig.app.json)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(make -f dev-sandbox/Makefile.sim sim-install)",
+      "Bash(make -f dev-sandbox/Makefile.sim sim-up)",
+      "Bash(rsync -a --exclude=node_modules --exclude=vendor --exclude=.git workspaces_dev/_cache/tagh-fre/ dev-sandbox/sample-apps/tagh-fre/)",
+      "Bash(sed -i.bak -e 's|^REDIS_HOST=.*|REDIS_HOST=127.0.0.1|' -e 's|^MEILISEARCH_HOST=.*|MEILISEARCH_HOST=http://127.0.0.1:7700|' -e 's|^APP_URL=.*|APP_URL=http://localhost:10200|' .env)",
+      "Bash(rm -f .env.bak)",
+      "Bash(mkdir -p storage/logs storage/framework/cache storage/framework/sessions storage/framework/views bootstrap/cache)",
+      "Bash(chmod -R 775 storage bootstrap/cache)",
+      "Bash(lsof -iTCP:10200 -sTCP:LISTEN -nP)",
+      "Bash(xargs -r kill)",
+      "Bash(echo \"PID=$!\" sleep 3 curl -sS -o - -w \"\\\\nHTTP=%{http_code}\\\\n\" --max-time 5 http://localhost:10200/)",
+      "Bash(python -m py_compile src/openclow/models/project.py src/openclow/api/schemas/settings.py src/openclow/api/routes/settings.py src/openclow/mcp_servers/actions_mcp.py src/openclow/worker/tasks/bootstrap.py src/openclow/worker/tasks/health_task.py alembic/versions/010_public_url.py)"
     ],
     "additionalDirectories": [
-      "/Users/ahmedmoh/Desktop/projects/openclow"
+      "/Users/ahmedmoh/Desktop/projects/openclow",
+      "/Users/ahmedmoh/Desktop/projects/openclow/dev-sandbox",
+      "/Users/ahmedmoh/Desktop/projects/openclow/dev-sandbox/sample-apps/tagh-fre/database",
+      "/Users/ahmedmoh/Library/Caches/ms-playwright/mcp-chrome-for-testing-1424b0d"
     ]
   },
   "hooks": {

@@ -65,6 +65,76 @@ class ProjectConfig:
     description: str
     setup_commands: str | None
     is_dockerized: bool
+    # Host-mode (mode="host") fields — all optional; stay None for Docker projects.
+    install_guide_path: str | None = None
+    start_command: str | None = None
+    stop_command: str | None = None
+    health_url: str | None = None
+    process_manager: str | None = None
+
+
+HOST_ONBOARDING_PROMPT = """Analyze this repository — it lives on the VPS host as an already-installed
+(and possibly already-running) app. There is no Docker wrapping it. The deploy team
+installs and starts it by following the project's own install guide.
+
+## What to Read
+
+1. Find the install guide — check in this order and STOP at the first match:
+   README.md, README.rst, INSTALL.md, SETUP.md, docs/INSTALL.md, CLAUDE.md
+   Record its relative path.
+
+2. Detect tech stack from files present:
+   - package.json → Node.js (Express / Next.js / Vue / React — check dependencies)
+   - composer.json → PHP (Laravel / Symfony)
+   - requirements.txt or pyproject.toml → Python (FastAPI / Django / Flask)
+   - go.mod → Go
+   - Gemfile → Ruby on Rails
+   List the primary language + framework (e.g. "Python/FastAPI", "PHP/Laravel").
+
+3. From the install guide, extract the EXACT shell commands a fresh deploy would run
+   to install dependencies (e.g. `pip install -r requirements.txt`,
+   `npm install && npm run build`, `composer install && php artisan migrate`).
+   Join them with semicolons in execution order.
+
+4. From the install guide, extract the start command the app uses to run in
+   production or long-running dev mode. Examples:
+   - "uvicorn app.main:app --host 0.0.0.0 --port 8000"
+   - "npm start" or "PORT=3000 npm start"
+   - "php artisan serve --host=0.0.0.0 --port=8000"
+   - "pm2 start ecosystem.config.js"
+   If the README says "run it with pm2", record it as a pm2 command.
+
+5. Find the PORT the app listens on. Look in the start command first,
+   then .env.example, then the README.
+
+6. If documented, record the stop command (e.g. "pm2 stop ecosystem").
+
+7. Classify the process manager based on the start command and any notes:
+   pm2 | systemd | supervisor | manual (manual = plain nohup/setsid or just `npm start`).
+
+8. Determine the health-check URL. Prefer an explicit health endpoint from the
+   README (e.g. /health, /healthz, /api/ping). Fallback: http://localhost:<PORT>/
+
+9. Read README's first substantive line as a one-sentence description.
+
+## Output Format
+
+Output ONLY this block — no text before or after:
+
+PROJECT_CONFIG_START
+PROJECT_NAME: <slug derived from the folder name — lowercase, dashes ok>
+TECH_STACK: <primary language/framework>
+INSTALL_GUIDE: <relative path to README/INSTALL>
+APP_PORT: <port number, or "none">
+DESCRIPTION: <one sentence>
+SETUP_COMMANDS: <semicolon-separated install commands, or "none">
+START_COMMAND: <the run command, or "none">
+STOP_COMMAND: <the stop command, or "none">
+PROCESS_MANAGER: <pm2|systemd|supervisor|manual>
+HEALTH_URL: <URL to hit for health, or "none">
+MODE: host
+PROJECT_CONFIG_END
+"""
 
 
 def parse_config(output: str) -> ProjectConfig | None:
@@ -84,15 +154,26 @@ def parse_config(output: str) -> ProjectConfig | None:
     port = fields.get("APP_PORT", "none")
     port_int = int(port) if port.isdigit() else None
 
+    def _clean(key: str) -> str | None:
+        v = fields.get(key)
+        if v is None or v.lower() in ("none", "", "n/a"):
+            return None
+        return v
+
     return ProjectConfig(
         name=fields.get("PROJECT_NAME", "unknown"),
         tech_stack=fields.get("TECH_STACK", ""),
-        docker_compose=fields.get("DOCKER_COMPOSE") if fields.get("DOCKER_COMPOSE") != "none" else None,
-        app_container=fields.get("APP_CONTAINER") if fields.get("APP_CONTAINER") != "none" else None,
+        docker_compose=_clean("DOCKER_COMPOSE"),
+        app_container=_clean("APP_CONTAINER"),
         app_port=port_int,
         description=fields.get("DESCRIPTION", ""),
-        setup_commands=fields.get("SETUP_COMMANDS") if fields.get("SETUP_COMMANDS") != "none" else None,
+        setup_commands=_clean("SETUP_COMMANDS"),
         is_dockerized=fields.get("IS_DOCKERIZED", "false").lower() == "true",
+        install_guide_path=_clean("INSTALL_GUIDE"),
+        start_command=_clean("START_COMMAND"),
+        stop_command=_clean("STOP_COMMAND"),
+        health_url=_clean("HEALTH_URL"),
+        process_manager=_clean("PROCESS_MANAGER"),
     )
 
 
@@ -272,4 +353,212 @@ async def analyze_repo(workspace_path: str, on_progress=None) -> ProjectConfig |
     if config:
         log.info("onboarding.success", name=config.name, tech=config.tech_stack,
                  container=config.app_container, port=config.app_port)
+    return config
+
+
+# ---------------------------------------------------------------------------
+# Host-mode onboarding (mode="host" — app already lives on the VPS host)
+# ---------------------------------------------------------------------------
+
+
+async def _fallback_analyze_host(project_dir: str) -> ProjectConfig | None:
+    """Direct file analysis for host-mode when the Claude agent isn't available."""
+    import asyncio
+    import json
+    import os
+    import re as _re
+
+    name = os.path.basename(project_dir.rstrip("/")) or "project"
+    # Prefer the git remote slug
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "remote", "get-url", "origin", cwd=project_dir,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        url = stdout.decode().strip()
+        if url:
+            slug = url.rstrip("/").split("/")[-1].replace(".git", "")
+            if slug:
+                name = slug
+    except Exception:
+        pass
+
+    tech: list[str] = []
+    description = ""
+    setup_commands = None
+    start_command = None
+    stop_command = None
+    process_manager = "manual"
+    app_port: int | None = None
+    install_guide_path = None
+
+    # install guide — first hit wins
+    guide_body = ""
+    for candidate in ["README.md", "README.rst", "README.txt",
+                      "INSTALL.md", "SETUP.md", "docs/INSTALL.md", "CLAUDE.md"]:
+        p = os.path.join(project_dir, candidate)
+        if os.path.isfile(p):
+            install_guide_path = candidate
+            try:
+                with open(p, encoding="utf-8", errors="replace") as f:
+                    guide_body = f.read(8192)
+            except Exception:
+                guide_body = ""
+            break
+
+    if guide_body:
+        for line in guide_body.splitlines()[:25]:
+            stripped = line.strip().lstrip("#").strip()
+            if stripped and len(stripped) > 10:
+                description = stripped[:200]
+                break
+
+    # tech stack
+    checks = {
+        "package.json": "Node.js",
+        "composer.json": "PHP/Laravel",
+        "requirements.txt": "Python",
+        "pyproject.toml": "Python",
+        "go.mod": "Go",
+        "Gemfile": "Ruby",
+        "Cargo.toml": "Rust",
+        "pom.xml": "Java",
+    }
+    for filename, stack in checks.items():
+        if os.path.exists(os.path.join(project_dir, filename)):
+            tech.append(stack)
+            if filename == "package.json":
+                try:
+                    with open(os.path.join(project_dir, filename)) as f:
+                        pkg = json.load(f)
+                    deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+                    for key in ["next", "nuxt", "vue", "react", "express", "fastify"]:
+                        if key in deps:
+                            tech.append(key.capitalize())
+                            break
+                    scripts = pkg.get("scripts") or {}
+                    if "start" in scripts:
+                        start_command = "npm start"
+                    setup_commands = "npm install" + (" && npm run build" if "build" in scripts else "")
+                except Exception:
+                    pass
+            elif filename == "composer.json":
+                try:
+                    with open(os.path.join(project_dir, filename)) as f:
+                        comp = json.load(f)
+                    if "laravel/framework" in comp.get("require", {}):
+                        tech.append("Laravel")
+                        start_command = "php artisan serve"
+                        setup_commands = "composer install"
+                        if os.path.exists(os.path.join(project_dir, ".env.example")):
+                            setup_commands += "; cp .env.example .env; php artisan key:generate; php artisan migrate --force"
+                except Exception:
+                    pass
+            elif filename == "requirements.txt" or filename == "pyproject.toml":
+                setup_commands = "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+                # best-effort start command for FastAPI/Django
+                if os.path.exists(os.path.join(project_dir, "app", "main.py")):
+                    start_command = ".venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000"
+                elif os.path.exists(os.path.join(project_dir, "manage.py")):
+                    start_command = ".venv/bin/python manage.py runserver 0.0.0.0:8000"
+
+    # port: scan guide body for `--port 1234` or `PORT=1234`
+    if guide_body:
+        m = _re.search(r"--port[=\s]+(\d{2,5})", guide_body)
+        if m:
+            app_port = int(m.group(1))
+        else:
+            m = _re.search(r"\bPORT\s*=\s*(\d{2,5})\b", guide_body)
+            if m:
+                app_port = int(m.group(1))
+
+    # process manager hint
+    if guide_body and "pm2" in guide_body.lower():
+        process_manager = "pm2"
+    elif guide_body and "systemctl" in guide_body.lower():
+        process_manager = "systemd"
+
+    if not tech:
+        tech = ["Unknown"]
+
+    health_url = f"http://localhost:{app_port}/" if app_port else None
+
+    log.info("onboarding.host_fallback_success", name=name, tech=", ".join(tech))
+    return ProjectConfig(
+        name=name,
+        tech_stack=", ".join(tech),
+        docker_compose=None,
+        app_container=None,
+        app_port=app_port,
+        description=description or f"{name} (host-mode app)",
+        setup_commands=setup_commands,
+        is_dockerized=False,
+        install_guide_path=install_guide_path,
+        start_command=start_command,
+        stop_command=stop_command,
+        health_url=health_url,
+        process_manager=process_manager,
+    )
+
+
+async def analyze_repo_host(project_dir: str, on_progress=None) -> ProjectConfig | None:
+    """Host-mode analyzer. Reads the already-on-disk project directory and
+    extracts install guide + start/stop commands + health URL. Falls back to
+    direct file analysis on agent failure."""
+    from claude_agent_sdk import query, ClaudeAgentOptions
+    from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
+
+    options = ClaudeAgentOptions(
+        cwd=project_dir,
+        system_prompt=(
+            "You are a senior DevOps engineer analyzing a host-mode project. "
+            "Only read files; never modify anything. Follow the install guide to "
+            "extract exact shell commands — do not paraphrase."
+        ),
+        model="claude-sonnet-4-6",
+        allowed_tools=["Read", "Glob", "Grep"],
+        permission_mode="bypassPermissions",
+        max_turns=8,
+    )
+
+    log.info("onboarding.host_started", project_dir=project_dir)
+    full_output = ""
+    try:
+        async for message in query(prompt=HOST_ONBOARDING_PROMPT, options=options):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        full_output += block.text
+                    elif isinstance(block, ToolUseBlock) and on_progress:
+                        tool = block.name if hasattr(block, "name") else ""
+                        if hasattr(block, "input") and isinstance(block.input, dict):
+                            target = block.input.get("file_path", block.input.get("pattern", ""))
+                            if target:
+                                short = str(target).split("/")[-1][:40]
+                                if "Glob" in tool:
+                                    await on_progress(f"Scanning: {short}")
+                                elif "Read" in tool:
+                                    await on_progress(f"Reading: {short}")
+                                elif "Grep" in tool:
+                                    await on_progress(f"Searching: {short}")
+    except Exception as e:
+        log.error("onboarding.host_agent_failed", error=str(e)[:300])
+        if on_progress:
+            await on_progress("Falling back to direct file analysis...")
+        return await _fallback_analyze_host(project_dir)
+
+    config = parse_config(full_output)
+    if config is None:
+        return await _fallback_analyze_host(project_dir)
+    # Host mode: always is_dockerized=False, and make sure install_guide_path set
+    config.is_dockerized = False
+    if not config.install_guide_path:
+        for candidate in ["README.md", "INSTALL.md", "SETUP.md", "CLAUDE.md"]:
+            import os as _os
+            if _os.path.isfile(_os.path.join(project_dir, candidate)):
+                config.install_guide_path = candidate
+                break
+    log.info("onboarding.host_success", name=config.name, tech=config.tech_stack,
+             start=config.start_command, port=config.app_port)
     return config

@@ -79,6 +79,35 @@ def describe_tool(block: ToolUseBlock) -> str:
         action = name.split("__")[-1].replace("git_", "")
         return f"📦 Git: {action}"
 
+    # Host MCP (mode="host" projects — apps already running on the VPS host)
+    if "host_git_clone" in name:
+        return "📥 Cloning repo"
+    if "host_git_pull" in name:
+        return "📥 git pull"
+    if "host_read_install_guide" in name:
+        return "📖 Reading install guide"
+    if "host_run_command" in name:
+        cmd = inp.get("command", "")[:50]
+        return f"🖥 {cmd}" if cmd else "🖥 Running command"
+    if "host_check_port" in name:
+        return f"🔌 Port {inp.get('port', '?')}"
+    if "host_curl" in name:
+        url = inp.get("url", "")[:40]
+        return f"🌐 curl {url}" if url else "🌐 HTTP check"
+    if "host_process_status" in name:
+        return f"🔎 Process: {inp.get('match', '')[:30]}"
+    if "host_tail_log" in name:
+        p = inp.get("path", "")
+        return f"📜 tail {p.split('/')[-1]}"
+    if "host_start_app" in name:
+        return "▶️ Starting app"
+    if "host_stop_app" in name:
+        return "⏹ Stopping app"
+    if "host_service_status" in name:
+        return f"💡 {inp.get('unit', '')[:30]}"
+    if "host_cd" in name:
+        return "📂 Entering project dir"
+
     # Fallback
     return f"🔧 {name.replace('mcp__', '').replace('__', ': ')}"
 

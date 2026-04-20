@@ -22,6 +22,7 @@ import { SettingsSystem } from "@/components/settings/SettingsSystem";
 import { SettingsProjects } from "@/components/settings/SettingsProjects";
 import { SettingsUsers } from "@/components/settings/SettingsUsers";
 import { SettingsChannels } from "@/components/settings/SettingsChannels";
+import { SettingsHost } from "@/components/settings/SettingsHost";
 
 export type SettingsPage =
   | "dashboard"
@@ -29,6 +30,7 @@ export type SettingsPage =
   | "chat"
   | "git"
   | "system"
+  | "host"
   | "projects"
   | "users"
   | "channels";
@@ -43,6 +45,7 @@ const PAGE_LABELS: Record<SettingsPage, string> = {
   chat: "Chat Platform",
   git: "Git Provider",
   system: "System",
+  host: "Host Mode",
   projects: "Projects",
   users: "Users",
   channels: "Channels",
@@ -67,6 +70,7 @@ const NAV: Array<{ section?: string; items: NavItem[] }> = [
       { page: "chat", icon: <MessageSquareIcon className="size-4" />, label: "Chat Platform" },
       { page: "git", icon: <GitBranchIcon className="size-4" />, label: "Git Provider" },
       { page: "system", icon: <ServerIcon className="size-4" />, label: "System" },
+      { page: "host", icon: <ServerIcon className="size-4" />, label: "Host Mode" },
     ],
   },
   {
@@ -89,6 +93,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
       case "chat":      return <SettingsChat />;
       case "git":       return <SettingsGit />;
       case "system":    return <SettingsSystem />;
+      case "host":      return <SettingsHost />;
       case "projects":  return <SettingsProjects />;
       case "users":     return <SettingsUsers />;
       case "channels":  return <SettingsChannels />;

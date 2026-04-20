@@ -166,6 +166,27 @@ class WebChatProvider(ChatProvider):
             "status": status,
         })
 
+    async def send_tool_output(
+        self,
+        chat_id: str,
+        message_id: str,
+        tool_name: str,
+        chunk: str,
+        final: bool = False,
+    ) -> None:
+        """Stream stdout/stderr from a long-running tool call (host_run_command,
+        etc.) to the user's web chat panel. The frontend appends these under the
+        preceding tool_use bubble so the user sees the real output live."""
+        user_id, session_id = self._parse_chat_id(chat_id)
+        channel = f"wc:{user_id}:{session_id}"
+        await self._publish(channel, {
+            "type": "tool_output",
+            "message_id": message_id,
+            "tool": tool_name,
+            "chunk": (chunk or "")[:4096],
+            "final": bool(final),
+        })
+
     async def send_message_with_actions(
         self,
         chat_id: str,
