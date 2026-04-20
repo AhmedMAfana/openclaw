@@ -112,13 +112,32 @@ def describe_tool(block: ToolUseBlock) -> str:
     return f"🔧 {name.replace('mcp__', '').replace('__', ': ')}"
 
 
-_AUTH_KEYWORDS = [
-    "auth", "unauthorized", "logged in", "credential",
-    "token expired", "not authenticated", "sign in",
-    "login", "authentication failed", "invalid token",
+# Phrases that unambiguously indicate Claude auth failure. Bare "auth" was
+# too loose — it false-positives on debug-to-stderr lines like
+# "[API:auth] OAuth token check complete" or "has Authorization header: false"
+# that show up whenever stderr is appended to an exception message.
+_AUTH_PHRASES = [
+    "claudeautherror",
+    "401 unauthorized",
+    "403 forbidden",
+    "authentication required",
+    "authentication failed",
+    "not authenticated",
+    "oauth token expired",
+    "token expired",
+    "invalid token",
+    "credentials missing",
+    "please run 'claude login'",
+    "please log in",
+    "you must be logged in",
 ]
 
 
 def is_auth_error(error: Exception) -> bool:
-    """Check if an exception is a Claude authentication error."""
-    return any(kw in str(error).lower() for kw in _AUTH_KEYWORDS)
+    """Check if an exception is genuinely a Claude authentication error.
+
+    Whitelist specific phrases — substring 'auth' triggers false positives
+    on debug logs that happen to mention OAuth, Authorization headers, etc.
+    """
+    s = str(error).lower()
+    return any(p in s for p in _AUTH_PHRASES)

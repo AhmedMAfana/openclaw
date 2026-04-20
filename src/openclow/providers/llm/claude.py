@@ -345,14 +345,22 @@ class ClaudeAuthError(Exception):
 
 
 def _check_auth_error(error: Exception) -> None:
-    """Check if error is auth-related and raise ClaudeAuthError if so."""
-    error_str = str(error).lower()
-    auth_keywords = [
-        "auth", "unauthorized", "logged in", "credential",
-        "token expired", "not authenticated", "sign in",
-        "login", "authentication failed", "invalid token"
+    """Check if error is genuinely auth-related and raise ClaudeAuthError if so.
+
+    Phrase whitelist (not substring 'auth') — debug-to-stderr emits lines
+    like '[API:auth] OAuth token check complete' that would false-positive
+    a bare-substring match.
+    """
+    s = str(error).lower()
+    auth_phrases = [
+        "401 unauthorized", "403 forbidden",
+        "authentication required", "authentication failed",
+        "not authenticated", "oauth token expired", "token expired",
+        "invalid token", "credentials missing",
+        "please run 'claude login'", "please log in",
+        "you must be logged in",
     ]
-    if any(kw in error_str for kw in auth_keywords):
+    if any(p in s for p in auth_phrases):
         raise ClaudeAuthError("Claude authentication required. Please run 'claude login' or click Authenticate.") from error
 
 
