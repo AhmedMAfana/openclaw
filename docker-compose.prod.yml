@@ -38,10 +38,12 @@ services:
       # change — the image becomes the immutable source of truth.
       - ./src:/app/src
       - ./alembic:/app/alembic
-      # NOTE: chat_frontend/dist is intentionally NOT bind-mounted — the
-      # image's baked-in build is the source of truth. Frontend changes
-      # require a rebuild (rare). Mounting an empty host dir would mask
-      # the real build and serve 404s.
+      # Mount the built frontend read-only — lets us ship UX-only changes
+      # via `npm run build` locally + `rsync dist/` to the host + `docker
+      # compose up -d api`. Keep the host dir populated (the image bakes a
+      # fallback bundle, but an empty host dir would mask it and 404). The
+      # :ro keeps the container from mutating host files.
+      - ./chat_frontend/dist:/app/chat_frontend/dist:ro
       # Host-mode projects live at /srv/projects/<name> on the host
       # (typically symlinked to /home/web/vhosts/<name>/htdocs/live).
       - /srv/projects:/srv/projects:rw
