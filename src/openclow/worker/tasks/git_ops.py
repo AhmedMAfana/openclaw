@@ -17,8 +17,14 @@ async def _get_git_env() -> dict:
     """
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     try:
-        from openclow.services.config_service import get_config
-        config = await get_config("git", "provider")
+        from openclow.services.config_service import get_config, get_provider_config
+        # Try the new per-type format first (provider.github / provider.gitlab),
+        # fall back to legacy single "provider" key.
+        config = None
+        try:
+            _ptype, config = await get_provider_config("git")
+        except Exception:
+            config = await get_config("git", "provider")
         if config and config.get("token"):
             token = config["token"]
             env["GH_TOKEN"] = token
