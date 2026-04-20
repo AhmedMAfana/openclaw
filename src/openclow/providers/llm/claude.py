@@ -406,10 +406,17 @@ class ClaudeProvider(LLMProvider):
         tech_stack: str,
         description: str,
         agent_system_prompt: str,
+        on_tool_use: Any | None = None,
+        on_text: Any | None = None,
     ) -> str:
-        """Read the codebase and create an implementation plan. Returns plan text."""
+        """Read the codebase and create an implementation plan. Returns plan text.
+
+        on_tool_use(ToolUseBlock) fires for every tool call so the UI can stream
+        live progress (reads/greps/globs) — same pattern the coder uses.
+        on_text(str) fires for each text chunk from the model (thinking-out-loud).
+        """
         from claude_agent_sdk import query, ClaudeAgentOptions
-        from claude_agent_sdk.types import AssistantMessage, TextBlock
+        from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
 
         system_prompt = PLANNER_SYSTEM_PROMPT.format(
             project_name=project_name,
@@ -439,6 +446,17 @@ class ClaudeProvider(LLMProvider):
                     for block in message.content:
                         if isinstance(block, TextBlock):
                             full_output += block.text
+                            if on_text is not None:
+                                try:
+                                    await on_text(block.text)
+                                except Exception:
+                                    pass
+                        elif isinstance(block, ToolUseBlock):
+                            if on_tool_use is not None:
+                                try:
+                                    await on_tool_use(block)
+                                except Exception:
+                                    pass
         except Exception as e:
             _check_auth_error(e)
             tail = "\n".join(list(stderr_buf)[-20:])

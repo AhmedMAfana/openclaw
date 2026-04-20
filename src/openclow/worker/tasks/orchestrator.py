@@ -1135,6 +1135,28 @@ async def execute_task(ctx: dict, task_id: str, skip_planning: bool = False):
             await _update_task(task_id_str, status="planning")
             await reporter.start_step(1)
 
+            # Stream live tool activity + text chunks so the UI mirrors the coder step.
+            _is_web_plan = task.chat_provider_type == "web"
+
+            async def _on_planner_tool(block):
+                from openclow.worker.tasks._agent_base import describe_tool
+                tool_desc = describe_tool(block)
+                await reporter.update_step(1, tool_desc[:50])
+                if _is_web_plan and hasattr(chat, "send_tool_use"):
+                    try:
+                        await chat.send_tool_use(
+                            task.chat_id, chat_message_id, tool_desc, "", "running"
+                        )
+                    except Exception:
+                        pass
+
+            async def _on_planner_text(text: str):
+                if _is_web_plan and text and hasattr(chat, "send_agent_token"):
+                    try:
+                        await chat.send_agent_token(task.chat_id, chat_message_id, text)
+                    except Exception:
+                        pass
+
             plan_text = await llm.run_planner(
                 workspace_path=workspace.path,
                 task_description=task.description,
@@ -1142,6 +1164,8 @@ async def execute_task(ctx: dict, task_id: str, skip_planning: bool = False):
                 tech_stack=task.project.tech_stack or "",
                 description=task.project.description or "",
                 agent_system_prompt=task.project.agent_system_prompt or "",
+                on_tool_use=_on_planner_tool,
+                on_text=_on_planner_text,
             )
             await reporter.complete_step(1, "plan ready")
 
