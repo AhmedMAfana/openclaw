@@ -1324,7 +1324,12 @@ async def execute_plan(ctx: dict, task_id: str):
         await chat.close()
         return
 
-    workspace_path = ws.get_path(task_id_str)
+    # Host-mode: project_dir IS the workspace (mounted into the container).
+    # Docker-mode: ws.get_path() returns the per-task /workspaces/task-{id} dir.
+    if (task.project.mode or "docker").lower() == "host":
+        workspace_path = task.project.project_dir
+    else:
+        workspace_path = ws.get_path(task_id_str)
 
     # Get the plan from task_logs
     plan_text = ""
