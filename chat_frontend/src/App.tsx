@@ -511,6 +511,7 @@ export default function App() {
     if (id === activeThreadId) return; // already on this thread
     cancelStream();
     setPendingPlan(null);
+    setShowSettingsPanel(false); // clicking a chat should hide settings
     setActiveThreadId(id);
     setMessages([]);
     // Restore project context — use fromList if provided (avoids stale threads state)
@@ -556,6 +557,7 @@ export default function App() {
   async function newThread() {
     cancelStream();
     setPendingPlan(null);
+    setShowSettingsPanel(false); // creating a chat should hide settings
     try {
       const res = await fetch("/api/threads", { method: "POST", credentials: "include" });
       if (res.ok) {
