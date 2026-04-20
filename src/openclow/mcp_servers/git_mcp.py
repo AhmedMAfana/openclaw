@@ -30,11 +30,17 @@ async def _run_git(*args: str, cwd: str = None) -> str:
         return f"FAILED: {str(e)[:200]}"
 
 
+import os
+import sys
+
 from openclow.settings import settings
 
-# Store workspace path — uses the configured base path so it works regardless
-# of whether the container mounts workspaces at /workspaces or a host path.
-_workspace = settings.workspace_base_path
+# Workspace path: callers (claude.py:_mcp_git) pass the per-task or per-project
+# path as argv[1]. Fall back to the global workspace_base_path for safety, but
+# that base is empty for host-mode projects and was the cause of every git tool
+# call returning "fatal: not a git repository" — which silently broke the
+# Reviewer agent until it hit max_turns and the CLI exited non-zero.
+_workspace = sys.argv[1] if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]) else settings.workspace_base_path
 
 
 @mcp.tool()
