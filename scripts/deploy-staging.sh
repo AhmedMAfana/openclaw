@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy OpenClow to the staging server (devops.staging-ami.com on 165.227.228.113).
+# Deploy TAGH Dev to the staging server (devops.staging-ami.com on 165.227.228.113).
 #
 # Idempotent: re-running updates code, rebuilds changed images, and restarts
 # containers. Safe to re-run after partial failures.

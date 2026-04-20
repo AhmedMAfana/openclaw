@@ -1,4 +1,4 @@
-"""Drop-in activity log for OpenClow — append-only JSONL.
+"""Drop-in activity log for TAGH Dev — append-only JSONL.
 
 Usage:
     from openclow.services.activity_log import log_event, log_task, log_agent, query, stats
@@ -41,7 +41,7 @@ def log_event(event_type: str, data: dict[str, Any] | None = None):
 
 
 # ──────────────────────────────────────────────
-# Typed helpers — OpenClow domain
+# Typed helpers — TAGH Dev domain
 # ──────────────────────────────────────────────
 
 def log_task(task_id: str, status: str, **kwargs):

@@ -180,7 +180,7 @@ async def _repair_preflight(project, workspace: str, compose: str, compose_proje
             env_content = f.read()
         lines = [line for line in env_content.split("\n")
                  if not any(line.startswith(f"{k}=") for k in port_vars)]
-        lines.append("\n# OpenClow port isolation (auto-generated)")
+        lines.append("\n# TAGH Dev port isolation (auto-generated)")
         for k, v in port_vars.items():
             lines.append(f"{k}={v}")
         with open(env_path, "w") as f:

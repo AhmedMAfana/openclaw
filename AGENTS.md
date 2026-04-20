@@ -1,10 +1,10 @@
-# OpenClow — AI-Powered Development Orchestration Platform
+# TAGH Dev — AI-Powered Development Orchestration Platform
 
-OpenClow is an AI-driven development automation platform that orchestrates coding agents to implement features, review code, and manage deployment workflows through chat interfaces (Telegram/Slack).
+TAGH Dev is an AI-driven development automation platform that orchestrates coding agents to implement features, review code, and manage deployment workflows through chat interfaces (Telegram/Slack).
 
 ## Project Overview
 
-OpenClow enables teams to delegate development tasks to AI agents through familiar chat platforms. The platform manages the entire development lifecycle:
+TAGH Dev enables teams to delegate development tasks to AI agents through familiar chat platforms. The platform manages the entire development lifecycle:
 
 1. **Task Intake** — Users submit tasks via Telegram or Slack
 2. **Planning** — Planner agent analyzes the codebase and creates implementation plans
@@ -50,7 +50,7 @@ OpenClow enables teams to delegate development tasks to AI agents through famili
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         OpenClow                             │
+│                         TAGH Dev                             │
 ├─────────────┬─────────────┬─────────────┬───────────────────┤
 │     Bot     │     API     │   Worker    │   Infrastructure  │
 │  (Chat UI)  │  (REST API) │ (Job Queue) │  (Postgres/Redis) │
@@ -89,7 +89,7 @@ User Task
 
 ### Provider Pattern
 
-OpenClow uses an abstract provider pattern for vendor-agnostic operations:
+TAGH Dev uses an abstract provider pattern for vendor-agnostic operations:
 
 - **LLMProvider** — Claude (via claude_agent_sdk)
 - **ChatProvider** — Telegram (aiogram), Slack (slack-bolt)

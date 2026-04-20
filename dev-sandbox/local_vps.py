@@ -6,7 +6,7 @@ It has two roles in one process:
 1. A supervisor that starts/stops declared "already-running" apps on local
    ports (reading local_vps.yml).
 2. A small FastAPI admin API on :8120 that lets the developer (and the
-   OpenClow agent) list apps, check health, restart, and follow logs — the
+   TAGH Dev agent) list apps, check health, restart, and follow logs — the
    same operations the real VPS exposes implicitly via host_run_command.
 
 Everything is REAL: real subprocess.Popen, real git pulls in the sample app

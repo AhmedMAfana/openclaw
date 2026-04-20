@@ -1,8 +1,8 @@
-# OpenClow Agent System — Responsibility Map
+# TAGH Dev Agent System — Responsibility Map
 
 ## Overview
 
-OpenClow uses a multi-agent pipeline where each agent has specific responsibilities,
+TAGH Dev uses a multi-agent pipeline where each agent has specific responsibilities,
 access levels, and outputs. The orchestrator (Python code) coordinates between agents
 and handles deterministic operations (git push, PR creation, Docker management).
 

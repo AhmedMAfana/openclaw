@@ -2,7 +2,7 @@
 
 ## Context
 
-OpenClow currently manages user projects by cloning them into `/workspaces/_cache/{project_name}` inside its own Docker containers, then running `docker compose build`/`up` to spin them up as managed stacks. The product owner has decided this is the wrong deployment model for their Digital Ocean VPS: the OpenClow orchestrator keeps running under Docker, but **user apps are already running on the VPS host** as plain directories (e.g. `/srv/projects/<repo>`, `/opt/apps/<repo>`, or `~/projects/<repo>` — chosen per deploy). Each user project has its own `README`/`INSTALL`/`CLAUDE.md` install guide; the add-project agent should follow that guide rather than invent a Docker flow.
+TAGH Dev currently manages user projects by cloning them into `/workspaces/_cache/{project_name}` inside its own Docker containers, then running `docker compose build`/`up` to spin them up as managed stacks. The product owner has decided this is the wrong deployment model for their Digital Ocean VPS: the TAGH Dev orchestrator keeps running under Docker, but **user apps are already running on the VPS host** as plain directories (e.g. `/srv/projects/<repo>`, `/opt/apps/<repo>`, or `~/projects/<repo>` — chosen per deploy). Each user project has its own `README`/`INSTALL`/`CLAUDE.md` install guide; the add-project agent should follow that guide rather than invent a Docker flow.
 
 We also need a **local simulation** so developers can build and QA the new flow without needing a real VPS.
 
@@ -10,7 +10,7 @@ We also need a **local simulation** so developers can build and QA the new flow 
 - **Sibling migration**, not a replace: Docker mode stays for existing projects; host mode is a parallel code path gated by `project.mode = "docker" | "host"`.
 - **Projects base dir is flexible**, configured from the dashboard settings and saved to DB. No hardcoded `/srv/projects`.
 - **Agent auto-clones** the repo into the configured base dir on first setup, then `git pull`s on subsequent bootstraps.
-- **Simulation**: user apps live **at the same filesystem level as the OpenClow repo** (e.g. `../sim-fastapi/`, `../sim-next/`), and a small FastAPI-based local server (our "local-VPS") exposes them to the browser like the VPS would.
+- **Simulation**: user apps live **at the same filesystem level as the TAGH Dev repo** (e.g. `../sim-fastapi/`, `../sim-next/`), and a small FastAPI-based local server (our "local-VPS") exposes them to the browser like the VPS would.
 
 ### Goal
 One new sibling code path (`mode="host"`) reusing everything that works in Docker mode — streaming, retry loops, repair cards, tunnel service — plus a self-contained local simulation that exercises the exact same code path.
@@ -43,7 +43,7 @@ Keep `is_dockerized`, `docker_compose_file`, `app_container_name`, `app_port`, `
 Projects base dir is **not an env var** — it's a dashboard setting saved in the existing `PlatformConfig` table so it can be changed per-deployment without a redeploy.
 
 **Edit** [src/openclow/services/settings_service.py](src/openclow/services/settings_service.py) — add keys:
-- `host.projects_base` — absolute path; default value computed at runtime: `../` relative to the OpenClow repo (simulation) OR `/srv/projects` (production).
+- `host.projects_base` — absolute path; default value computed at runtime: `../` relative to the TAGH Dev repo (simulation) OR `/srv/projects` (production).
 - `host.mode_default` — `"docker"` | `"host"` (global default applied when onboarding a new project; can be overridden per-project).
 - `host.auto_clone_default` — bool.
 
@@ -183,7 +183,7 @@ Current gap: `ToolUseBlock` announcements stream, but tool **output** (stdout fr
 
 **Edit** [src/openclow/api/routes/assistant.py:246-355](src/openclow/api/routes/assistant.py#L246-L355) `_build_system_prompt()` — replace the current TAGH block with three paragraphs:
 
-> You are a Senior DevOps Engineer and AI Chat Support Engineer for OpenClow. You run the infrastructure and you talk to the user at the same time.
+> You are a Senior DevOps Engineer and AI Chat Support Engineer for TAGH Dev. You run the infrastructure and you talk to the user at the same time.
 >
 > As a DevOps engineer you own the outcome. User apps live on this host under the configured projects base dir. You have tools to pull code, install deps, start services, read logs, and verify health over HTTP. You try the MCP tool first — `host_cd`, `host_git_pull`, `host_read_install_guide`, `host_run_command`, `host_curl`, `host_process_status`, `host_tail_log`, `host_start_app`. You never invent tools. Only when an MCP tool returns a clearly unresolvable error that you've investigated do you fall back to reasoning and a different tool.
 >
@@ -197,7 +197,7 @@ Current gap: `ToolUseBlock` announcements stream, but tool **output** (stdout fr
 
 ## 9. Local VPS simulation (Python-based local server)
 
-Developers run user apps **at the same filesystem level as the OpenClow repo** — `../sim-fastapi/`, `../sim-next/`, `../sim-laravel/` — and a tiny FastAPI "local-VPS" supervisor exposes them to the browser, mimicking what Digital Ocean + tunnel will do in production.
+Developers run user apps **at the same filesystem level as the TAGH Dev repo** — `../sim-fastapi/`, `../sim-next/`, `../sim-laravel/` — and a tiny FastAPI "local-VPS" supervisor exposes them to the browser, mimicking what Digital Ocean + tunnel will do in production.
 
 **New directory** `dev-sandbox/` in the openclow repo (tracked; a dev convenience, not deployed):
 
@@ -273,7 +273,7 @@ Everything else is REAL: real `git pull`, real `npm install`, real `curl`, real 
 
 ## 10. QA / reading list (user authorized cloning)
 
-Repos to study for patterns worth stealing into OpenClow core:
+Repos to study for patterns worth stealing into TAGH Dev core:
 
 1. **OpenHands** — https://github.com/All-Hands-AI/OpenHands — event-stream architecture, swappable runtime sandbox (maps directly onto simulate-vs-host), agent-controller stuck-detection loop. **Read first:** `openhands/controller/agent_controller.py`, then `openhands/events/stream.py`.
 2. **Aider** — https://github.com/Aider-AI/aider — tree-sitter repo map for onboarding, `udiff` edit format for reliable apply, test-loop self-heal. **Read first:** `aider/coders/base_coder.py` (`run_one`, `reflected_message`), then `aider/repomap.py`.
@@ -338,7 +338,7 @@ Every Docker path stays. `_preflight`, `_step_clone`, `compose_build`, `compose_
 
 End-to-end smoke test (simulation):
 1. `make sim-install` — clones 3 sibling apps, runs install steps
-2. `docker compose up -d` — OpenClow services
+2. `docker compose up -d` — TAGH Dev services
 3. `make sim-up` — supervisor starts 3 apps on 8101/8102/8103, admin on 8120
 4. Visit `http://localhost:8120/apps` — see healthy list
 5. `make sim-seed` — insert 3 `mode="host"` project rows

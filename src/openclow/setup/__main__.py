@@ -1,4 +1,4 @@
-"""OpenClow Setup Wizard — interactive configuration.
+"""TAGH Dev Setup Wizard — interactive configuration.
 
 Usage: python -m openclow.setup
 
@@ -46,7 +46,7 @@ def ask_yn(prompt: str, default: bool = True) -> bool:
 
 async def run_setup():
     print("=" * 60)
-    print("  OpenClow Setup Wizard")
+    print("  TAGH Dev Setup Wizard")
     print("  Configure your AI development orchestration platform")
     print("=" * 60)
 

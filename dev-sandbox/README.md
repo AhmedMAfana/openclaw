@@ -1,9 +1,9 @@
 # dev-sandbox — local VPS simulation for host-mode development
 
-This directory lets you develop and QA OpenClow's host-mode flow locally, with
+This directory lets you develop and QA TAGH Dev's host-mode flow locally, with
 no Digital Ocean VPS needed. The idea: user apps live at the same filesystem
-level as OpenClow (under `dev-sandbox/sample-apps/`), a small FastAPI
-"local-VPS" supervisor keeps them running, and OpenClow (in Docker) reaches
+level as TAGH Dev (under `dev-sandbox/sample-apps/`), a small FastAPI
+"local-VPS" supervisor keeps them running, and TAGH Dev (in Docker) reaches
 them via `host.docker.internal:<port>`.
 
 ## Layout
@@ -12,7 +12,7 @@ them via `host.docker.internal:<port>`.
 dev-sandbox/
 ├── local_vps.py          # supervisor + admin API (all stdlib + FastAPI)
 ├── local_vps.yml         # processes to run
-├── seed_sim_projects.py  # insert mode="host" rows into OpenClow's DB
+├── seed_sim_projects.py  # insert mode="host" rows into TAGH Dev's DB
 ├── logs/                 # per-app log files (git-ignored)
 ├── env/                  # per-app env files (git-ignored)
 ├── secrets.example.env   # tracked template — copy to env/ and fill in
@@ -24,7 +24,7 @@ dev-sandbox/
 
 | Port | Role |
 |------|------|
-| 8000  | OpenClow API (Docker)  |
+| 8000  | TAGH Dev API (Docker)  |
 | 8101  | sim-fastapi            |
 | 8102  | sim-next (reserved)    |
 | 8103  | sim-laravel (reserved) |
@@ -34,11 +34,11 @@ dev-sandbox/
 
 ```sh
 make sim-install       # install sim-fastapi deps + init git repo
-docker compose up -d   # OpenClow itself
+docker compose up -d   # TAGH Dev itself
 make sim-up            # start sample apps + supervisor
 make sim-status        # verify
 open http://localhost:8120/apps
-make sim-seed          # inserts mode="host" rows into OpenClow's DB
+make sim-seed          # inserts mode="host" rows into TAGH Dev's DB
 ```
 
 Then open the web chat, and you should see the `sim-fastapi` project. Trigger

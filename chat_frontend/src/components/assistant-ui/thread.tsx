@@ -13,7 +13,6 @@ import {
   MessagePrimitive,
   ThreadPrimitive,
   useAuiState,
-  useThreadRuntime,
 } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
@@ -164,53 +163,39 @@ const ThreadScrollToBottom: FC = () => {
   );
 };
 
-const SUGGESTIONS = [
-  { icon: "🚀", label: "Deploy a project", prompt: "Help me deploy a new project to production" },
-  { icon: "🐛", label: "Debug an issue", prompt: "Help me debug a problem in my codebase" },
-  { icon: "🔍", label: "Review my code", prompt: "Review my code for issues and improvements" },
-  { icon: "⚙️", label: "Set up CI/CD", prompt: "Set up a CI/CD pipeline for my project" },
-];
-
 const ThreadWelcome: FC = () => {
-  const threadRuntime = useThreadRuntime();
-
   return (
     <div className="mx-auto my-auto flex w-full max-w-(--thread-max-width) grow flex-col items-center justify-center px-6 pb-12">
-      {/* Avatar */}
-      <div className="mb-6 size-14 rounded-2xl flex items-center justify-center shadow-xl shadow-primary/20"
-        style={{ background: "linear-gradient(135deg, oklch(0.62 0.22 265), oklch(0.55 0.22 295))" }}>
-        <svg viewBox="0 0 24 24" fill="none" className="size-7" xmlns="http://www.w3.org/2000/svg">
-          <path d="M12 2L16 10H8L12 2Z" fill="white" opacity="0.9"/>
-          <path d="M8 10L4 18H12L8 10Z" fill="white" opacity="0.6"/>
-          <path d="M16 10L20 18H12L16 10Z" fill="white" opacity="0.75"/>
-        </svg>
+      {/* Monogram — glass chip, matches login page. Subtle radial glow behind
+          gives the empty state a focal point without the purple gradient. */}
+      <div className="mb-8 relative">
+        <div
+          className="absolute -inset-10 rounded-full blur-3xl opacity-60 pointer-events-none"
+          style={{
+            background:
+              "radial-gradient(circle, rgba(99,102,241,0.28), rgba(236,72,153,0.10) 55%, transparent 75%)",
+          }}
+        />
+        <div
+          className="relative size-14 rounded-2xl grid place-items-center font-bold text-2xl tracking-tight text-neutral-900 shadow-[0_8px_32px_-8px_rgba(0,0,0,0.7)] ring-1 ring-white/5"
+          style={{ background: "linear-gradient(135deg, #ffffff 0%, #c7c7c7 100%)" }}
+        >
+          T
+        </div>
       </div>
 
-      <h1 className="text-3xl font-semibold tracking-tight text-foreground mb-2">
-        How can I help you?
+      {/* Creative greeting with a live blinking caret — invites the user to just type */}
+      <h1 className="text-[30px] font-semibold tracking-tight text-foreground mb-3 text-center leading-tight">
+        What are we shipping{" "}
+        <span
+          aria-hidden="true"
+          className="inline-block w-[3px] h-[26px] bg-foreground align-[-3px] ml-0.5 animate-pulse"
+          style={{ animationDuration: "1.1s" }}
+        />
       </h1>
-      <p className="text-base text-muted-foreground mb-8 text-center max-w-sm">
-        I'm your AI DevOps agent. I can build, deploy, debug, and review code end-to-end.
+      <p className="text-sm text-muted-foreground text-center max-w-sm">
+        Tell me what you need — I&apos;ll pick the project, run the work, and open a live progress card.
       </p>
-
-      {/* Suggestion chips — use runtime API instead of DOM manipulation */}
-      <div className="grid grid-cols-2 gap-2.5 w-full max-w-md">
-        {SUGGESTIONS.map((s) => (
-          <button
-            key={s.label}
-            type="button"
-            onClick={() => {
-              threadRuntime.composer.setText(s.prompt);
-              threadRuntime.composer.send();
-            }}
-            className="group flex items-start gap-2.5 rounded-xl border border-border/60 p-3.5 text-left transition-all duration-150 hover:border-primary/40 hover:shadow-sm"
-            style={{ background: "oklch(0.12 0.008 265)" }}
-          >
-            <span className="text-base shrink-0 mt-0.5">{s.icon}</span>
-            <span className="text-xs font-medium text-foreground/80 group-hover:text-foreground leading-snug transition-colors">{s.label}</span>
-          </button>
-        ))}
-      </div>
     </div>
   );
 };

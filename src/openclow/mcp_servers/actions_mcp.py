@@ -1,4 +1,4 @@
-"""Actions MCP — lets the Chat Agent trigger OpenClow commands.
+"""Actions MCP — lets the Chat Agent trigger TAGH Dev commands.
 
 The chat agent can create tasks, add projects, check status —
 all through natural conversation. This is the bridge between

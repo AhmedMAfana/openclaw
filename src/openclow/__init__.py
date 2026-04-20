@@ -1,4 +1,4 @@
-"""OpenClow package — AI-powered development orchestration."""
+"""TAGH Dev package — AI-powered development orchestration."""
 
 # SECURITY PATCH: Disable Bash tool in claude_agent_sdk.
 #

@@ -7,7 +7,7 @@ from openclow.utils.logging import get_logger
 
 log = get_logger()
 
-ANALYSIS_PROMPT = """Analyze these Docker container logs from an OpenClow platform.
+ANALYSIS_PROMPT = """Analyze these Docker container logs from an TAGH Dev platform.
 Extract and categorize into:
 
 1. ERRORS — crashes, exceptions, failed operations (most important)
@@ -37,7 +37,7 @@ RAW LOGS:
 
 
 async def _fetch_container_logs() -> str:
-    """Fetch recent logs from all OpenClow containers."""
+    """Fetch recent logs from all TAGH Dev containers."""
     # Get container names
     _denv = get_docker_env()
     proc = await asyncio.create_subprocess_exec(

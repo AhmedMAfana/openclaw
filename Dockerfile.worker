@@ -57,7 +57,7 @@ RUN npx playwright install --with-deps chromium
 
 # Git identity
 RUN git config --system user.email "openclow@bot.local" \
-    && git config --system user.name "OpenClow Bot"
+    && git config --system user.name "TAGH Dev Bot"
 
 # Python app
 WORKDIR /app

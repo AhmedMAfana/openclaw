@@ -910,14 +910,12 @@ export default function App() {
         {/* Brand header */}
         <div className="px-4 pt-5 pb-4">
           <div className="flex items-center gap-2.5 mb-5">
-            {/* Logo mark */}
-            <div className="size-8 rounded-xl flex items-center justify-center shrink-0 shadow-lg"
-              style={{ background: "linear-gradient(135deg, oklch(0.62 0.22 265), oklch(0.55 0.22 295))" }}>
-              <svg viewBox="0 0 20 20" fill="none" className="size-4.5" xmlns="http://www.w3.org/2000/svg">
-                <path d="M10 2L13 8H7L10 2Z" fill="white" opacity="0.9"/>
-                <path d="M7 8L4 14H10L7 8Z" fill="white" opacity="0.6"/>
-                <path d="M13 8L16 14H10L13 8Z" fill="white" opacity="0.75"/>
-              </svg>
+            {/* Logo mark — monogram chip matches the login page brand mark */}
+            <div
+              className="size-8 rounded-xl grid place-items-center shrink-0 font-bold text-[13px] tracking-tight text-neutral-900 shadow-lg ring-1 ring-white/5"
+              style={{ background: "linear-gradient(135deg, #ffffff 0%, #c7c7c7 100%)" }}
+            >
+              T
             </div>
             <div>
               <span className="font-semibold text-sm text-foreground tracking-tight">TAGH DevOps</span>
@@ -930,9 +928,11 @@ export default function App() {
             className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-150 border border-border/60 text-foreground/80 hover:text-foreground hover:border-primary/40"
             style={{ background: "oklch(0.13 0.008 265)" }}
           >
-            <div className="size-4.5 rounded-md flex items-center justify-center"
-              style={{ background: "linear-gradient(135deg, oklch(0.62 0.22 265), oklch(0.55 0.22 295))" }}>
-              <PlusIcon className="size-3 text-white" />
+            <div
+              className="size-4.5 rounded-md flex items-center justify-center text-neutral-900"
+              style={{ background: "linear-gradient(135deg, #ffffff 0%, #c7c7c7 100%)" }}
+            >
+              <PlusIcon className="size-3" />
             </div>
             New conversation
           </button>
@@ -1214,7 +1214,7 @@ const ThreadItem = memo(function ThreadItem({
     >
       {isActive && (
         <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 rounded-r-full"
-          style={{ background: "linear-gradient(to bottom, oklch(0.62 0.22 265), oklch(0.55 0.22 295))" }} />
+          style={{ background: "linear-gradient(to bottom, #ffffff, #c7c7c7)" }} />
       )}
       <button onClick={onSelect} className="flex-1 text-left px-3 py-2 min-w-0">
         <span className="block text-xs truncate font-medium pr-11">{thread.title}</span>

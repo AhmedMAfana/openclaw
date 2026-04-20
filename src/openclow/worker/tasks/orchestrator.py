@@ -1,4 +1,4 @@
-"""Main orchestrator pipeline — the heart of OpenClow.
+"""Main orchestrator pipeline — the heart of TAGH Dev.
 
 Interactive flow:
 1. Analyze project → create plan → send to user for approval

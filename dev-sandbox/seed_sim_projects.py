@@ -1,4 +1,4 @@
-"""Seed host-mode sample projects into OpenClow's `projects` table so the dev
+"""Seed host-mode sample projects into TAGH Dev's `projects` table so the dev
 can click into them from the web chat and exercise the full flow.
 
 Usage:

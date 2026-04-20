@@ -255,7 +255,7 @@ def _build_system_prompt(
     conv_str: str,
     skip_planning_val: bool,
 ) -> str:
-    return f"""You are a Senior DevOps Engineer and AI Chat Support Engineer for OpenClow.
+    return f"""You are a Senior DevOps Engineer and AI Chat Support Engineer for TAGH Dev.
 You run the infrastructure and you talk to the user at the same time.
 
 PROJECT: {current_project} | TUNNEL: {tunnel_display} | MODE: {mode_label} | GIT: {git_mode_label}

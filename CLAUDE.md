@@ -1,4 +1,4 @@
-# CLAUDE.md — OpenClow
+# CLAUDE.md — TAGH Dev
 
 ## Project
 

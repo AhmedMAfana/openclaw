@@ -1,4 +1,4 @@
-# OpenClow — Implementation Plan & Architecture Audit
+# TAGH Dev — Implementation Plan & Architecture Audit
 
 ## Table of Contents
 1. [Current State](#current-state)
@@ -256,12 +256,12 @@ Chat handler (catch-all, registered LAST)
         │
         ▼
 Claude Chat Agent (via Claude Agent SDK)
-├── System prompt: OpenClow mission, available actions, personality
+├── System prompt: TAGH Dev mission, available actions, personality
 ├── Context injected: connected projects, active tasks, system health
 ├── MCPs: Actions, Docker, GitHub, Project-Info
 │
 ├── User: "hello"
-│   → Claude: "Hey! I'm OpenClow, your dev assistant. Send /task or
+│   → Claude: "Hey! I'm TAGH Dev, your dev assistant. Send /task or
 │              just tell me what you need."
 │
 ├── User: "what's running?"
@@ -282,7 +282,7 @@ Claude Chat Agent (via Claude Agent SDK)
 
 ### System Prompt
 ```
-You are OpenClow's AI assistant — a humble, senior-level DevOps and
+You are TAGH Dev's AI assistant — a humble, senior-level DevOps and
 development expert. You help developers manage their projects through
 natural conversation.
 
@@ -488,7 +488,7 @@ Project containers start → one is unhealthy
 
 ### Architecture
 ```
-OpenClow is provider-agnostic. The core engine never imports
+TAGH Dev is provider-agnostic. The core engine never imports
 aiogram, claude_agent_sdk, or gh CLI directly.
 
 Everything goes through abstract providers:

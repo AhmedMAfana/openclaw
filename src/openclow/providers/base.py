@@ -1,6 +1,6 @@
 """Abstract base classes for all providers.
 
-OpenClow is provider-agnostic. The core engine never imports
+TAGH Dev is provider-agnostic. The core engine never imports
 aiogram, claude_agent_sdk, or gh CLI directly. It uses these abstractions.
 """
 from __future__ import annotations
