@@ -18,17 +18,21 @@ services:
         fi;
         exec uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 10
       "
-    ports:
+    ports: !override
       - "127.0.0.1:8000:8000"
-    # override base: drop ./src and ./chat_frontend/dist bind-mounts (prod uses
-    # the image). Keep the docker.sock, claude_auth, activity_logs, workspaces,
-    # and auth.json mounts — those are runtime data, not source.
-    volumes:
+    # !override replaces the base's volume list wholesale — critical because
+    # the base bind-mounts ./src and ./chat_frontend/dist for dev live-reload,
+    # which would mask the code + frontend built into the prod image.
+    volumes: !override
       - activity_logs:/app/logs
       - workspaces:/workspaces
       - claude_auth:/home/openclow/.claude
       - /var/run/docker.sock:/var/run/docker.sock
       - ./auth.json:/app/auth.json:ro
+      # Host-mode projects live at /srv/projects/<name> on the host
+      # (typically symlinked to /home/web/vhosts/<name>/htdocs/live).
+      # Mount RW so Read/Edit/Write tools can touch the real source.
+      - /srv/projects:/srv/projects:rw
     environment:
       - LOG_LEVEL=INFO
     deploy:
@@ -52,12 +56,16 @@ services:
         exec su -l openclow -c 'arq openclow.worker.arq_app.WorkerSettings'
       "
     user: root
-    volumes:
+    # Same reason as api: replace base volumes so ./src and ./dev-sandbox
+    # bind-mounts don't leak in from docker-compose.override.yml.
+    volumes: !override
       - workspaces:/workspaces
       - claude_auth:/home/openclow/.claude
       - activity_logs:/app/logs
       - /var/run/docker.sock:/var/run/docker.sock
       - ./auth.json:/app/auth.json:ro
+      # Host-mode projects — see api.volumes for context.
+      - /srv/projects:/srv/projects:rw
     environment:
       - LOG_LEVEL=INFO
       - DOCKER_BIN=/usr/bin/docker

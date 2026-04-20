@@ -81,8 +81,11 @@ def _coder_env_spec(
         env_hint = (
             f"HOST ENVIRONMENT (mode=host):\n"
             f"- Project lives at: {project_dir or '(not set)'}\n"
+            f"- Project files are mounted into this container at the same path —\n"
+            f"  use Read/Edit/Write/Glob/Grep DIRECTLY on files under that path.\n"
+            f"  Reserve mcp__host__host_run_command for shell side-effects only\n"
+            f"  (npm run build, php artisan ..., composer install).\n"
             f"- App port: {app_port}\n"
-            f"- Run shell commands with mcp__host__host_run_command(project_dir, cmd)\n"
             f"- Check HTTP with mcp__host__host_curl(url)\n"
             f"- Tail logs with mcp__host__host_tail_log(path)\n"
             f"- Never use docker_exec — there is no container for this app.\n"

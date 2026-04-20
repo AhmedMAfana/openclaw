@@ -980,7 +980,10 @@ async def execute_task(ctx: dict, task_id: str, skip_planning: bool = False):
         await _update_task(task_id_str, status="preparing")
         await reporter.start_step(0)
 
-        workspace = await ws.prepare(task.project, task_id_str)
+        if (task.project.mode or "docker").lower() == "host":
+            workspace = await ws.prepare_host(task.project)
+        else:
+            workspace = await ws.prepare(task.project, task_id_str)
 
         # ── Branch handling based on git_mode ──
         branch_slug = slugify(task.description, max_length=50)

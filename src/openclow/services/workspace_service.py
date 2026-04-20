@@ -109,6 +109,35 @@ class WorkspaceService:
             if os.path.exists(os.path.join(workspace, lock_file)):
                 await git_ops.run_exec(*shlex.split(install_cmd), cwd=workspace)
 
+    async def prepare_host(self, project: Project) -> Workspace:
+        """Host-mode prep: project_dir IS the workspace. No cache, no clone.
+
+        Verifies the dir exists inside the worker container (so /srv/projects
+        must be mounted), then best-effort git pull to pick up any external
+        commits. Skipping the docker workspace cache machinery entirely is the
+        whole point — these projects already live on the host filesystem.
+        """
+        if not project.project_dir:
+            raise RuntimeError(
+                f"Project {project.name!r} mode=host but project_dir is empty — "
+                f"set it via Settings → Projects."
+            )
+        if not os.path.isdir(project.project_dir):
+            raise RuntimeError(
+                f"Project dir {project.project_dir!r} not found inside this container. "
+                f"Mount it via docker-compose.prod.yml (worker.volumes + api.volumes)."
+            )
+        if os.path.isdir(os.path.join(project.project_dir, ".git")):
+            rc, out = await git_ops.run_exec(
+                "git", "pull", "--ff-only", "--quiet",
+                cwd=project.project_dir, ignore_errors=True,
+            )
+            if rc != 0:
+                log.warning("workspace.host_pull_failed",
+                            project=project.name, output=out[:200])
+        log.info("workspace.host_ready", path=project.project_dir, project=project.name)
+        return Workspace(path=project.project_dir, from_cache=True, deps_changed=False)
+
     async def prepare(self, project: Project, task_id: str) -> Workspace:
         """Prepare a workspace for a task. Uses cache + git worktree for speed."""
         cache = self._project_cache_path(project.name)
