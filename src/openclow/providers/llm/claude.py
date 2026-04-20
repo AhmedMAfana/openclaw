@@ -350,12 +350,28 @@ def _check_auth_error(error: Exception) -> None:
     """Check if error is auth-related and raise ClaudeAuthError if so."""
     error_str = str(error).lower()
     auth_keywords = [
-        "auth", "unauthorized", "logged in", "credential", 
+        "auth", "unauthorized", "logged in", "credential",
         "token expired", "not authenticated", "sign in",
         "login", "authentication failed", "invalid token"
     ]
     if any(kw in error_str for kw in auth_keywords):
         raise ClaudeAuthError("Claude authentication required. Please run 'claude login' or click Authenticate.") from error
+
+
+def _make_stderr_collector(label: str) -> tuple[list[str], Any]:
+    """Return (buffer, callback) pair for collecting Claude SDK subprocess
+    stderr. The SDK normally drops stderr unless we set this callback —
+    without it, exit-code-1 crashes show 'Check stderr output for details'
+    with no detail. We keep the last 80 lines and log each at WARNING.
+    """
+    from collections import deque
+    buf: deque[str] = deque(maxlen=80)
+    def _cb(line: str) -> None:
+        buf.append(line)
+        log.warning("claude.stderr", agent=label, line=line[:500])
+    # Return the deque cast to list so callers can read the buffer at any time.
+    # Pyright/mypy may complain about variance but it works at runtime.
+    return buf, _cb  # type: ignore[return-value]
 
 
 @register_llm("claude")
@@ -384,6 +400,7 @@ class ClaudeProvider(LLMProvider):
             agent_system_prompt=agent_system_prompt or "",
         )
 
+        stderr_buf, stderr_cb = _make_stderr_collector("planner")
         options = ClaudeAgentOptions(
             cwd=workspace_path,
             system_prompt=system_prompt,
@@ -392,6 +409,7 @@ class ClaudeProvider(LLMProvider):
             permission_mode="bypassPermissions",
             max_turns=10,  # Plans shouldn't need 15 turns
             setting_sources=["project"],
+            stderr=stderr_cb,
         )
 
         log.info("claude.planner.started", workspace=workspace_path)
@@ -404,6 +422,9 @@ class ClaudeProvider(LLMProvider):
                             full_output += block.text
         except Exception as e:
             _check_auth_error(e)
+            tail = "\n".join(list(stderr_buf)[-20:])
+            if tail:
+                raise RuntimeError(f"planner crashed: {e}\n--- last stderr ---\n{tail}") from e
             raise
 
         log.info("claude.planner.done")
@@ -447,6 +468,7 @@ class ClaudeProvider(LLMProvider):
         ) + "\n\n" + env_hint
 
         # Coder: Opus for complex implementation, full MCP suite
+        stderr_buf, stderr_cb = _make_stderr_collector("coder")
         options = ClaudeAgentOptions(
             cwd=project_dir if mode == "host" and project_dir else workspace_path,
             system_prompt=system_prompt,
@@ -457,6 +479,7 @@ class ClaudeProvider(LLMProvider):
             max_turns=max_turns or self.coder_max_turns,
             setting_sources=["project"],
             include_partial_messages=True,
+            stderr=stderr_cb,
         )
 
         log.info("claude.coder.started", workspace=workspace_path)
@@ -465,6 +488,9 @@ class ClaudeProvider(LLMProvider):
                 yield message
         except Exception as e:
             _check_auth_error(e)
+            tail = "\n".join(list(stderr_buf)[-20:])
+            if tail:
+                raise RuntimeError(f"coder crashed: {e}\n--- last stderr ---\n{tail}") from e
             raise
 
     async def run_coder_fix(
@@ -543,6 +569,7 @@ class ClaudeProvider(LLMProvider):
         )
 
         # Reviewer: Sonnet for speed, read-only + git diff for review
+        stderr_buf, stderr_cb = _make_stderr_collector("reviewer")
         options = ClaudeAgentOptions(
             cwd=workspace_path,
             system_prompt=system_prompt,
@@ -561,6 +588,7 @@ class ClaudeProvider(LLMProvider):
             permission_mode="bypassPermissions",
             max_turns=max_turns or self.reviewer_max_turns,
             include_partial_messages=True,
+            stderr=stderr_cb,
         )
 
         log.info("claude.reviewer.started", workspace=workspace_path)
@@ -572,6 +600,9 @@ class ClaudeProvider(LLMProvider):
                 yield message
         except Exception as e:
             _check_auth_error(e)
+            tail = "\n".join(list(stderr_buf)[-20:])
+            if tail:
+                raise RuntimeError(f"reviewer crashed: {e}\n--- last stderr ---\n{tail}") from e
             raise
 
     def is_tool_use(self, message: Any) -> str | None:
