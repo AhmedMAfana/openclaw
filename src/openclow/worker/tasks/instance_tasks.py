@@ -163,6 +163,34 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
         )
         _copy_template_support_files(template_dir, output_dir)
 
+        # T069: reattach the chat's session branch BEFORE compose up.
+        # The compose.yml bind-mounts the instance workspace into
+        # ``/app``, so the project files must already be on disk when
+        # the containers start — otherwise php-fpm/node boot against
+        # an empty dir. Idempotent: re-runs on an already-attached
+        # worktree are a no-op.
+        async with async_session() as session:
+            inst_row = await session.get(Instance, inst_uuid)
+            project_row = inst_row.project if inst_row is not None else None
+        if project_row is not None:
+            try:
+                from openclow.services.workspace_service import WorkspaceService
+                await WorkspaceService().reattach_session_branch(
+                    project=project_row,
+                    session_branch=inst_row.session_branch,
+                    instance_workspace_path=workspace_path,
+                )
+            except Exception as e:
+                # A reattach failure is a provision failure per
+                # research §4 (partial-success 2/4: "DB row written
+                # but workspace missing → provision re-runs"). Bubble
+                # up as a structured PROJCTL_UP failure so the chat
+                # translator gives the user a Retry button.
+                raise _ProvisionFailure(
+                    FailureCode.PROJCTL_UP,
+                    f"session-branch reattach failed: {str(e)[:300]}",
+                )
+
         # 3. Mint a GitHub installation token scoped to the one repo.
         # Kept in-process memory only — never written to the rendered
         # compose file (Principle IV).
@@ -649,4 +677,82 @@ def _heartbeat_url_for(slug: str) -> str:
     return f"{base.rstrip('/')}/internal/instances/{slug}/heartbeat"
 
 
-__all__ = ["provision_instance", "teardown_instance"]
+async def rotate_github_token(ctx: dict, instance_id: str) -> dict:
+    """T063: mint a fresh GitHub installation token and inject it into
+    the running instance's ``~/.git-credentials`` via ``docker exec``.
+
+    Called every 45 min by the in-instance cron (T065) — projctl posts
+    to ``/internal/instances/<slug>/rotate-git-token`` to RECEIVE a new
+    token. Operators can also invoke this ARQ job directly from the
+    dashboard as a manual refresh; that's the path this function
+    serves.
+
+    Idempotent: if the mint succeeds but the injection step fails, a
+    retry mints a fresh token and retries the injection; the worst-case
+    outcome is one extra unused token (GitHub drops it after 1h).
+    """
+    inst_uuid = UUID(instance_id)
+    async with async_session() as session:
+        inst = await session.get(Instance, inst_uuid)
+        if inst is None:
+            return {"ok": False, "error": "instance not found"}
+        if inst.status not in (
+            InstanceStatus.RUNNING.value,
+            InstanceStatus.IDLE.value,
+        ):
+            return {"ok": False, "error": f"instance is {inst.status}"}
+        slug = inst.slug
+        compose_project = inst.compose_project
+        repo = inst.project.github_repo if inst.project else None
+
+    if not repo:
+        return {"ok": False, "error": "instance has no bound repo"}
+
+    try:
+        gh_cfg = await _load_github_app_config()
+        creds = CredentialsService(gh_cfg)
+        token = await creds.github_push_token(inst_uuid, repo)
+    except Exception as e:
+        log.warning(
+            "rotate_github_token.mint_failed",
+            slug=slug, error=str(e)[:200],
+        )
+        return {"ok": False, "error": f"mint failed: {str(e)[:200]}"}
+
+    # Write to ~/.git-credentials via a one-shot docker exec. The
+    # credentials file's format is ``https://x-access-token:<token>@github.com``.
+    # We echo via stdin so the token never appears in `ps` output.
+    line = f"https://x-access-token:{token.token}@github.com\n"
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "compose",
+        "-p", compose_project,
+        "exec", "-T", "app",
+        "sh", "-c",
+        # Overwrite (not append) so stale tokens never accumulate.
+        "cat > $HOME/.git-credentials && chmod 600 $HOME/.git-credentials",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=get_docker_env(),
+    )
+    try:
+        _, stderr = await asyncio.wait_for(
+            proc.communicate(input=line.encode("utf-8")),
+            timeout=_DOCKER_META_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return {"ok": False, "error": "docker exec timed out"}
+    if proc.returncode != 0:
+        return {
+            "ok": False,
+            "error": f"docker exec exit {proc.returncode}: "
+            f"{(stderr or b'').decode(errors='replace')[:500]}",
+        }
+
+    log.info("rotate_github_token.success", slug=slug, repo=repo)
+    return {"ok": True, "slug": slug, "repo": repo, "expires_at": token.expires_at}
+
+
+__all__ = ["provision_instance", "teardown_instance", "rotate_github_token"]

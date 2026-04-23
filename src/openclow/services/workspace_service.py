@@ -227,6 +227,133 @@ class WorkspaceService:
         """Get workspace path for a task."""
         return self._task_work_path(task_id)
 
+    async def reattach_session_branch(
+        self,
+        project,
+        session_branch: str,
+        instance_workspace_path: str,
+    ) -> None:
+        """T068: attach a chat's session branch as a worktree under ``<path>``.
+
+        Called by ``InstanceService.get_or_resume`` (T069) when a chat
+        reconnects after its prior instance was destroyed. The same
+        cache+worktree pattern used by ``prepare()`` — just re-scoped
+        to the per-instance path instead of the per-task path
+        (constitution: "re-use the cache, re-scope the worktree").
+
+        Behaviour:
+          1. Ensure the per-project cache exists (first-time chats
+             clone the repo here; returning chats hit cache).
+          2. ``git fetch`` so the branch ref is current.
+          3. If the cache has ``<session_branch>`` locally, worktree-add
+             from that branch into the instance workspace. If not,
+             create the branch off ``origin/<session_branch>`` if the
+             remote has it, otherwise branch from the project default.
+          4. If an old worktree is already mounted at ``instance_workspace_path``,
+             prune it first so the attach is idempotent on retry.
+
+        No-op shortcut: if ``instance_workspace_path`` already contains
+        a ``.git`` whose HEAD is on ``session_branch``, return directly —
+        a previous provision already attached it.
+        """
+        cache = self._project_cache_path(project.name)
+        await self._get_lock(project.name)
+        try:
+            os.makedirs(self.cache_path, exist_ok=True)
+
+            # 1. Ensure cache exists.
+            if not os.path.exists(cache):
+                log.info(
+                    "workspace.instance_first_clone",
+                    project=project.name,
+                    repo=project.github_repo,
+                )
+                from openclow.providers import factory
+                git = await factory.get_git()
+                await git.clone_repo(project.github_repo, cache)
+
+            # 2. Refresh so we see new remote refs.
+            await git_ops.fetch_and_reset(cache, project.default_branch)
+
+            # 3. Idempotent short-circuit.
+            dot_git = os.path.join(instance_workspace_path, ".git")
+            if os.path.exists(dot_git):
+                try:
+                    head_name = (await git_ops.run_exec(
+                        "git", "rev-parse", "--abbrev-ref", "HEAD",
+                        cwd=instance_workspace_path,
+                    )).strip()
+                except Exception:
+                    head_name = ""
+                if head_name == session_branch:
+                    log.info(
+                        "workspace.session_branch_already_attached",
+                        branch=session_branch,
+                        path=instance_workspace_path,
+                    )
+                    return
+                # Stale worktree — prune before re-attaching.
+                try:
+                    await git_ops.worktree_remove(cache, instance_workspace_path)
+                except Exception:
+                    # If git refuses (detached, missing), remove the dir
+                    # and let git forget its own state via `worktree prune`.
+                    shutil.rmtree(instance_workspace_path, ignore_errors=True)
+                    await git_ops.run_exec(
+                        "git", "worktree", "prune", cwd=cache,
+                        ignore_errors=True,
+                    )
+
+            # 4. Decide where <session_branch> comes from.
+            # Prefer a local branch in cache → remote origin branch →
+            # fall back to branching from project default.
+            branch_source = None
+            try:
+                await git_ops.run_exec(
+                    "git", "show-ref", "--verify", "--quiet",
+                    f"refs/heads/{session_branch}",
+                    cwd=cache,
+                )
+                branch_source = session_branch
+            except Exception:
+                try:
+                    await git_ops.run_exec(
+                        "git", "show-ref", "--verify", "--quiet",
+                        f"refs/remotes/origin/{session_branch}",
+                        cwd=cache,
+                    )
+                    branch_source = f"origin/{session_branch}"
+                except Exception:
+                    branch_source = project.default_branch
+
+            os.makedirs(os.path.dirname(instance_workspace_path) or "/", exist_ok=True)
+            if branch_source == session_branch:
+                # Local branch already exists — worktree_add checks it out.
+                await git_ops.worktree_add(
+                    cache, instance_workspace_path, session_branch
+                )
+            else:
+                # Create a new worktree with a fresh branch tracking
+                # `branch_source`. -b creates the local branch atomically
+                # with the worktree; safer than a two-step.
+                await git_ops.run_exec(
+                    "git", "worktree", "add",
+                    "-b", session_branch,
+                    instance_workspace_path,
+                    branch_source,
+                    cwd=cache,
+                )
+
+            log.info(
+                "workspace.session_branch_attached",
+                project=project.name,
+                branch=session_branch,
+                source=branch_source,
+                path=instance_workspace_path,
+            )
+        finally:
+            await self._release_lock(project.name)
+
     async def cleanup(self, task_id: str, project_name: str | None = None):
         """Stop project Docker stack and remove workspace (keep cache)."""
         work = self._task_work_path(task_id)

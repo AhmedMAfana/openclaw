@@ -305,12 +305,27 @@ class InstanceService:
 
         Primary entry point from ``chat_task.py``. If the chat's only
         rows are terminal (destroyed / failed), a fresh instance is
-        provisioned. If the active row is ``idle``, it is touched so the
-        grace-window teardown is cancelled.
+        provisioned — carrying forward the ``session_branch`` from the
+        most-recent terminal row so the user's in-progress commits are
+        preserved (FR-012/FR-013, T069). If the active row is ``idle``,
+        it is touched so the grace-window teardown is cancelled.
         """
         async with self._session_factory() as session:
             existing = await self._find_active_for_chat(session, chat_session_id)
             if existing is None:
+                # T069: before provisioning, inherit the session_branch
+                # from the chat's most-recent terminal instance so the
+                # new row reattaches to the user's live code instead of
+                # starting fresh. Write it back to the chat row so a
+                # second re-entry skips the history scan.
+                prior_branch = await self._load_prior_session_branch(
+                    session, chat_session_id
+                )
+                if prior_branch is not None:
+                    chat = await session.get(WebChatSession, chat_session_id)
+                    if chat is not None and chat.session_branch_name != prior_branch:
+                        chat.session_branch_name = prior_branch
+                        await session.commit()
                 return await self.provision(chat_session_id)
             if existing.status == InstanceStatus.IDLE.value:
                 # Returning from idle — reset the clock and clear the
@@ -319,6 +334,35 @@ class InstanceService:
                 await session.commit()
                 await session.refresh(existing)
             return existing
+
+    async def _load_prior_session_branch(
+        self, session: Any, chat_session_id: int
+    ) -> str | None:
+        """Return ``session_branch`` of the chat's most-recent terminal row.
+
+        Terminal = ``destroyed`` / ``failed`` / ``terminating``. The chat
+        is about to re-provision; whichever ``session_branch`` the user
+        last worked on is the one to reattach to (FR-012). Returns None
+        if the chat never provisioned before — caller falls through to
+        the default ``chat-<id>-session`` naming.
+        """
+        result = await session.execute(
+            select(Instance)
+            .where(
+                Instance.chat_session_id == chat_session_id,
+                Instance.status.in_((
+                    InstanceStatus.DESTROYED.value,
+                    InstanceStatus.FAILED.value,
+                    InstanceStatus.TERMINATING.value,
+                )),
+            )
+            .order_by(Instance.created_at.desc())
+            .limit(1)
+        )
+        prior = result.scalar_one_or_none()
+        if prior is None:
+            return None
+        return prior.session_branch
 
     async def touch(self, instance_id: UUID) -> None:
         """Bump activity. No-op outside {running, idle}.

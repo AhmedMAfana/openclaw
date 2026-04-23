@@ -727,6 +727,19 @@ async def assistant_endpoint(
                 # Use the instance's workspace as cwd so built-in Read/Edit
                 # see the instance's files and not the orchestrator's.
                 workspace = container_instance.workspace_path
+                # T070: if we're still provisioning (fresh chat or
+                # resuming from a prior teardown), render a non-blocking
+                # "starting up" banner so the user knows to expect a
+                # pause. The ~90s number is SC-002's cold-start budget.
+                if container_instance.status == "provisioning":
+                    controller.add_data({
+                        "type": "instance_provisioning",
+                        "slug": container_instance.slug,
+                        "estimated_seconds": 90,
+                    })
+                    controller.append_text(
+                        "Starting up your environment — about 90 seconds.\n\n"
+                    )
                 # FR-009: every inbound chat message is an activity signal —
                 # bumps last_activity_at, clears a pending grace banner,
                 # transitions an `idle` row back to `running`.

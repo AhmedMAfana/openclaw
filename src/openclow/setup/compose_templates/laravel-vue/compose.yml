@@ -39,7 +39,7 @@ services:
       - HEARTBEAT_SECRET
       - HEARTBEAT_URL
     volumes:
-      - workspace:/app
+      - /workspaces/${INSTANCE_SLUG}:/app
       - projctl-state:/var/lib/projctl
     depends_on:
       db:
@@ -53,7 +53,7 @@ services:
     image: nginx:1.27-alpine
     restart: unless-stopped
     volumes:
-      - workspace:/app:ro
+      - /workspaces/${INSTANCE_SLUG}:/app:ro
       - ./_nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - app
@@ -70,7 +70,7 @@ services:
       - INSTANCE_HMR_HOST=${INSTANCE_HMR_HOST}
       - NODE_ENV=development
     volumes:
-      - workspace:/app
+      - /workspaces/${INSTANCE_SLUG}:/app
     networks:
       - instance
 
@@ -117,8 +117,10 @@ networks:
     driver: bridge
 
 volumes:
-  workspace:
-    name: ${COMPOSE_PROJECT}-workspace
+  # `workspace` is a host bind mount (see each service's `volumes:`
+  # block). Keeping a named volume definition out of this file avoids
+  # the legacy anonymous-volume that docker would otherwise mount in
+  # place of the bind when compose parses references from older state.
   db-data:
     name: ${COMPOSE_PROJECT}-db
   projctl-state:

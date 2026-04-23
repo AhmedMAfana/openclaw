@@ -282,3 +282,119 @@ async def heartbeat(slug: str, request: Request) -> JSONResponse:
         "expires_at": ack.expires_at.isoformat(),
         "status": ack.status,
     })
+
+
+@internal_router.post("/instances/{slug}/rotate-git-token")
+async def rotate_git_token(slug: str, request: Request) -> JSONResponse:
+    """Mint + return a fresh 1-hour GitHub installation token.
+
+    Contract: specs/001-per-chat-instances/contracts/heartbeat-api.md.
+    Called by ``projctl rotate-git-token`` every 45 min inside the
+    instance (cron). Same HMAC auth + rate-limit + status gate as the
+    heartbeat endpoint; additional failure mode is a GitHub App outage
+    → 503 with ``Retry-After`` so projctl silently waits for the next
+    cron tick.
+
+    Token is scoped to exactly one repo — the project's repo bound to
+    this instance. GitHub rejects pushes elsewhere at the auth layer
+    (T061 exercises that), so a token leak from this endpoint is still
+    bounded to one repo's contents.
+    """
+    if not await _check_rate_limit(slug):
+        return JSONResponse(
+            status_code=429,
+            content={"status": "rate_limited"},
+            headers={"Retry-After": str(_HB_WINDOW_S)},
+        )
+
+    raw_body = await request.body()
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Instance).where(Instance.slug == slug)
+        )
+        inst = result.scalar_one_or_none()
+
+    if inst is None:
+        return JSONResponse(status_code=404, content={"status": "unknown_slug"})
+
+    sig_header = request.headers.get("x-signature") or request.headers.get("X-Signature")
+    if not _verify_hmac(sig_header, raw_body, inst.heartbeat_secret):
+        await _bump_auth_fail_counter(slug)
+        log.warning("rotate_git_token.hmac_failed", slug=slug)
+        return JSONResponse(status_code=401, content={"status": "unauthorized"})
+
+    if inst.status not in (
+        InstanceStatus.RUNNING.value,
+        InstanceStatus.IDLE.value,
+        InstanceStatus.PROVISIONING.value,
+    ):
+        return JSONResponse(
+            status_code=409,
+            content={"status": inst.status},
+        )
+
+    # Resolve the project repo.
+    repo: str | None = None
+    async with async_session() as session:
+        proj_inst = await session.get(Instance, inst.id)
+        if proj_inst is not None and proj_inst.project is not None:
+            repo = proj_inst.project.github_repo
+    if not repo:
+        return JSONResponse(
+            status_code=409,
+            content={"status": "no_repo_bound"},
+        )
+
+    # Mint a scoped token. CredentialsService already does the JWT +
+    # installation-token exchange; we just call it here.
+    try:
+        from openclow.services.credentials_service import (
+            CredentialsService,
+            GitHubAppConfig,
+            GitHubAppError,
+        )
+        from openclow.services.config_service import get_config
+        cfg = await get_config("github_app", "settings")
+        if not cfg:
+            # Operator hasn't configured the GitHub App yet.
+            return JSONResponse(
+                status_code=503,
+                content={"status": "github_app_unconfigured"},
+                headers={"Retry-After": "300"},
+            )
+        gh_cfg = GitHubAppConfig(
+            app_id=str(cfg["app_id"]),
+            private_key_pem=cfg["private_key_pem"],
+        )
+        token = await CredentialsService(gh_cfg).github_push_token(
+            inst.id, repo
+        )
+    except GitHubAppError as e:
+        # FR-027a: treat as upstream degradation. projctl retries on its
+        # own 45-min cron; the banner policy in the chat UI gets a
+        # separate upstream_degraded event out-of-band.
+        log.warning(
+            "rotate_git_token.github_app_outage",
+            slug=slug, error=str(e)[:200],
+        )
+        return JSONResponse(
+            status_code=503,
+            content={"status": "github_app_degraded"},
+            headers={"Retry-After": "300"},
+        )
+    except Exception as e:
+        log.exception("rotate_git_token.unexpected", slug=slug, error=str(e))
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable"},
+            headers={"Retry-After": "60"},
+        )
+
+    return JSONResponse({
+        "token": token.token,
+        "expires_at": datetime.fromtimestamp(
+            token.expires_at, tz=timezone.utc
+        ).isoformat(),
+        "repo": token.repo,
+    })
