@@ -32,4 +32,15 @@ fi
 # Back up .claude.json to volume on every start (so it persists)
 cp "$CLAUDE_JSON" "$CONFIG_BACKUP" 2>/dev/null
 
+# Playwright MCP sanity check — fails loud on first boot if the image
+# was rebuilt without @playwright/mcp or the Chromium cache got nuked.
+# Keeps the "Failed" state that caused this in Claude Code from silently
+# recurring after a worker rebuild.
+if [ ! -x /usr/local/bin/playwright-mcp ] && [ ! -x /usr/local/nvm/versions/node/v20.20.2/bin/playwright-mcp ]; then
+    echo "[entrypoint] ERROR: playwright-mcp binary is missing; rebuild Dockerfile.worker." >&2
+fi
+if [ -n "$PLAYWRIGHT_BROWSERS_PATH" ] && [ ! -d "$PLAYWRIGHT_BROWSERS_PATH" ]; then
+    echo "[entrypoint] WARNING: PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH missing; run npx playwright install chromium inside the container." >&2
+fi
+
 exec "$@"

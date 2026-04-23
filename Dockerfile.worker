@@ -48,10 +48,18 @@ RUN curl -fsSL https://get.docker.com | sh
 RUN curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(dpkg --print-architecture) \
     -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
 
-# Claude Code CLI + Playwright MCP
-RUN npm install -g @anthropic-ai/claude-code@latest @playwright/mcp@latest
+# Claude Code CLI + Playwright MCP (both globally installed via npm).
+# `@playwright/mcp` ships a `playwright-mcp` shim in the node bin dir;
+# we symlink it to /usr/local/bin/playwright-mcp so the Claude Code MCP
+# registration can target a stable path that survives Node upgrades
+# (the NVM version number in /usr/local/nvm/versions/node/<ver>/bin/
+# changes whenever NODE_VERSION is bumped).
+RUN npm install -g @anthropic-ai/claude-code@latest @playwright/mcp@latest \
+    && ln -sf $(npm prefix -g)/bin/playwright-mcp /usr/local/bin/playwright-mcp
 
-# Playwright browsers — install to shared path so any user can access
+# Playwright browsers — install to shared path so any user can access.
+# Baked at image build time so first launch is instant; no lazy download
+# on MCP handshake (which Claude Code's short init timeout would fail on).
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 RUN npx playwright install --with-deps chromium
 

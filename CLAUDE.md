@@ -113,6 +113,36 @@ src/openclow/
 - **Shared agent utilities**: use `worker/tasks/_agent_base.py` for tool descriptions (`describe_tool`), auth error detection (`is_auth_error`), and common patterns. Don't copy-paste agent boilerplate.
 - **MCP factories live in `providers/llm/claude.py`**: `_mcp_docker()`, `_mcp_playwright()`, `_mcp_git()`. Import these, don't inline MCP server configs.
 
+## Playwright MCP — Claude Code setup
+
+Playwright MCP runs **inside the worker container** (the host Mac has no
+Node). The worker image bakes `@playwright/mcp` + Chromium at build
+time (Dockerfile.worker lines 52-60) and publishes a stable binary at
+`/usr/local/bin/playwright-mcp`. Two consequences:
+
+1. **Worker must be running** for Claude Code to reach Playwright. If
+   `docker ps` doesn't show `tagh-devops-worker-1`, the MCP will be
+   listed as "Failed" in the Claude Code MCP dialog. Start the worker
+   first: `docker compose up -d worker`.
+2. **Don't use `npx @playwright/mcp@latest`** in the Claude Code
+   registration — every launch triggers a registry check that races
+   against Claude Code's short handshake timeout. Use the stable
+   binary path.
+
+To (re)register the MCP at user scope on a fresh machine:
+
+```bash
+claude mcp add --scope user playwright -- \
+  docker exec -i tagh-devops-worker-1 /usr/local/bin/playwright-mcp --headless
+```
+
+Then restart Claude Code. Verify with `claude mcp list`; Playwright
+should show green, not "Failed".
+
+The worker-entrypoint.sh prints a loud warning at container startup if
+the `playwright-mcp` binary or `PLAYWRIGHT_BROWSERS_PATH` is missing,
+so a future Dockerfile regression doesn't silently break the MCP.
+
 ## Per-chat instance mode — quick reference (T090)
 
 Every NEW web chat now runs in **container mode** by default: the chat
