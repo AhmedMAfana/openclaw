@@ -1,0 +1,19 @@
+tunnel: ${CF_TUNNEL_ID}
+
+# Ingress rules per arch doc §5.3. The first match wins; the trailing
+# http_status:404 is mandatory so unknown hostnames do not silently
+# proxy to any service.
+#
+# noTLSVerify is safe because cloudflared speaks plain HTTP to targets
+# that live inside the per-instance compose network — the network is
+# egress-only so the only traffic reaching ${INSTANCE_HMR_HOST} has
+# already been decrypted at the Cloudflare edge.
+
+ingress:
+  - hostname: ${INSTANCE_HMR_HOST}
+    service: http://node:5173
+    originRequest:
+      noTLSVerify: true
+  - hostname: ${INSTANCE_HOST}
+    service: http://web:80
+  - service: http_status:404

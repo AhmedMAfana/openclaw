@@ -1,0 +1,21 @@
+name: laravel-vue
+description: "Laravel 11 backend + Vue 3 + Vite front end with HMR."
+stack: [laravel, vue, vite, mysql]
+
+# Which compose service projctl runs its steps against (php-fpm container).
+app_service: app
+
+# Which service carries the front-end dev server (for HMR env injection).
+dev_service: node
+
+# Resource profile; matches Instance.resource_profile (standard | large).
+resource_profile: standard
+
+# guide.md lives next to this file.
+guide: guide.md
+
+# Non-secret env; secrets arrive via the orchestrator's env-injection at
+# compose-up time, not from here (GUIDE_SPEC.md §1).
+env:
+  APP_ENV: local
+  NODE_ENV: development

@@ -36,7 +36,8 @@ def _load_functions():
     from openclow.worker.tasks.qa_task import run_qa_tests
     from openclow.worker.tasks.bot_lifecycle import restart_bot_task, get_bot_status_task
     from openclow.worker.tasks.agent_session import agent_session
-    from openclow.worker.tasks.auth_task import claude_auth_task, claude_auth_check, claude_auth_get_url
+    from openclow.worker.tasks.auth_task import claude_auth_task, claude_auth_check, claude_auth_get_url, claude_auth_login_web
+    from openclow.worker.tasks.instance_tasks import provision_instance, teardown_instance
     return [
         execute_task, execute_plan, approve_task, merge_task, reject_task, discard_task,
         onboard_project, confirm_project,
@@ -55,6 +56,9 @@ def _load_functions():
         claude_auth_task,
         claude_auth_check,
         claude_auth_get_url,
+        claude_auth_login_web,
+        provision_instance,
+        teardown_instance,
     ]
 
 

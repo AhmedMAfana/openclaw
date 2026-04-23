@@ -1,0 +1,125 @@
+name: ${COMPOSE_PROJECT}
+
+# Per-instance Laravel 11 + Vue 3 (Vite) + MySQL stack.
+#
+# Principle V: NO `ports:` on any service other than `cloudflared`.
+# All ingress arrives via the Cloudflare tunnel sidecar; services
+# communicate over the per-instance compose network only.
+#
+# Two kinds of variables appear in this file:
+#   ${INSTANCE_*}, ${COMPOSE_PROJECT}, ${CF_TUNNEL_ID}
+#     → baked in at render time by instance_compose_renderer.py.
+#   List-form `environment: - KEY`
+#     → inherited from the parent process env at compose-up time.
+#       The ARQ provision_instance job exports DB_PASSWORD,
+#       GITHUB_TOKEN, HEARTBEAT_SECRET, HEARTBEAT_URL, and
+#       CF_TUNNEL_TOKEN before invoking `docker compose up`.
+
+services:
+  app:
+    image: tagh/laravel-vue-app:latest
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      - INSTANCE_SLUG=${INSTANCE_SLUG}
+      - INSTANCE_HOST=${INSTANCE_HOST}
+      - INSTANCE_HMR_HOST=${INSTANCE_HMR_HOST}
+      - APP_ENV=local
+      - APP_DEBUG=true
+      - APP_URL=https://${INSTANCE_HOST}
+      - DB_CONNECTION=mysql
+      - DB_HOST=db
+      - DB_PORT=3306
+      - DB_DATABASE=app
+      - DB_USERNAME=app
+      - DB_PASSWORD
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - GITHUB_TOKEN
+      - HEARTBEAT_SECRET
+      - HEARTBEAT_URL
+    volumes:
+      - workspace:/app
+      - projctl-state:/var/lib/projctl
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - instance
+
+  web:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - workspace:/app:ro
+      - ./_nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - app
+    networks:
+      - instance
+
+  node:
+    image: node:20-alpine
+    restart: unless-stopped
+    working_dir: /app
+    command: ["sh", "-c", "tail -f /dev/null"]
+    environment:
+      - INSTANCE_HOST=${INSTANCE_HOST}
+      - INSTANCE_HMR_HOST=${INSTANCE_HMR_HOST}
+      - NODE_ENV=development
+    volumes:
+      - workspace:/app
+    networks:
+      - instance
+
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      - MYSQL_DATABASE=app
+      - MYSQL_USER=app
+      - MYSQL_PASSWORD
+      - MYSQL_ROOT_PASSWORD
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - instance
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - instance
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yml", "run"]
+    environment:
+      - TUNNEL_TOKEN
+    volumes:
+      - ./_cloudflared.yml:/etc/cloudflared/config.yml:ro
+    depends_on:
+      - web
+      - node
+    networks:
+      - instance
+
+networks:
+  instance:
+    driver: bridge
+
+volumes:
+  workspace:
+    name: ${COMPOSE_PROJECT}-workspace
+  db-data:
+    name: ${COMPOSE_PROJECT}-db
+  projctl-state:
+    name: ${COMPOSE_PROJECT}-projctl-state
