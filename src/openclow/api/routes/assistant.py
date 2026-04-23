@@ -29,7 +29,20 @@ from openclow.models.web_chat import WebChatSession, WebChatMessage
 from openclow.services.access_service import get_accessible_projects_for_mcp, is_tool_allowed
 from openclow.worker.tasks.agent_session import _build_context
 from openclow.worker.tasks._agent_base import describe_tool
-from openclow.providers.llm.claude import _mcp_playwright, _mcp_docker, _mcp_actions, _mcp_github
+from openclow.providers.llm.claude import (
+    _mcp_playwright,
+    _mcp_docker,
+    _mcp_actions,
+    _mcp_github,
+    _container_mode_mcp_servers,
+    CONTAINER_MODE_TOOLS,
+)
+from openclow.services.instance_service import (
+    InstanceService,
+    PerUserCapExceeded,
+    PlatformAtCapacity,
+    ProjectNotContainerMode,
+)
 from openclow.utils.logging import get_logger
 
 log = get_logger()
@@ -523,9 +536,66 @@ async def assistant_endpoint(
                 )
 
             # 7. Set up tools
-            # NOTE: Read/Write/Edit/Glob/Grep are intentionally excluded from web chat.
+            # NOTE: Read/Write/Edit/Glob/Grep are intentionally excluded from
+            # host/docker web chats. Container-mode chats (T042) re-include
+            # them because the `workspace_mcp` server is root-bounded.
             _visual_keywords = ("screenshot", "navigate", "click", "browser", "open app", "visit", "playwright", "qa", "visual", "look at")
             _needs_playwright = any(kw in user_text.lower() for kw in _visual_keywords)
+
+            # --- T042: container-mode routing ----------------------------
+            # When the chat's project runs in `mode='container'`, the agent
+            # gets a *scoped* MCP fleet bound to this one chat's Instance,
+            # and nothing else. No Bash, no docker, no host_run_command, no
+            # orchestration actions — the agent can only touch its own
+            # instance's containers, its own workspace, and its own session
+            # branch. All three guarantees live in the MCP servers' argv
+            # (see T038/T039/T040) — the tool allowlist here is a belt on
+            # top of those braces.
+            container_mode = False
+            container_instance = None
+            if resolved_project_id:
+                from openclow.models.project import Project as _Project
+                async with async_session() as _db:
+                    _proj = await _db.get(_Project, int(resolved_project_id))
+                    if _proj is not None and _proj.mode == "container":
+                        container_mode = True
+            if container_mode:
+                try:
+                    container_instance = await InstanceService().get_or_resume(
+                        chat_session_id=session_id
+                    )
+                except PerUserCapExceeded as e:
+                    # T044 will render this as a rich chat card with links
+                    # to each active chat + a Main Menu button. For now we
+                    # return a clear plain-text message so the user is not
+                    # left with a silent stream.
+                    controller.append_text(
+                        f"You already have {len(e.active_chat_ids)} active chats "
+                        f"(cap={e.cap}). End one to start another.\n"
+                    )
+                    await asyncio.shield(
+                        _update_message(
+                            asst_msg_id_int,
+                            f"per_user_cap_exceeded:{e.cap}",
+                        )
+                    )
+                    return
+                except PlatformAtCapacity:
+                    controller.append_text(
+                        "The platform is at capacity right now. "
+                        "Please try again in a few minutes.\n"
+                    )
+                    await asyncio.shield(
+                        _update_message(
+                            asst_msg_id_int, "platform_at_capacity"
+                        )
+                    )
+                    return
+                except ProjectNotContainerMode:
+                    # Racing edit changed the project out of container mode
+                    # mid-flight. Fall back to host/docker path.
+                    container_mode = False
+                    container_instance = None
 
             base_tools = []
             if _needs_playwright:
@@ -538,34 +608,57 @@ async def assistant_endpoint(
                     "mcp__playwright__browser_type",
                 ]
 
-            base_tools += [
-                "mcp__actions__list_projects",
-                "mcp__actions__list_tasks",
-                "mcp__actions__system_status",
-                "mcp__actions__trigger_addproject",
-                "mcp__actions__bootstrap",
-                "mcp__actions__trigger_task",
-                "mcp__actions__docker_up",
-                "mcp__actions__docker_down",
-                "mcp__actions__relink_project",
-                "mcp__actions__unlink_project",
-                "mcp__actions__confirm_project",
-                "mcp__actions__project_health",
-                "mcp__github__list_repos",
-                "mcp__github__repo_info",
-                "mcp__github__list_branches",
-                "mcp__github__list_prs",
-                "mcp__github__check_repo_access",
-            ]
-            mcp_servers: dict = {
-                "actions": _mcp_actions(),
-                "github": _mcp_github(),
-            }
-            if _needs_playwright:
-                mcp_servers["playwright"] = _mcp_playwright()
+            if container_mode and container_instance is not None:
+                # Scoped fleet only — no actions/github/docker/host.
+                base_tools = list(CONTAINER_MODE_TOOLS)
+                mcp_servers: dict = _container_mode_mcp_servers(
+                    container_instance
+                )
+                # Use the instance's workspace as cwd so built-in Read/Edit
+                # see the instance's files and not the orchestrator's.
+                workspace = container_instance.workspace_path
+                # FR-009: every inbound chat message is an activity signal —
+                # bumps last_activity_at, clears a pending grace banner,
+                # transitions an `idle` row back to `running`.
+                try:
+                    await InstanceService().touch(container_instance.id)
+                except Exception as _e:
+                    log.warning(
+                        "assistant.touch_failed",
+                        instance_id=str(container_instance.id),
+                        error=str(_e),
+                    )
+            else:
+                base_tools += [
+                    "mcp__actions__list_projects",
+                    "mcp__actions__list_tasks",
+                    "mcp__actions__system_status",
+                    "mcp__actions__trigger_addproject",
+                    "mcp__actions__bootstrap",
+                    "mcp__actions__trigger_task",
+                    "mcp__actions__docker_up",
+                    "mcp__actions__docker_down",
+                    "mcp__actions__relink_project",
+                    "mcp__actions__unlink_project",
+                    "mcp__actions__confirm_project",
+                    "mcp__actions__project_health",
+                    "mcp__github__list_repos",
+                    "mcp__github__repo_info",
+                    "mcp__github__list_branches",
+                    "mcp__github__list_prs",
+                    "mcp__github__check_repo_access",
+                ]
+                mcp_servers: dict = {
+                    "actions": _mcp_actions(),
+                    "github": _mcp_github(),
+                }
+                if _needs_playwright:
+                    mcp_servers["playwright"] = _mcp_playwright()
 
-            # Filter base_tools for restricted users
-            if not is_admin and effective_role is not None:
+            # Filter base_tools for restricted users — skip in container
+            # mode: CONTAINER_MODE_TOOLS has no mcp__actions__* entries, so
+            # the RBAC filter would be a no-op; skipping keeps the path tight.
+            if not container_mode and not is_admin and effective_role is not None:
                 _action_map = {
                     "mcp__actions__trigger_task": "trigger_task",
                     "mcp__actions__trigger_addproject": "trigger_addproject",
@@ -585,7 +678,11 @@ async def assistant_endpoint(
                     is_tool_allowed(effective_role, _action_map.get(t, t))
                 ]
 
-            if is_admin:
+            if is_admin and not container_mode:
+                # Admin Docker escape hatch is host/docker-mode only.
+                # Container-mode chats never see ambient-authority tools —
+                # admins still can run them from other chats or via the
+                # dashboard.
                 base_tools.extend([
                     "mcp__docker__list_containers",
                     "mcp__docker__container_logs",
