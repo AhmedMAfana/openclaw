@@ -1125,10 +1125,17 @@ async def assistant_endpoint(
                                                     summary = "\n".join(pieces)
                                                 else:
                                                     summary = ""
+                                                # Principle IV: the redactor MUST run on both
+                                                # the chat-UI path AND the LLM-fallback path.
+                                                # Tool results stream directly to the browser,
+                                                # so a stderr carrying `GITHUB_TOKEN=...` or a
+                                                # bearer header would leak into the user-
+                                                # visible stream without this pass.
+                                                from openclow.services.audit_service import redact as _redact_chat
                                                 controller.add_data({
                                                     "type": "tool_result",
                                                     "tool_use_id": block.tool_use_id,
-                                                    "content": summary[:1500],
+                                                    "content": _redact_chat(summary[:1500]),
                                                     "is_error": bool(block.is_error),
                                                     "status": "error" if block.is_error else "complete",
                                                 })

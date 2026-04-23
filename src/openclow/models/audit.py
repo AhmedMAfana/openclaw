@@ -33,6 +33,11 @@ class AuditLog(Base):
     # Where it happened
     workspace: Mapped[str | None] = mapped_column(String(500))
     project_name: Mapped[str | None] = mapped_column(String(255))
+    # Per-chat instance slug (``inst-<14 hex>``). Nullable for rows written
+    # before migration 013 and for non-instance-scoped audit events (e.g.
+    # orchestrator maintenance). Principle I: MCP tool calls MUST populate
+    # this so a post-hoc auditor can prove one-instance-per-task.
+    instance_slug: Mapped[str | None] = mapped_column(String(20), index=True)
 
     # Result
     exit_code: Mapped[int | None] = mapped_column(Integer)

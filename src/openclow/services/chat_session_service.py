@@ -156,17 +156,12 @@ async def delete_chat_cascade(chat_session_id: int) -> dict:
 async def _delete_audit_for_slugs(slugs: set[str]) -> int:
     """Delete AuditLog rows whose ``instance_slug`` is in the set.
 
-    Best-effort: wrapped in a try/except so a missing column / schema
-    drift never blocks the chat delete. Returns the affected row count.
+    The ``instance_slug`` column was added by migration 013. Callers
+    depend on this cleanup step completing — it's the last hop of the
+    FR-013b cascade — so we do NOT swallow errors here; a schema drift
+    that breaks it MUST surface loudly, not silently.
     """
-    try:
-        from openclow.models.audit import AuditLog
-    except Exception:
-        return 0
-    if not hasattr(AuditLog, "instance_slug"):
-        # Schema predates the instance-slug annotation. The operator's
-        # log-hygiene job will sweep orphaned rows eventually.
-        return 0
+    from openclow.models.audit import AuditLog
     async with async_session() as session:
         res = await session.execute(
             delete(AuditLog).where(AuditLog.instance_slug.in_(slugs))
