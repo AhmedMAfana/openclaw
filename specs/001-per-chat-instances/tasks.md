@@ -314,6 +314,77 @@ description: "Task list for per-chat isolated instances"
 
 ---
 
+## Phase 10: Chat UI — Container-Mode Compat (Priority: P1)
+
+**Purpose**: Close the frontend compatibility gap identified during live Playwright testing on 2026-04-24. The backend emits **nine** `controller.add_data` event types for container-mode chats (`instance_provisioning`, `instance_failed`, `instance_limit_exceeded`, `instance_upstream_degraded`, `instance_busy`, `instance_terminating`, `instance_retry_started`, `confirm`, and `tool_result`). The chat frontend at [chat_frontend/src/App.tsx:110-128](../../chat_frontend/src/App.tsx#L110-L128) only handles two of them (`tool_use`, `message_id`). The remaining seven are silently dropped — users see only the plain-text fallback I emit alongside each event. That's a degraded UX for the entire feature's user-facing surface.
+
+**Rationale**: Proved live. Captured raw stream in a container-mode chat (testuser, project 3):
+
+```
+2:[{"type": "instance_provisioning", "slug": "inst-761047d5ba9907", "estimated_seconds": 90}]
+0:"Starting up your environment — about 90 seconds.\n\n"
+2:[{"type": "message_id", "id": "8"}]
+```
+
+The data event reached the frontend; no rich banner rendered.
+
+**Independent Test**: With `OPENCLOW_E2E=0` (purely frontend — no CF/GitHub needed): open `test-project` flipped to `mode='container'`, send any message, assert the chat renders a "Starting up your environment" **card with slug chip + ETA countdown** — not just plain text.
+
+### Tests for Phase 10
+
+- [ ] T097 [P] [FE] Create `chat_frontend/src/__tests__/stream_parser.test.ts` — unit tests for the extended `parseStream` reducer. Feed each of the nine event types (`instance_provisioning`, `instance_failed`, `instance_limit_exceeded` × 2 variants, `instance_upstream_degraded`, `instance_busy`, `instance_terminating`, `instance_retry_started`, `confirm`, `tool_result`) as synthetic `2:`-prefixed lines; assert each calls the correct handler (`onBanner` / `onCard` / `onToolResult` / etc.) exactly once with the expected payload shape. Uses `vitest` — matches existing frontend test harness. Principle VII gate: no half-wired event types.
+- [ ] T098 [P] [FE] Create `chat_frontend/src/__tests__/instance_components.test.tsx` — snapshot + interaction tests for `InstanceBanner`, `InstanceCard`, `ConfirmCard`. Cover: (a) provisioning banner shows ETA and clears when status flips, (b) failed card's Retry button posts `retry_provision:<id>`, (c) per-user-cap card renders one link per `active_chat_ids` entry plus a Main Menu button, (d) platform-capacity variant renders without per-chat links (FR-030 vs FR-030b), (e) confirm card Cancel routes to `/chat` (CLAUDE.md "No Dead Ends"). `@testing-library/react` patterns.
+- [ ] T099 [P] [FE] Extend `tests/integration/test_agent_isolation.py::test_factories_bake_identity_into_argv` — add a frontend-side counterpart at `chat_frontend/src/__tests__/container_mode_routing.test.ts` that mocks `fetch('/api/assistant')` to yield the nine event types and asserts the rendered message list never includes raw JSON (i.e., no event escapes the reducer unhandled).
+
+### Implementation for Phase 10
+
+- [ ] T100 [FE] Extend `chat_frontend/src/App.tsx::parseStream` — switch on `evt.type` across all ten types (nine instance_* + `tool_result`). Dispatch to new handlers: `onBanner({kind, slug, eta_s})`, `onCard({kind, variant, actions, endpoint})`, `onToolResult({tool_use_id, content, is_error})`. Existing `onTool` / `onId` handlers stay put. Deduplicate by `tool_use_id` so repeated tool_result events for the same call don't render twice. Do NOT swallow unknown event types silently — log a `console.warn` with the event type so a future backend addition surfaces loudly (same policy as the backend's `InMemorySession.execute` AssertionError pattern from `tests/conftest.py`).
+- [ ] T101 [FE] Create `chat_frontend/src/components/instance/InstanceBanner.tsx` — single-component cover for the non-interactive states: `provisioning` (slug chip + ETA bar), `upstream_degraded` (capability badge), `busy` (amber pill), `terminating` (grey spinner), `retry_started` (green pill). Props: `kind`, `slug?`, `caps?`, `eta_s?`. Uses existing `ui/` primitives (`Button`, `Tooltip`). Matches existing `SettingsPanel` visual language; pass-through className for theming.
+- [ ] T102 [FE] Create `chat_frontend/src/components/instance/InstanceCard.tsx` — covers the interactive states: `failed` (plain-language copy from `failure_code`, Retry + Main Menu buttons), `cap_exceeded` (per_user_cap variant renders `active_chat_ids` as clickable chat links fetched from `instances_endpoint`; platform_capacity variant renders only the retry-later pill), `confirm` (prompt + Confirm/Cancel). Action buttons post to `/api/assistant` with the corresponding `action_id` as a text message (`end_session_confirm:<id>`, `retry_provision:<id>`, etc.) so the existing backend switch in `api/routes/assistant.py::assistant_endpoint` picks them up.
+- [ ] T103 [FE] Create `chat_frontend/src/components/instance/ConfirmCard.tsx` — dedicated destructive-confirm component used by the `/terminate` and End-session flows. Two-button row: primary danger "Confirm end session" + secondary "Cancel". `action_id` is passed through as-is so `api/routes/assistant.py` handlers match by prefix (`end_session_confirm:<id>`). CLAUDE.md "No Dead Ends" gate: the Cancel button MUST be present on every render.
+- [ ] T104 [FE] Plumb the new handlers into `App.tsx`'s `useState` reducer — add `activeBanner: Banner | null`, `activeCard: Card | null`, `toolResults: Map<string, ToolResult>`. When a new card arrives, existing card is replaced (not stacked); banners are stacked up to three, newest-on-top. Clear the provisioning banner on the next message-id event for the same thread (status flipped to `running`).
+- [ ] T105 [FE] New sidebar item: **End session** button under the project chooser. Visible only when the current chat is bound to a `mode='container'` project AND there is an active instance (inferable from the stream history or a separate `GET /api/users/<user>/instances` call). Button emits `end_session:<chat_session_id>` which the backend translates into the confirm prompt — so the destructive path requires two taps even from the sidebar.
+- [ ] T106 [FE] Add a small `InstanceStatusChip` component shown next to the chat title when a container-mode chat is active — shows `{slug}` (redacted to `inst-xxxx...xx`) + coloured dot (green running / amber idle / red failed / grey provisioning / grey destroyed). Updates in place from the data events so the user has a visual anchor for instance state.
+
+**Checkpoint**: Visit a `mode='container'` chat. Send a message. Observe: provisioning banner with slug + ETA renders in the chat area. Send `/terminate`. Observe: confirm card with two buttons appears. Tap Cancel. Observe: no dead-end. Tap the End-session sidebar button. Observe: same confirm card appears (same code path). Force a failure via DB (`UPDATE instances SET status='failed', failure_code='projctl_up' WHERE ...`) and reload: failed card with Retry + Main Menu renders above the composer.
+
+---
+
+## Phase 11: Admin Dashboard — Operator Surface for Instances (Priority: P2)
+
+**Purpose**: Give operators a first-class admin surface for the new per-chat-instances feature. Today operators read DB rows or worker logs; after Phase 11 they see a live table of active instances, can terminate stuck ones, and can grant / revoke per-user access without an SQL session.
+
+**Why now**: The backend already exposes `/api/users/<user_id>/instances` (T043) and `/api/access` (pre-existing). The chat UI has `SettingsPanel` + `AccessPanel` already mounted under the sidebar. Adding an Instances tab + a real access-management surface is additive — no new backend endpoints other than a force-terminate and a grant POST.
+
+**Independent Test**: Log in as `admin_user`. Open Access Control panel. Observe three tabs: **Users**, **Access**, **Instances**. Each table has search + filter + an action column. A force-terminate on an `inst-abc` row flips its status to `terminating` within 1 s (visible in the same table on next poll). A manual access grant for `dev_user` + project 7 + role `developer` shows up immediately in their accessible-projects response.
+
+### Tests for Phase 11
+
+- [ ] T107 [P] [FE] Create `chat_frontend/src/__tests__/admin_instances_panel.test.tsx` — render the Instances tab with a mocked `/api/users/:id/instances` response; assert the table renders one row per instance with columns `slug`, `user`, `project`, `status`, `preview_url`, `last_activity_at`; assert clicking Force Terminate fires a `POST /api/admin/instances/:id/terminate`.
+- [ ] T108 [P] [BE] Create `tests/contract/test_admin_instances_api.py` — assert the new admin endpoints (`GET /api/admin/instances`, `POST /api/admin/instances/<id>/terminate`) require `is_admin=true`; non-admin users receive 403. Reuse `tests/integration/fixtures/instance_factory.py::instance_fixture` to seed rows.
+
+### Implementation for Phase 11
+
+- [ ] T109 [BE] Extend `src/openclow/api/routes/instances.py` with an admin-scoped router:
+  - `GET /api/admin/instances` — list ALL active instances across all users (joins users + projects for display). Requires `is_admin=true`. Paginated by `cursor` + `limit`. Returns `{instances: [{slug, chat_session_id, user: {id, username}, project: {id, name}, status, preview_url, started_at, last_activity_at, expires_at}]}`.
+  - `POST /api/admin/instances/{instance_id}/terminate` — force-terminate via `InstanceService.terminate(id, reason='admin_forced')`. Add `'admin_forced'` to the `_VALID_TERMINATE_REASONS` set and the `ck_instances_terminated_reason` check constraint (new migration 014).
+- [ ] T110 [BE] Migration 014 — extend the `ck_instances_terminated_reason` CHECK constraint to include `admin_forced`. Small DDL migration; backwards-compatible (existing rows have no new values). Also add a matching `TerminatedReason.ADMIN_FORCED = "admin_forced"` enum member in `models/instance.py`.
+- [ ] T111 [BE] Extend `src/openclow/api/routes/access.py` with:
+  - `POST /api/admin/access` — body `{user_id, project_id, role}`. Creates or updates a `UserProjectAccess` row with `granted_by=current_admin.id`. 409 on existing row with the same user/project (advise caller to use the update path).
+  - `DELETE /api/admin/access/{id}` — drops a single row. Admin-only.
+  - Guard: only admins can hit these paths.
+- [ ] T112 [FE] Extend `chat_frontend/src/components/AccessPanel.tsx` — add an **Instances** tab alongside the existing Users/Access tabs. Table columns: slug, user, project, status (coloured pill), started_at, last_activity_at, preview_url (hyperlink when set). Action column: Force Terminate (red button, two-step confirm per CLAUDE.md "No Dead Ends"). Polls `/api/admin/instances` every 10 s while the tab is focused; stops polling on blur.
+- [ ] T113 [FE] Extend `AccessPanel`'s Access tab — replace today's read-only list with an editable surface: per-row Revoke button, per-row role dropdown (developer/viewer/deployer/all), and a floating "Grant" form at the top (user dropdown + project dropdown + role dropdown + Grant button). All actions hit the new admin endpoints from T111.
+- [ ] T114 [BE] One-liner in `src/openclow/worker/tasks/onboarding.py` right after a new `Project` is committed: auto-grant `UserProjectAccess(user_id=creator, project_id=project.id, role='all', granted_by=creator)` so non-admin users who create projects via `trigger_addproject` get access automatically (the gap that spawned this planning round).
+- [ ] T115 [FE] New `AddProjectModal` component (`chat_frontend/src/components/AddProjectModal.tsx`). Opened from a + button above the project dropdown. Fetches the user's accessible repos from `GET /api/repos` (new thin backend wrapper around `github_mcp.list_repos`). Table with search + an "Add this repo" per row. Submits to `POST /api/projects` (new endpoint — wraps `onboard_project` enqueue + returns the job id). Progress is driven by the existing WebSocket at `/api/ws/<user>/<session>`.
+- [ ] T116 [BE] New endpoints under `src/openclow/api/routes/` to support T115:
+  - `GET /api/repos` — returns the caller's accessible GitHub repos via the existing `provider.github` PAT. 503 if PAT not configured.
+  - `POST /api/projects` — body `{repo_url, project_name?, default_branch?}`. Enqueues `onboard_project` and returns `{job_id, chat_id}` so the modal can subscribe for progress.
+
+**Checkpoint**: Log in as `admin_user`. Open Access Control. See three tabs. Instances tab shows every active instance with a Force Terminate button; clicking it fires the confirm card then terminates. Access tab now has a Grant form at the top; clicking Grant creates a row that shows up immediately. Log in as `dev_user` (non-admin). Open the + Add Project modal. Pick a repo. Watch the progress toast through the WebSocket. After `onboard_project` completes, the new project appears in the sidebar dropdown automatically (T114's auto-grant made the access row).
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase dependencies
@@ -328,6 +399,8 @@ description: "Task list for per-chat isolated instances"
 - **Phase 8 (US5)**: Depends on Phase 2 + US1 (needs `InstanceService.terminate`).
 - **Phase 9 (US6)**: Depends on Phase 2 + US1 + `projctl` step runner from T025.
 - **Phase N (Polish)**: Depends on all user stories being at least started; T088 (router flip) is literally the last task before merge to `main`.
+- **Phase 10 (Chat UI compat)**: Depends on Phase 3 (US1) + Phase 8 (US5) + Phase 9 (US6) — those phases are where all nine `instance_*` events are emitted. Can run fully in parallel with Phase 11. No backend changes; pure frontend.
+- **Phase 11 (Admin dashboard)**: Depends on T043 (GET /api/users/<id>/instances) from Phase 3 and the existing `AccessPanel`. Can run in parallel with Phase 10 after Phase 3 MVP lands.
 
 ### User-story-level dependencies
 
