@@ -1,6 +1,8 @@
+import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, Boolean, func
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from openclow.models.base import Base
@@ -20,12 +22,28 @@ class WebChatSession(Base):
     # exist for compatibility but are no longer surfaced in the UI.
     git_mode: Mapped[str] = mapped_column(String(20), default="session_branch")  # "branch_per_task" | "direct_commit" | "session_branch"
     session_branch_name: Mapped[str | None] = mapped_column(String(255))
+    # Per-chat isolated instances (migration 011). Nullable FK — back-reference
+    # only; `instances.chat_session_id` is authoritative. ON DELETE SET NULL keeps
+    # chat rows valid after an instance is GC'd.
+    instance_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("instances.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     last_message_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
     user = relationship("User", lazy="joined")
     project = relationship("Project", lazy="joined", foreign_keys=[project_id])
     messages = relationship("WebChatMessage", back_populates="session", cascade="all, delete-orphan")
+    # Authoritative side lives on Instance; this name is referenced from
+    # Instance.chat_session back_populates to keep ORM metadata consistent.
+    instance_bound = relationship(
+        "Instance",
+        foreign_keys="Instance.chat_session_id",
+        back_populates="chat_session",
+        uselist=False,
+    )
 
 
 class WebChatMessage(Base):

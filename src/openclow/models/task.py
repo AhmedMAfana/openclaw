@@ -27,6 +27,14 @@ class Task(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     agent_turns: Mapped[int | None] = mapped_column(Integer)
     duration_seconds: Mapped[int | None] = mapped_column(Integer)
+    # Per-chat isolated instances (migration 011). Nullable for legacy-mode tasks
+    # (host / docker); new-mode tasks MUST populate it. CASCADE on delete so task
+    # history is removed when the owning instance row is deleted.
+    instance_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("instances.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 

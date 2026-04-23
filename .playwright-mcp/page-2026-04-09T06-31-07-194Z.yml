@@ -1,5 +1,0 @@
-- generic [active] [ref=e1]:
-  - generic [ref=e10]:
-    - heading "Continue login with SSO" [level=5] [ref=e12]
-    - button "Yes, Continue with SSO" [ref=e15] [cursor=pointer]
-  - img

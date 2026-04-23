@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tagh-devops/contracts/projctl-stdout.schema.json",
+  "title": "projctl stdout JSON-line event",
+  "description": "Every line projctl writes to stdout during `projctl up` / `doctor` / `step --retry` / `explain` is a JSON object conforming to this schema. The orchestrator tails stdout via `docker compose logs` / `docker exec` and parses one event per line.",
+  "type": "object",
+  "required": ["event", "at", "projctl_version"],
+  "properties": {
+    "event": {
+      "description": "Discriminator for the event type.",
+      "type": "string",
+      "enum": [
+        "step_start",
+        "step_output",
+        "step_success",
+        "step_failure",
+        "success_check",
+        "llm_attempt",
+        "llm_action",
+        "heartbeat",
+        "doctor_result",
+        "fatal"
+      ]
+    },
+    "at": {
+      "description": "ISO 8601 UTC timestamp.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "projctl_version": {
+      "description": "Semver version string from `projctl --version`.",
+      "type": "string"
+    },
+    "instance_slug": {
+      "description": "Always present except in `fatal` events fired before the instance is known.",
+      "type": "string",
+      "pattern": "^inst-[0-9a-f]{14}$"
+    },
+    "step": {
+      "description": "Name of the guide.md step. Required for step_* and llm_* events.",
+      "type": "string"
+    },
+    "attempt": {
+      "description": "1-indexed attempt counter. Required for step_success, step_failure, llm_*.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4
+    },
+    "exit_code": {
+      "description": "Required for step_success (must be 0) and step_failure (non-zero).",
+      "type": "integer"
+    },
+    "stdout_line": {
+      "description": "Single line of the step's stdout. Used only for event=step_output.",
+      "type": "string",
+      "maxLength": 8192
+    },
+    "stderr_line": {
+      "description": "Single line of the step's stderr. Used only for event=step_output.",
+      "type": "string",
+      "maxLength": 8192
+    },
+    "success_check_cmd": {
+      "description": "The success-check command run after a step. Used for success_check events.",
+      "type": "string"
+    },
+    "success_check_passed": {
+      "description": "Boolean outcome of the success check.",
+      "type": "boolean"
+    },
+    "llm_action": {
+      "description": "Structured LLM response during fallback. Used for llm_action events.",
+      "type": "object",
+      "required": ["action"],
+      "properties": {
+        "action": { "type": "string", "enum": ["shell_cmd", "patch", "skip", "give_up"] },
+        "payload": { "type": "string", "description": "Shell command, unified diff, or empty." },
+        "reason":  { "type": "string" }
+      }
+    },
+    "doctor": {
+      "description": "Doctor result payload. Used for doctor_result events.",
+      "type": "object",
+      "required": ["healthy", "checks"],
+      "properties": {
+        "healthy": { "type": "boolean" },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "ok"],
+            "properties": {
+              "name": { "type": "string" },
+              "ok":   { "type": "boolean" },
+              "detail": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "fatal_reason": {
+      "description": "Used only for event=fatal — why projctl is exiting without running any further step.",
+      "type": "string"
+    }
+  },
+  "allOf": [
+    { "if": { "properties": { "event": { "const": "step_start" } } },
+      "then": { "required": ["step"] } },
+    { "if": { "properties": { "event": { "const": "step_output" } } },
+      "then": { "required": ["step"], "oneOf": [{ "required": ["stdout_line"] }, { "required": ["stderr_line"] }] } },
+    { "if": { "properties": { "event": { "const": "step_success" } } },
+      "then": { "required": ["step", "attempt", "exit_code"], "properties": { "exit_code": { "const": 0 } } } },
+    { "if": { "properties": { "event": { "const": "step_failure" } } },
+      "then": { "required": ["step", "attempt", "exit_code"], "not": { "properties": { "exit_code": { "const": 0 } } } } },
+    { "if": { "properties": { "event": { "const": "success_check" } } },
+      "then": { "required": ["step", "success_check_cmd", "success_check_passed"] } },
+    { "if": { "properties": { "event": { "const": "llm_action" } } },
+      "then": { "required": ["step", "attempt", "llm_action"] } },
+    { "if": { "properties": { "event": { "const": "doctor_result" } } },
+      "then": { "required": ["doctor"] } },
+    { "if": { "properties": { "event": { "const": "fatal" } } },
+      "then": { "required": ["fatal_reason"] } }
+  ]
+}

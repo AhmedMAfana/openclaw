@@ -55,6 +55,9 @@ RUN npm install -g @anthropic-ai/claude-code@latest @playwright/mcp@latest
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 RUN npx playwright install --with-deps chromium
 
+# Python Playwright (for tests)
+RUN pip install --no-cache-dir playwright
+
 # Git identity
 RUN git config --system user.email "openclow@bot.local" \
     && git config --system user.name "TAGH Dev Bot"

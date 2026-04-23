@@ -23,8 +23,14 @@ class Project(Base):
     docker_compose_file: Mapped[str | None] = mapped_column(String(255), default="docker-compose.yml")
     app_container_name: Mapped[str | None] = mapped_column(String(255))  # e.g. "app" or "php"
     app_port: Mapped[int | None] = mapped_column(Integer)  # e.g. 8000
-    # Host-mode (already-running VPS app): project.mode="host" leaves Docker fields NULL
-    mode: Mapped[str] = mapped_column(String(10), default="docker", server_default="docker")
+    # Mode routes bootstrap between the three code paths:
+    #   - "container": per-chat isolated instance (default, FR-035)
+    #   - "docker":    shared dockerized project (legacy, FR-034)
+    #   - "host":      already-running VPS app (legacy, FR-034)
+    # DB-level CHECK constraint (migration 012) closes the enum.
+    mode: Mapped[str] = mapped_column(
+        String(10), default="container", server_default="container"
+    )
     project_dir: Mapped[str | None] = mapped_column(String(500))
     install_guide_path: Mapped[str | None] = mapped_column(String(255))
     start_command: Mapped[str | None] = mapped_column(String(500))

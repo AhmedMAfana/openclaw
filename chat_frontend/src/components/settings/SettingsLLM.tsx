@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { RefreshCwIcon, ExternalLinkIcon, CheckCircleIcon, AlertCircleIcon } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { RefreshCwIcon, ExternalLinkIcon, CheckCircleIcon, AlertCircleIcon, CopyIcon, LoaderIcon } from "lucide-react";
 
 const ic = "w-full px-3 py-2 rounded-lg text-sm bg-secondary border border-border text-foreground focus:outline-none focus:ring-1 focus:ring-ring";
 const lc = "block text-sm font-medium text-foreground mb-1";
@@ -9,6 +9,10 @@ export function SettingsLLM() {
   const [reviewerTurns, setReviewerTurns] = useState(20);
   const [claudeAuth, setClaudeAuth] = useState<{ loggedIn: boolean; authMethod?: string; error?: string } | null>(null);
   const [oauthUrl, setOauthUrl] = useState<string | null>(null);
+  const [authCode, setAuthCode] = useState("");
+  const [codeState, setCodeState] = useState<"idle"|"submitting"|"verifying"|"error">("idle");
+  const [codeMsg, setCodeMsg] = useState("");
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [saveState, setSaveState] = useState<"idle"|"saving"|"ok"|"error">("idle");
   const [saveMsg, setSaveMsg] = useState("");
   const [testState, setTestState] = useState<"idle"|"testing"|"ok"|"error">("idle");
@@ -65,10 +69,46 @@ export function SettingsLLM() {
   }
 
   async function triggerLogin() {
+    if (pollRef.current) clearTimeout(pollRef.current);
+    setOauthUrl(null);
+    setAuthCode("");
+    setCodeState("idle");
+    setCodeMsg("");
     const res = await fetch("/api/settings/claude-auth-login", { method: "POST", credentials: "include" });
     const d = await res.json();
     if (d.url) setOauthUrl(d.url);
   }
+
+  async function submitCode() {
+    const code = authCode.trim();
+    if (!code) return;
+    setCodeState("submitting");
+    try {
+      const res = await fetch("/api/settings/claude-auth-submit-code", {
+        method: "POST", credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        setCodeState("error"); setCodeMsg(d.detail || "Failed to submit code"); return;
+      }
+      setCodeState("verifying"); setCodeMsg("Verifying…");
+      // Poll until loggedIn or 30 s
+      const start = Date.now();
+      const poll = async () => {
+        if (Date.now() - start > 30_000) { setCodeState("error"); setCodeMsg("Timed out — try again"); return; }
+        const r = await fetch("/api/settings/claude-auth-status", { credentials: "include" });
+        const s = await r.json();
+        if (s.loggedIn) { setClaudeAuth(s); setOauthUrl(null); setCodeState("idle"); }
+        else pollRef.current = setTimeout(poll, 2000);
+      };
+      pollRef.current = setTimeout(poll, 2000);
+    } catch { setCodeState("error"); setCodeMsg("Request failed"); }
+  }
+
+  // Clean up polling on unmount
+  useEffect(() => () => { if (pollRef.current) clearTimeout(pollRef.current); }, []);
 
   if (loading) return <div className="text-sm text-muted-foreground">Loading…</div>;
 
@@ -143,12 +183,47 @@ export function SettingsLLM() {
           )
         ) : <p className="text-sm text-muted-foreground">Loading…</p>}
         {oauthUrl && (
-          <div className="rounded-lg bg-secondary border border-border p-3 space-y-2">
-            <p className="text-xs text-muted-foreground">Open this URL to authenticate:</p>
-            <a href={oauthUrl} target="_blank" rel="noopener noreferrer"
-              className="flex items-center gap-1.5 text-xs text-primary hover:underline break-all">
-              {oauthUrl} <ExternalLinkIcon className="size-3 shrink-0" />
-            </a>
+          <div className="rounded-lg bg-secondary border border-border p-4 space-y-4">
+            {/* Step 1 */}
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-foreground">Step 1 — Open this URL and sign in:</p>
+              <div className="flex items-start gap-2">
+                <a href={oauthUrl} target="_blank" rel="noopener noreferrer"
+                  className="flex-1 text-xs text-primary hover:underline break-all flex items-start gap-1">
+                  {oauthUrl}<ExternalLinkIcon className="size-3 shrink-0 mt-0.5 ml-0.5" />
+                </a>
+                <button onClick={() => navigator.clipboard.writeText(oauthUrl)}
+                  className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shrink-0"
+                  title="Copy URL">
+                  <CopyIcon className="size-3.5" />
+                </button>
+              </div>
+            </div>
+            {/* Step 2 */}
+            <div className="space-y-2 border-t border-border pt-3">
+              <p className="text-xs font-medium text-foreground">
+                Step 2 — After signing in, copy the code shown on the page and paste it here:
+              </p>
+              <input
+                type="text"
+                value={authCode}
+                onChange={e => setAuthCode(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && submitCode()}
+                placeholder="Paste authorization code…"
+                disabled={codeState === "submitting" || codeState === "verifying"}
+                className="w-full px-3 py-2 rounded-lg text-sm bg-background border border-border text-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 font-mono"
+              />
+              <div className="flex items-center gap-3">
+                <button onClick={submitCode}
+                  disabled={!authCode.trim() || codeState === "submitting" || codeState === "verifying"}
+                  className="px-4 py-2 rounded-lg text-sm font-medium bg-primary hover:bg-primary/90 text-primary-foreground transition-colors disabled:opacity-50">
+                  {codeState === "submitting" ? "Submitting…" : codeState === "verifying" ? "Verifying…" : "Submit Code"}
+                </button>
+                {codeState === "verifying" && <LoaderIcon className="size-3.5 animate-spin text-muted-foreground" />}
+                {codeState === "error" && <p className="text-xs text-red-400">{codeMsg}</p>}
+                {codeState === "verifying" && <p className="text-xs text-muted-foreground">{codeMsg}</p>}
+              </div>
+            </div>
           </div>
         )}
       </div>

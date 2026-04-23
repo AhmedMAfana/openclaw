@@ -53,6 +53,7 @@ async def seed_user(username: str = "testuser", password: str = "testpass123"):
             print(f"📁 Creating test project...")
             project = Project(
                 name="test-project",
+                github_repo="local/test-project",
                 tech_stack="Python/FastAPI",
                 description="Test project for web chat",
                 status="active",

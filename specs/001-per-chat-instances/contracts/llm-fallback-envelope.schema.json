@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tagh-devops/contracts/llm-fallback-envelope.schema.json",
+  "title": "LLM fallback context envelope",
+  "description": "When a projctl step fails, projctl builds this envelope and invokes `projctl explain`. It is the ONLY context the LLM sees — not the full repo, not the full log, not any other step's output. All stdout/stderr must pass through the redactor (see audit_service) before assembly.",
+  "type": "object",
+  "required": ["instance_slug", "project_name", "step", "exit_code", "stdout_tail", "stderr_tail", "guide_section", "previous_attempts"],
+  "additionalProperties": false,
+  "properties": {
+    "instance_slug": {
+      "type": "string",
+      "pattern": "^inst-[0-9a-f]{14}$"
+    },
+    "project_name": {
+      "type": "string"
+    },
+    "step": {
+      "type": "object",
+      "required": ["name", "cmd", "cwd"],
+      "additionalProperties": false,
+      "properties": {
+        "name":           { "type": "string" },
+        "cmd":            { "type": "string" },
+        "cwd":            { "type": "string" },
+        "success_check":  { "type": "string" },
+        "skippable":      { "type": "boolean", "default": false }
+      }
+    },
+    "exit_code": {
+      "type": "integer"
+    },
+    "stdout_tail": {
+      "description": "Last 200 lines of stdout, redacted. If the original was longer, head is preserved with a '... <N> lines truncated ...' marker between head and tail.",
+      "type": "string",
+      "maxLength": 32768
+    },
+    "stderr_tail": {
+      "description": "Last 200 lines of stderr, redacted. Same truncation rule as stdout_tail.",
+      "type": "string",
+      "maxLength": 32768
+    },
+    "guide_section": {
+      "description": "Raw text of the matching section in guide.md for this step — gives the LLM the author's original intent.",
+      "type": "string",
+      "maxLength": 16384
+    },
+    "previous_attempts": {
+      "description": "How many times the LLM has already been asked about THIS step for THIS invocation. 0 on first ask, capped at 3 in config.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3
+    }
+  }
+}

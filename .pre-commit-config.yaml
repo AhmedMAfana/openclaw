@@ -1,0 +1,23 @@
+# Pre-commit hooks for TAGH Dev.
+#
+# Minimal baseline scoped to Constitution Principle IX (Async-Python Correctness):
+# catch blocking I/O, dangling asyncio tasks, and missing timeouts before they land.
+# Broader formatting / typing hooks are intentionally deferred to a follow-up.
+#
+# Run locally: pre-commit run --all-files
+# Install as git hook: pre-commit install
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.4
+    hooks:
+      - id: ruff
+        name: ruff (async-correctness rules)
+        args:
+          - "--select=ASYNC"       # asyncio-sync-in-async, dangling task, etc.
+          - "--select=RUF006"      # asyncio.create_task without held reference
+          - "--fix=false"          # analysis only — no auto-apply in pre-commit
+          - "--force-exclude"
+        files: \.py$
+        # Scope to async-heavy code paths; expand as the team opts in.
+        exclude: ^(alembic/|tests/fixtures/|migrations/)

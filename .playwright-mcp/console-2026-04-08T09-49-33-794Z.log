@@ -1,6 +1,0 @@
-[ 5594252ms] [LOG] %c[2026-04-08T11:22:48.041Z] [ERROR] - [WebSocket connection failed attempt: 1] color : #ff0000 @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
-[ 5594254ms] [ERROR] Error: WebSocket connection timeout
-    at https://web.telegram.org/a/81.b5716b16493c1d551356.js:1:278022 @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
-[ 5594255ms] [ERROR] WebSocket error Event @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
-[ 5594256ms] [ERROR] Socket zws1-1.web.telegram.org closed. Code: 1006, reason: , was clean: false @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0
-[ 5595259ms] [LOG] %c[2026-04-08T11:22:49.053Z] [WARN] - [Using fallback connection] color : #ff00ff @ https://web.telegram.org/a/81.b5716b16493c1d551356.js:0

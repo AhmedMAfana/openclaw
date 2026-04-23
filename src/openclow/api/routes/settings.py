@@ -517,14 +517,56 @@ async def claude_auth_status():
 
 @router.post("/claude-auth-login")
 async def claude_auth_login():
-    """Start Claude login on the worker — returns the OAuth URL."""
+    """Start Claude login — fires long-running worker task, polls Redis for URL."""
+    import asyncio
+    import redis.asyncio as aioredis
+
+    SESSION = "claude_auth:web"
+    r = aioredis.from_url(settings.redis_url, decode_responses=True)
+
+    # Clear stale session keys so the new task starts fresh
+    await r.delete(f"{SESSION}:url", f"{SESSION}:code", f"{SESSION}:status")
+
+    # Fire the long-running task without waiting for its final result
     try:
-        from openclow.services import bot_actions
-        job = await bot_actions.enqueue_job("claude_auth_get_url")
-        result = await job.result(timeout=20)
-        return result or {"status": "error", "message": "No response from worker"}
+        from openclow.worker.arq_app import get_arq_pool
+        pool = await get_arq_pool()
+        await pool.enqueue_job("claude_auth_login_web")
     except Exception as e:
         return {"status": "error", "message": str(e)[:200]}
+
+    # Poll Redis until the subprocess publishes the URL (up to 15 s)
+    for _ in range(30):
+        url = await r.get(f"{SESSION}:url")
+        if url:
+            return {"status": "pending", "url": url}
+        await asyncio.sleep(0.5)
+
+    return {"status": "error", "message": "Failed to get auth URL — check worker logs"}
+
+
+@router.post("/claude-auth-submit-code")
+async def claude_auth_submit_code(request: Request):
+    """Store the auth code in Redis so the worker task can forward it to the CLI.
+
+    The CLI's HTTP callback server runs inside the worker container — only the
+    worker can reach it.  The API just drops the code into Redis; the waiting
+    claude_auth_login_web task picks it up and makes the callback locally.
+    """
+    import redis.asyncio as aioredis
+
+    body = await request.json()
+    code = (body.get("code") or "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="Authorization code is required")
+
+    SESSION = "claude_auth:web"
+    r = aioredis.from_url(settings.redis_url, decode_responses=True)
+    if not await r.get(f"{SESSION}:port"):
+        raise HTTPException(status_code=400, detail="No active auth session — click 'Authenticate with Claude' first")
+
+    await r.setex(f"{SESSION}:code", 120, code)
+    return {"status": "ok"}
 
 
 # ---------------------------------------------------------------------------

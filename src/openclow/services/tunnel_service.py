@@ -1,545 +1,386 @@
-"""Cloudflare tunnel lifecycle management.
+"""Per-instance Cloudflare NAMED tunnel lifecycle.
 
-Starts/stops cloudflared quick-tunnels, persists URLs in DB,
-monitors health, and auto-restarts dead tunnels.
+Spec: specs/001-per-chat-instances/plan.md §Implementation PR 4;
+research.md §2 (Cloudflare v4 REST API via httpx with explicit timeouts).
+Data-model: instance_tunnels (specs/001-per-chat-instances/data-model.md §2).
 
-Usage (from worker):
-    from openclow.services.tunnel_service import start_tunnel, get_tunnel_url
-    url = await start_tunnel("dozzle", "http://dozzle:8080")
+This is the rewritten service for `mode='container'` projects. It replaces
+the old quick-tunnel path with per-instance named tunnels whose state lives
+in Postgres (one row per instance in `instance_tunnels`). No worker-local
+process dicts (Principle VI). Every HTTP call has an explicit timeout
+(Principle IX).
 
-Usage (from bot — fast DB read):
-    from openclow.services.tunnel_service import get_tunnel_url
-    url = await get_tunnel_url("dozzle")  # instant
+Backwards compatibility (FR-034):
+    Every legacy quick-tunnel symbol (`start_tunnel`, `stop_tunnel`,
+    `get_tunnel_url`, `check_tunnel_health`, `ensure_tunnel`,
+    `refresh_tunnel`, `verify_tunnel_url`, `sync_project_tunnel`) is
+    re-exported from `legacy_tunnel_service` so the 30+ existing
+    call sites keep working unchanged until they are migrated in
+    PR 12 (bootstrap router flip).
+
+Usage (new code):
+    from openclow.services.tunnel_service import TunnelService
+    ts = TunnelService(settings)
+    tunnel = await ts.provision(instance_id)
+    await ts.destroy(instance_id)
 """
+from __future__ import annotations
 
-import asyncio
-import os
-import re
-import time
-import uuid
+import dataclasses
+from typing import TYPE_CHECKING
+from uuid import UUID
 
-from openclow.services.config_service import get_config, set_config
+import httpx
+
+# --- legacy re-exports (FR-034; do not remove without migrating callers) ----
+from openclow.services.legacy_tunnel_service import (  # noqa: F401  (re-export)
+    check_tunnel_health,
+    ensure_tunnel,
+    get_tunnel_url,
+    refresh_tunnel,
+    start_tunnel,
+    stop_tunnel,
+    sync_project_tunnel,
+    verify_tunnel_url,
+)
 from openclow.utils.logging import get_logger
+
+if TYPE_CHECKING:  # Avoid import-at-startup side effects in lightweight tests.
+    from openclow.models.instance_tunnel import InstanceTunnel
 
 log = get_logger()
 
-TUNNEL_CATEGORY = "tunnel"
+# Cloudflare v4 API base. Overridable for testing.
+CF_API_BASE = "https://api.cloudflare.com/client/v4"
 
-# Module-level state: maps service_name -> asyncio.subprocess.Process
-_active_processes: dict[str, asyncio.subprocess.Process] = {}
-
-# Unique ID per worker boot — detects stale DB entries after restart
-_worker_instance_id: str = uuid.uuid4().hex[:12]
-
-# Rate limit cooldown — when Cloudflare returns 429, stop ALL tunnel attempts
-# until this timestamp. Prevents the death spiral of retries making it worse.
-_rate_limit_until: list[float] = [0.0]  # mutable list so nested functions can write
-
-# Per-service locks — prevent concurrent start/stop/refresh for the same tunnel.
-# Without this, two callers can both pass the idempotency checks and both spawn
-# a new cloudflared process (race condition).
-_tunnel_locks: dict[str, asyncio.Lock] = {}
+# Mandatory per Principle IX. "No timeout" is a bug, not a default.
+DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=10.0)
 
 
-def _get_lock(service_name: str) -> asyncio.Lock:
-    """Get or create the asyncio.Lock for a given service_name."""
-    if service_name not in _tunnel_locks:
-        _tunnel_locks[service_name] = asyncio.Lock()
-    return _tunnel_locks[service_name]
+@dataclasses.dataclass(frozen=True)
+class CloudflareConfig:
+    """Deployment-level Cloudflare settings.
 
-
-async def start_tunnel(
-    service_name: str, target_url: str, host_header: str | None = None,
-) -> str | None:
-    """Start a cloudflared quick-tunnel to target_url.
-
-    Idempotent: if tunnel already running for this service, returns existing URL.
-    Persists URL in DB under category="tunnel", key=service_name.
-    Thread-safe: per-service asyncio.Lock prevents duplicate cloudflared processes.
-
-    Args:
-        service_name: Unique name for this tunnel (e.g. "tagh-test")
-        target_url: URL to proxy to (e.g. "http://172.21.0.7:80")
-        host_header: Override Host header sent to origin (e.g. "abc.test").
-                     Required for apps that use virtual hosts / server_name matching.
-
-    Returns the public URL or None on failure.
+    Loaded from `platform_config` (category='cloudflare') by the caller.
+    Kept as a plain dataclass so unit tests can pass fakes without a DB.
     """
-    async with _get_lock(service_name):
-        return await _start_tunnel_unlocked(service_name, target_url, host_header)
+
+    account_id: str
+    zone_id: str
+    zone_domain: str        # e.g. "dev.example.com"
+    api_token: str          # scopes: Account.CF Tunnel:Edit, Zone.DNS:Edit
+    api_base: str = CF_API_BASE
 
 
-async def _start_tunnel_unlocked(
-    service_name: str, target_url: str, host_header: str | None = None,
-) -> str | None:
-    """Inner start_tunnel — caller must hold _get_lock(service_name)."""
-    # Rate limit cooldown — don't even try if Cloudflare is blocking us
-    if time.time() < _rate_limit_until[0]:
-        remaining = int(_rate_limit_until[0] - time.time())
-        log.debug("tunnel.cooldown_active", service=service_name, remaining_s=remaining)
-        return None
+@dataclasses.dataclass(frozen=True)
+class TunnelProvisionResult:
+    """Everything the InstanceService needs after provision() succeeds."""
 
-    # Check if we already have an active process handle
-    existing_proc = _active_processes.get(service_name)
-    if existing_proc and existing_proc.returncode is None:
-        config = await get_config(TUNNEL_CATEGORY, service_name)
-        if config and config.get("url"):
-            return config["url"]
-
-    # No in-memory handle (e.g. after worker restart) — check if the old
-    # cloudflared process from DB is still alive. If so, reuse it instead
-    # of killing and creating a new tunnel (avoids Cloudflare rate limits).
-    config = await get_config(TUNNEL_CATEGORY, service_name)
-    if config and config.get("url") and config.get("pid"):
-        old_pid = config["pid"]
-        try:
-            proc_check = await asyncio.create_subprocess_exec(
-                "ps", "-p", str(old_pid), "-o", "comm=",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await proc_check.communicate()
-            if "cloudflared" in stdout.decode().strip():
-                log.info("tunnel.reusing_existing", service=service_name,
-                         pid=old_pid, url=config["url"])
-                return config["url"]
-        except (OSError, ProcessLookupError):
-            pass
-
-    # Kill any stale process first (use unlocked variant — we already hold the lock)
-    await _stop_tunnel_unlocked(service_name)
-
-    # Start cloudflared
-    cmd = ["cloudflared", "tunnel", "--url", target_url]
-    if host_header:
-        cmd.extend(["--http-host-header", host_header])
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except FileNotFoundError:
-        log.error("tunnel.cloudflared_not_found", service=service_name)
-        return None
-
-    # Extract URL from stderr (cloudflared prints it within ~5-10s)
-    url = None
-    deadline = time.time() + 20
-    while time.time() < deadline:
-        try:
-            line = await asyncio.wait_for(proc.stderr.readline(), timeout=2)
-            text = line.decode()
-            match = re.search(r"(https://[a-z0-9-]+\.trycloudflare\.com)", text)
-            if match:
-                url = match.group(1)
-                break
-        except asyncio.TimeoutError:
-            continue
-
-    if not url:
-        # Check if cloudflared already exited (e.g. 429 rate limit)
-        if proc.returncode is not None:
-            try:
-                remaining = await proc.stderr.read(4096)
-                stderr_text = remaining.decode()
-            except Exception:
-                stderr_text = ""
-            if "429" in stderr_text or "Too Many Requests" in stderr_text:
-                # Set a cooldown — don't attempt ANY tunnels for 10 minutes
-                _rate_limit_until[0] = time.time() + 600
-                log.warning("tunnel.rate_limited", service=service_name,
-                            cooldown_minutes=10,
-                            hint="Will auto-retry via health loop after cooldown")
-                try:
-                    proc.kill()
-                except (OSError, ProcessLookupError):
-                    pass
-                return None
-        try:
-            proc.kill()
-        except (OSError, ProcessLookupError):
-            pass
-        log.error("tunnel.no_url", service=service_name, target=target_url)
-        return None
-
-    # Drain stderr so buffer doesn't fill up and block
-    drain_task = asyncio.create_task(_drain_stderr(service_name, proc))
-    drain_task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
-
-    # Wait briefly for QUIC connection to stabilize before verifying.
-    # Cloudflared prints the URL before the tunnel is fully registered with CF.
-    await asyncio.sleep(2)
-
-    # Quick health check — process still alive?
-    verified = proc.returncode is None
-    if not verified:
-        log.warning("tunnel.died_after_start", service=service_name, url=url)
-
-    # Store in DB and memory
-    _active_processes[service_name] = proc
-    await set_config(TUNNEL_CATEGORY, service_name, {
-        "url": url,
-        "target": target_url,
-        "pid": proc.pid,
-        "started_at": time.time(),
-        "worker_id": _worker_instance_id,
-    })
-
-    log.info("tunnel.started", service=service_name, url=url, pid=proc.pid)
-
-    # Auto-sync project container (update .env, inject trustedproxy, clear caches)
-    # Awaited, not fire-and-forget — callers need the sync done before they use the URL.
-    try:
-        await sync_project_tunnel(service_name, url)
-    except Exception as e:
-        log.warning("tunnel.auto_sync_failed", service=service_name, error=str(e))
-
-    return url
+    cf_tunnel_id: str
+    cf_tunnel_name: str
+    web_hostname: str
+    hmr_hostname: str
+    ide_hostname: str | None
+    credentials_secret: str   # Docker-secret NAME (not the JSON)
+    credentials_blob: str     # the credential JSON itself — caller stores
+                              # in a Docker secret and discards from memory
 
 
-# Infrastructure tunnels — never need container sync
-_INFRA_TUNNELS = {"dozzle", "settings"}
+class TunnelServiceError(Exception):
+    """Base for TunnelService-raised errors."""
 
 
-async def sync_project_tunnel(service_name: str, tunnel_url: str):
-    """Sync a project's container after tunnel URL change.
+class CloudflareAPIError(TunnelServiceError):
+    """CF API returned non-2xx or a malformed payload."""
 
-    Updates host .env, container .env, injects config/trustedproxy.php,
-    and clears framework caches. Skips infrastructure tunnels.
+    def __init__(self, status: int, body: str):
+        super().__init__(f"cloudflare api returned {status}: {body[:200]}")
+        self.status = status
+        self.body = body
 
-    Called automatically by start_tunnel() — callers don't need to do this.
+
+class TunnelService:
+    """Manage per-instance named Cloudflare tunnels + DNS.
+
+    All methods are idempotent (Principle VI). Callers pass an
+    `instance_id`; the service maps it to `instance_tunnels` rows AND to
+    Cloudflare resources by querying the CF API by tunnel *name*. This is
+    what lets a mid-operation crash recover: the next call re-queries and
+    either no-ops or forward-completes.
     """
-    if service_name in _INFRA_TUNNELS:
-        return
 
-    import re as _re
-    import shlex
-    from openclow.settings import settings as app_settings
+    def __init__(
+        self,
+        config: CloudflareConfig,
+        *,
+        http_client_factory=None,
+    ) -> None:
+        self._config = config
+        # Factory so tests can inject an AsyncClient that hits pytest-httpx.
+        self._http_client_factory = http_client_factory or self._default_client
 
-    # ── Find project in DB ──
-    try:
-        from openclow.models import Project, async_session
-        from sqlalchemy import select
-        async with async_session() as session:
-            # Don't filter by status — if a tunnel runs, the container needs sync
-            result = await session.execute(
-                select(Project).where(Project.name == service_name)
-            )
-            project = result.scalar_one_or_none()
-        if not project:
-            return
-    except Exception as e:
-        log.warning("tunnel.sync_project_lookup_failed", service=service_name, error=str(e))
-        return
-
-    workspace = f"{app_settings.workspace_base_path}/_cache/{service_name}"
-    compose_project = f"openclow-{service_name}"
-    container_name = project.app_container_name or "laravel.test"
-    container = f"{compose_project}-{container_name}-1"
-
-    # Skip sync entirely if APP_URL already matches — avoids unnecessary
-    # Vite rebuilds on every tunnel restart (saves 10-30s per restart).
-    try:
-        from openclow.services.docker_guard import run_docker as _check_docker
-        rc, current_url = await _check_docker(
-            "docker", "exec", container, "sh", "-c",
-            "grep '^APP_URL=' /var/www/html/.env 2>/dev/null || "
-            "grep '^APP_URL=' /app/.env 2>/dev/null || echo ''",
-            actor="tunnel_sync", timeout=5,
+    def _default_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=self._config.api_base,
+            timeout=DEFAULT_TIMEOUT,
+            headers={
+                "Authorization": f"Bearer {self._config.api_token}",
+                "Content-Type": "application/json",
+            },
         )
-        if rc == 0:
-            existing = current_url.strip().split("=", 1)[-1] if "=" in current_url else ""
-            if existing == tunnel_url:
-                log.info("tunnel.sync_skipped_unchanged", service=service_name)
+
+    # ------------------------------------------------------------------
+    # Provision
+    # ------------------------------------------------------------------
+
+    async def provision(
+        self, instance_id: UUID, instance_slug: str
+    ) -> TunnelProvisionResult:
+        """Create a named tunnel + DNS records for an instance.
+
+        Idempotent: if a tunnel with the same name already exists at CF,
+        this method re-uses it and returns its token. Safe to re-run after
+        a mid-provision orchestrator crash (see research.md §4).
+
+        Caller (InstanceService) is responsible for:
+          * Persisting the InstanceTunnel row with `status='provisioning'`
+            BEFORE calling this (so a crash leaves DB state recoverable)
+          * Storing `credentials_blob` in a Docker secret and discarding
+            the in-memory copy immediately (Principle IV)
+          * Flipping the row to `status='active'` once cloudflared reports
+            the connection is registered
+        """
+        tunnel_name = self._tunnel_name(instance_slug)
+        web_host = f"{instance_slug}.{self._config.zone_domain}"
+        hmr_host = f"hmr-{instance_slug}.{self._config.zone_domain}"
+        ide_host = f"ide-{instance_slug}.{self._config.zone_domain}"
+
+        async with self._http_client_factory() as client:
+            # 1. Idempotent create: try create; if already exists, fetch.
+            existing = await self._find_tunnel_by_name(client, tunnel_name)
+            if existing is not None:
+                cf_tunnel_id = existing["id"]
+                token_blob = await self._fetch_tunnel_token(client, cf_tunnel_id)
+            else:
+                created = await self._create_tunnel(client, tunnel_name)
+                cf_tunnel_id = created["id"]
+                token_blob = created["token"]
+
+            # 2. Idempotent DNS records (skip if present with same content).
+            cname_target = f"{cf_tunnel_id}.cfargotunnel.com"
+            await self._ensure_cname(client, web_host, cname_target)
+            await self._ensure_cname(client, hmr_host, cname_target)
+            await self._ensure_cname(client, ide_host, cname_target)
+
+        log.info(
+            "tunnel.provisioned",
+            instance_id=str(instance_id),
+            slug=instance_slug,
+            cf_tunnel_id=cf_tunnel_id,
+        )
+
+        return TunnelProvisionResult(
+            cf_tunnel_id=cf_tunnel_id,
+            cf_tunnel_name=tunnel_name,
+            web_hostname=web_host,
+            hmr_hostname=hmr_host,
+            ide_hostname=ide_host,
+            credentials_secret=f"{tunnel_name}-cf",  # Docker-secret NAME
+            credentials_blob=token_blob,             # caller stores in secret
+        )
+
+    # ------------------------------------------------------------------
+    # Destroy
+    # ------------------------------------------------------------------
+
+    async def destroy(self, instance_id: UUID, instance_slug: str) -> None:
+        """Delete DNS records + tunnel from Cloudflare.
+
+        Idempotent: missing resources are skipped. Safe to re-run.
+
+        Caller (InstanceService) flips `instance_tunnels.status` to
+        `'destroyed'` and sets `destroyed_at` AFTER this returns.
+        """
+        tunnel_name = self._tunnel_name(instance_slug)
+        async with self._http_client_factory() as client:
+            tunnel = await self._find_tunnel_by_name(client, tunnel_name)
+            if tunnel is None:
+                log.info("tunnel.destroy.already_gone", slug=instance_slug)
                 return
-    except Exception:
-        pass  # If check fails, proceed with full sync
+            cf_tunnel_id = tunnel["id"]
 
-    # URL env var strategy — separates app identity from asset delivery:
-    #
-    #   _APP_URL_KEYS  → set to the tunnel URL (PHP needs absolute URLs for
-    #                    SSO callbacks, email links, CSRF origin checks)
-    #   _ASSET_URL_KEYS → set to "/" (relative base). Vite bakes the base URL
-    #                     into every dynamic import at compile time. If we set
-    #                     ASSET_URL=https://tunnel.trycloudflare.com, every new
-    #                     tunnel requires a full npm rebuild or assets 404/CORS.
-    #                     With ASSET_URL=/, assets resolve to the current page
-    #                     origin — any tunnel URL serves them correctly without
-    #                     a rebuild.
-    _APP_URL_KEYS   = ("APP_URL", "VITE_APP_URL", "NEXT_PUBLIC_URL", "BASE_URL")
-    _ASSET_URL_KEYS = ("ASSET_URL",)
-    _ALL_URL_KEYS   = _APP_URL_KEYS + _ASSET_URL_KEYS
+            # Delete CNAMEs that point at this tunnel's cfargotunnel host.
+            cname_target = f"{cf_tunnel_id}.cfargotunnel.com"
+            await self._delete_records_for_target(client, cname_target)
 
-    # ── 1. Update host .env ──
-    env_path = os.path.join(workspace, ".env")
-    if os.path.exists(env_path):
-        try:
-            with open(env_path) as f:
-                content = f.read()
-            # Replace every old absolute trycloudflare URL in app URL vars
-            for key in _APP_URL_KEYS:
-                if _re.search(rf'^{key}=', content, _re.MULTILINE):
-                    content = _re.sub(rf'^{key}=.*$', f'{key}={tunnel_url}', content, flags=_re.MULTILINE)
-                else:
-                    content += f"\n{key}={tunnel_url}\n"
-            # Set ASSET_URL to relative so Vite chunks load from current origin
-            for key in _ASSET_URL_KEYS:
-                if _re.search(rf'^{key}=', content, _re.MULTILINE):
-                    content = _re.sub(rf'^{key}=.*$', f'{key}=/', content, flags=_re.MULTILINE)
-                else:
-                    content += f"\n{key}=/\n"
-            with open(env_path, "w") as f:
-                f.write(content)
-        except Exception as e:
-            log.warning("tunnel.sync_host_env_failed", service=service_name, error=str(e))
+            # Delete the tunnel itself.
+            await self._delete_tunnel(client, cf_tunnel_id)
 
-    # ── 2. Update container .env + inject trustedproxy + rebuild assets ──
-    try:
-        from openclow.services.docker_guard import run_docker
-
-        # Update container .env — app URL vars get the tunnel URL, ASSET_URL gets "/"
-        for env_loc in (".env", "/var/www/html/.env", "/app/.env"):
-            _quoted_url = shlex.quote(tunnel_url)
-            for key in _APP_URL_KEYS:
-                await run_docker(
-                    "docker", "exec", container, "sh", "-c",
-                    f"[ -f {env_loc} ] && (grep -q '^{key}=' {env_loc} "
-                    f"&& sed -i 's|^{key}=.*|{key}={_quoted_url}|' {env_loc} "
-                    f"|| echo '{key}={_quoted_url}' >> {env_loc}) || true",
-                    actor="tunnel_sync", timeout=30,
-                )
-            for key in _ASSET_URL_KEYS:
-                await run_docker(
-                    "docker", "exec", container, "sh", "-c",
-                    f"[ -f {env_loc} ] && (grep -q '^{key}=' {env_loc} "
-                    f"&& sed -i 's|^{key}=.*|{key}=/|' {env_loc} "
-                    f"|| echo '{key}=/' >> {env_loc}) || true",
-                    actor="tunnel_sync", timeout=30,
-                )
-
-        # Inject config/trustedproxy.php — Laravel trusts cloudflared's X-Forwarded-Proto.
-        import base64
-        trust_php = b"<?php return ['proxies' => '*', 'headers' => -1];"
-        b64 = base64.b64encode(trust_php).decode()
-        await run_docker(
-            "docker", "exec", container, "sh", "-c",
-            f"for d in . /var/www/html /app; do [ -d \"$d/config\" ] && echo {b64} | base64 -d > \"$d/config/trustedproxy.php\" && break; done || true",
-            actor="tunnel_sync", timeout=30,
+        log.info(
+            "tunnel.destroyed",
+            instance_id=str(instance_id),
+            slug=instance_slug,
         )
 
-        # Re-bake PHP config cache with fresh env values (not just clear — cache it).
-        # Must run BEFORE assets so the new APP_URL is live for any SSR or server-side
-        # requests that happen while the frontend is still rebuilding.
-        await run_docker(
-            "docker", "exec", container, "sh", "-c",
-            "php artisan config:cache 2>/dev/null || php artisan config:clear 2>/dev/null || true; "
-            "php artisan cache:clear 2>/dev/null; "
-            "php artisan view:clear 2>/dev/null; "
-            "php artisan route:clear 2>/dev/null || true",
-            actor="tunnel_sync", timeout=30,
+    # ------------------------------------------------------------------
+    # Health
+    # ------------------------------------------------------------------
+
+    async def health(self, instance_slug: str) -> bool:
+        """Return True iff CF reports the tunnel as healthy.
+
+        Used by the upstream-degradation banner job (T083) and the
+        provision-time readiness check. Conservative: any CF API hiccup
+        returns False, caller policy decides whether to retry or escalate.
+        """
+        tunnel_name = self._tunnel_name(instance_slug)
+        try:
+            async with self._http_client_factory() as client:
+                tunnel = await self._find_tunnel_by_name(client, tunnel_name)
+                if tunnel is None:
+                    return False
+                return tunnel.get("status") == "healthy"
+        except (httpx.HTTPError, CloudflareAPIError):
+            return False
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _tunnel_name(slug: str) -> str:
+        """`tagh-<slug>` — matches the convention used everywhere else.
+
+        Kept under the CF tunnel-name length limit and safe as a
+        Docker-secret name.
+        """
+        return f"tagh-{slug}"
+
+    async def _find_tunnel_by_name(
+        self, client: httpx.AsyncClient, name: str
+    ) -> dict | None:
+        """GET /accounts/:a/cfd_tunnel?name=<n> → first match or None.
+
+        Idempotency hinge for both provision and destroy.
+        """
+        r = await client.get(
+            f"/accounts/{self._config.account_id}/cfd_tunnel",
+            params={"name": name},
         )
+        _raise_for_status(r)
+        result = r.json().get("result") or []
+        return result[0] if result else None
 
-        # Rebuild frontend assets — Vite bakes ASSET_URL into chunk import paths at
-        # compile time. We now set ASSET_URL=/ (relative) so this is a one-time build:
-        # once built with relative paths, future tunnel changes need NO rebuild —
-        # chunks always load from the current page origin.
-        #
-        # Run SYNCHRONOUSLY so the URL is only returned to the caller after assets
-        # are correct. A few minutes wait once is far better than CORS errors every
-        # tunnel restart.
-        #
-        # Skip if the container has no package.json (PHP-only / no frontend build).
-        _build_cmd = (
-            "PKG=$(find . /var/www/html /app -name 'package.json' "
-            "  -not -path '*/node_modules/*' -maxdepth 4 2>/dev/null | head -1); "
-            "if [ -n \"$PKG\" ]; then "
-            "  cd $(dirname $PKG) && "
-            "  (npm run build 2>&1 || npx vite build 2>&1 || true); "
-            "fi"
+    async def _create_tunnel(
+        self, client: httpx.AsyncClient, name: str
+    ) -> dict:
+        """POST /accounts/:a/cfd_tunnel → {id, token, ...}."""
+        r = await client.post(
+            f"/accounts/{self._config.account_id}/cfd_tunnel",
+            json={"name": name, "config_src": "cloudflare"},
         )
-        try:
-            rc, out = await run_docker(
-                "docker", "exec", container, "sh", "-c", _build_cmd,
-                actor="tunnel_sync", timeout=240,
+        _raise_for_status(r)
+        return r.json()["result"]
+
+    async def _fetch_tunnel_token(
+        self, client: httpx.AsyncClient, tunnel_id: str
+    ) -> str:
+        """GET /accounts/:a/cfd_tunnel/:id/token → token blob.
+
+        Used on the recovery path when `_find_tunnel_by_name` already
+        found the tunnel — we still need the creds JSON to re-populate
+        the Docker secret if it was lost (defense-in-depth for partial
+        failures per research.md §4).
+        """
+        r = await client.get(
+            f"/accounts/{self._config.account_id}/cfd_tunnel/{tunnel_id}/token"
+        )
+        _raise_for_status(r)
+        return r.json()["result"]
+
+    async def _delete_tunnel(
+        self, client: httpx.AsyncClient, tunnel_id: str
+    ) -> None:
+        r = await client.delete(
+            f"/accounts/{self._config.account_id}/cfd_tunnel/{tunnel_id}"
+        )
+        # 404 on teardown retry is fine — already gone.
+        if r.status_code == 404:
+            return
+        _raise_for_status(r)
+
+    async def _ensure_cname(
+        self, client: httpx.AsyncClient, name: str, content: str
+    ) -> None:
+        """Create a CNAME if missing; no-op if it already points to content.
+
+        Idempotent by design. Does NOT support updating an existing record
+        to a different target — if the record exists with the wrong target
+        we log and leave it alone (operator intervention required to catch
+        an accidental zone-level conflict).
+        """
+        existing = await self._find_dns_record(client, name)
+        if existing is None:
+            r = await client.post(
+                f"/zones/{self._config.zone_id}/dns_records",
+                json={
+                    "type": "CNAME",
+                    "name": name,
+                    "content": content,
+                    "proxied": True,
+                    "ttl": 1,  # CF "automatic"
+                },
             )
-            if rc == 0:
-                log.info("tunnel.frontend_rebuilt", service=service_name)
-            else:
-                log.warning("tunnel.frontend_rebuild_failed", service=service_name, output=out[:300])
-        except Exception as e:
-            log.warning("tunnel.frontend_rebuild_error", service=service_name, error=str(e))
+            _raise_for_status(r)
+            return
 
-        log.info("tunnel.project_synced", service=service_name, url=tunnel_url)
-    except Exception as e:
-        log.warning("tunnel.sync_container_failed", service=service_name, error=str(e))
-
-
-async def stop_tunnel(service_name: str) -> None:
-    """Stop a tunnel by service name. Cleans up process and DB entry."""
-    async with _get_lock(service_name):
-        await _stop_tunnel_unlocked(service_name)
-
-
-async def _stop_tunnel_unlocked(service_name: str) -> None:
-    """Inner stop_tunnel — caller must hold _get_lock(service_name)."""
-    # Kill in-memory process handle
-    proc = _active_processes.pop(service_name, None)
-    if proc and proc.returncode is None:
-        try:
-            proc.kill()
-            await proc.wait()
-        except (OSError, ProcessLookupError):
-            pass
-
-    # Also try PID from DB (in case process handle was lost)
-    config = await get_config(TUNNEL_CATEGORY, service_name)
-    if config and config.get("pid"):
-        pid = config["pid"]
-        try:
-            # Verify the PID is actually a cloudflared process before killing
-            proc_check = await asyncio.create_subprocess_exec(
-                "ps", "-p", str(pid), "-o", "comm=",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+        if existing.get("content") != content:
+            log.warning(
+                "tunnel.dns_conflict",
+                name=name,
+                existing=existing.get("content"),
+                wanted=content,
+                note="leaving existing record in place; operator review required",
             )
-            stdout, _ = await proc_check.communicate()
-            proc_name = stdout.decode().strip()
-            if "cloudflared" in proc_name:
-                os.kill(pid, 9)
-            else:
-                log.warning("tunnel.stale_pid", pid=pid, actual_process=proc_name)
-        except (OSError, ProcessLookupError):
-            pass
 
-    # Clear DB entry
-    await set_config(TUNNEL_CATEGORY, service_name, {})
-    log.info("tunnel.stopped", service=service_name)
+    async def _find_dns_record(
+        self, client: httpx.AsyncClient, name: str
+    ) -> dict | None:
+        r = await client.get(
+            f"/zones/{self._config.zone_id}/dns_records",
+            params={"name": name},
+        )
+        _raise_for_status(r)
+        result = r.json().get("result") or []
+        return result[0] if result else None
 
+    async def _delete_records_for_target(
+        self, client: httpx.AsyncClient, target: str
+    ) -> None:
+        """Delete every CNAME that points at this tunnel's cfargotunnel host.
 
-async def get_tunnel_url(service_name: str) -> str | None:
-    """Read tunnel URL from DB. This is the FAST path for the bot."""
-    config = await get_config(TUNNEL_CATEGORY, service_name)
-    if config and config.get("url"):
-        return config["url"]
-    return None
-
-
-async def verify_tunnel_url(url: str, timeout: float = 8.0) -> bool:
-    """HTTP probe — confirms a tunnel URL is actually reachable.
-
-    Returns True if the URL responds with HTTP status < 502.
-    Any connection error, timeout, or 502+ means the tunnel is dead.
-    """
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(url)
-            reachable = resp.status_code < 502
-            if not reachable:
-                log.warning("tunnel.verify_failed", url=url, status=resp.status_code)
-            return reachable
-    except Exception as e:
-        log.warning("tunnel.verify_unreachable", url=url, error=str(e)[:100])
-        return False
-
-
-async def _get_tunnel_config(service_name: str) -> dict | None:
-    """Read the full tunnel config from DB (url, target, pid, started_at, worker_id)."""
-    return await get_config(TUNNEL_CATEGORY, service_name)
-
-
-async def check_tunnel_health(service_name: str) -> bool:
-    """Check if a tunnel is alive: process running + URL in DB + origin reachable.
-
-    The origin check catches the "containers restarted → new IP" scenario where
-    cloudflared is still running but pointing at a dead IP address, which shows
-    as "The origin has been unregistered from Argo Tunnel" in the browser.
-
-    Falls back to DB PID check when the in-memory process handle is missing
-    (e.g. after worker restart), preventing unnecessary tunnel restarts.
-    """
-    proc = _active_processes.get(service_name)
-    process_alive = proc and proc.returncode is None
-
-    # No in-memory handle — check if the old cloudflared PID from DB is still alive
-    if not process_alive:
-        config = await get_config(TUNNEL_CATEGORY, service_name)
-        if config and config.get("url") and config.get("pid"):
-            try:
-                proc_check = await asyncio.create_subprocess_exec(
-                    "ps", "-p", str(config["pid"]), "-o", "comm=",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, _ = await proc_check.communicate()
-                if "cloudflared" in stdout.decode().strip():
-                    process_alive = True
-            except (OSError, ProcessLookupError):
-                pass
-
-    if not process_alive:
-        return False
-
-    config = await get_config(TUNNEL_CATEGORY, service_name)
-    if not config or not config.get("url"):
-        return False
-
-    # TCP-connect to origin — verifies the container is actually reachable.
-    target = config.get("target", "")
-    if target:
-        try:
-            import urllib.parse as _urlparse
-            parsed = _urlparse.urlparse(target)
-            host = parsed.hostname
-            port = parsed.port or 80
-            _, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port), timeout=2
+        Cloudflare is authoritative for DNS; we re-query on teardown
+        rather than storing record IDs locally (data-model.md §2.4).
+        """
+        r = await client.get(
+            f"/zones/{self._config.zone_id}/dns_records",
+            params={"content": target},
+        )
+        _raise_for_status(r)
+        for rec in r.json().get("result") or []:
+            rec_id = rec.get("id")
+            if not rec_id:
+                continue
+            dr = await client.delete(
+                f"/zones/{self._config.zone_id}/dns_records/{rec_id}"
             )
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
-        except Exception:
-            log.debug("tunnel.origin_unreachable", service=service_name, target=target)
-            return False  # origin gone — cloudflared shows "origin unregistered"
-    return True
+            if dr.status_code == 404:
+                continue
+            _raise_for_status(dr)
 
 
-async def ensure_tunnel(service_name: str, target_url: str) -> str | None:
-    """Ensure a tunnel is running. If dead, restart it.
-
-    Called by the periodic health monitor.
-    """
-    if await check_tunnel_health(service_name):
-        return await get_tunnel_url(service_name)
-
-    log.info("tunnel.restarting", service=service_name, reason="health_check_failed")
-    return await start_tunnel(service_name, target_url)
-
-
-async def refresh_tunnel(service_name: str, target_url: str) -> str | None:
-    """Kill old tunnel, start fresh one. Used by 'Refresh' button."""
-    async with _get_lock(service_name):
-        await _stop_tunnel_unlocked(service_name)
-        return await _start_tunnel_unlocked(service_name, target_url)
-
-
-async def _drain_stderr(service_name: str, proc: asyncio.subprocess.Process):
-    """Drain stderr to prevent buffer deadlock. Log errors."""
-    try:
-        while True:
-            line = await proc.stderr.readline()
-            if not line:
-                break
-            text = line.decode().strip()
-            if "error" in text.lower() or "failed" in text.lower():
-                log.warning("tunnel.stderr", service=service_name, line=text)
-    except Exception:
-        pass
-    finally:
-        log.warning("tunnel.process_exited", service=service_name,
-                    returncode=proc.returncode)
-        _active_processes.pop(service_name, None)
+def _raise_for_status(r: httpx.Response) -> None:
+    """Raise CloudflareAPIError on any non-2xx with useful context."""
+    if 200 <= r.status_code < 300:
+        return
+    raise CloudflareAPIError(r.status_code, r.text or "")

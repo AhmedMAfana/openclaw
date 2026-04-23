@@ -266,7 +266,9 @@
       "Bash(git -C /Users/ahmedmoh/Desktop/projects/openclow add src/openclow/worker/tasks/agent_session.py src/openclow/api/routes/assistant.py)",
       "Bash(git -C /Users/ahmedmoh/Desktop/projects/openclow add scripts/deploy-staging.sh)",
       "Bash(git -C /Users/ahmedmoh/Desktop/projects/openclow log --oneline -- scripts/deploy-staging.sh)",
-      "Bash(git -C /Users/ahmedmoh/Desktop/projects/openclow add .claude/settings.json)"
+      "Bash(git -C /Users/ahmedmoh/Desktop/projects/openclow add .claude/settings.json)",
+      "Bash(git -C /Users/ahmedmoh/Desktop/projects/openclow log --oneline origin/undocker -3)",
+      "Bash(git -C /Users/ahmedmoh/Desktop/projects/openclow log --oneline origin/undocker -10)"
     ],
     "additionalDirectories": [
       "/Users/ahmedmoh/Desktop/projects/openclow",
