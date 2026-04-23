@@ -43,6 +43,7 @@ from openclow.services.instance_service import (
     PlatformAtCapacity,
     ProjectNotContainerMode,
 )
+from openclow.services.instance_lock import instance_lock
 from openclow.utils.logging import get_logger
 
 log = get_logger()
@@ -565,30 +566,50 @@ async def assistant_endpoint(
                         chat_session_id=session_id
                     )
                 except PerUserCapExceeded as e:
-                    # T044 will render this as a rich chat card with links
-                    # to each active chat + a Main Menu button. For now we
-                    # return a clear plain-text message so the user is not
-                    # left with a silent stream.
-                    controller.append_text(
+                    # FR-030b: render as a structured card so the UI can
+                    # surface Main Menu + one link per active chat. The
+                    # card data is distinct from the text (which remains
+                    # present so non-card clients and transcripts both
+                    # read well).
+                    msg = (
                         f"You already have {len(e.active_chat_ids)} active chats "
-                        f"(cap={e.cap}). End one to start another.\n"
+                        f"(cap={e.cap}). End one to start another."
                     )
+                    controller.append_text(msg + "\n")
+                    controller.add_data({
+                        "type": "instance_limit_exceeded",
+                        "variant": "per_user_cap",
+                        "cap": e.cap,
+                        "active_chat_ids": e.active_chat_ids,
+                        "instances_endpoint": f"/api/users/{user.id}/instances",
+                        "actions": [
+                            *[
+                                {"label": f"Open chat #{cid}",
+                                 "link": f"/chat?thread={cid}"}
+                                for cid in e.active_chat_ids
+                            ],
+                            {"label": "Main Menu", "link": "/chat"},
+                        ],
+                    })
                     await asyncio.shield(
-                        _update_message(
-                            asst_msg_id_int,
-                            f"per_user_cap_exceeded:{e.cap}",
-                        )
+                        _update_message(asst_msg_id_int, msg)
                     )
                     return
                 except PlatformAtCapacity:
-                    controller.append_text(
+                    # FR-030 is deliberately distinct from FR-030a — no
+                    # per-chat navigation, just retry-later guidance.
+                    msg = (
                         "The platform is at capacity right now. "
-                        "Please try again in a few minutes.\n"
+                        "Please try again in a few minutes."
                     )
+                    controller.append_text(msg + "\n")
+                    controller.add_data({
+                        "type": "instance_limit_exceeded",
+                        "variant": "platform_capacity",
+                        "retry_after_s": 300,
+                    })
                     await asyncio.shield(
-                        _update_message(
-                            asst_msg_id_int, "platform_at_capacity"
-                        )
+                        _update_message(asst_msg_id_int, msg)
                     )
                     return
                 except ProjectNotContainerMode:
@@ -728,70 +749,99 @@ async def assistant_endpoint(
 
             final_text = ""
             streamed_text = ""
-            try:
-                try:
-                    async with asyncio.timeout(1800):
-                        async for message in query(prompt=prompt_arg, options=options):
-                            if isinstance(message, StreamEvent):
-                                evt = message.event
-                                if evt.get("type") == "content_block_delta":
-                                    delta = evt.get("delta", {})
-                                    if delta.get("type") == "text_delta":
-                                        text = delta.get("text", "")
-                                        controller.append_text(text)
-                                        streamed_text += text
 
-                            elif isinstance(message, AssistantMessage):
-                                for block in message.content:
-                                    if isinstance(block, TextBlock):
-                                        final_text = block.text
-                                    elif isinstance(block, ToolUseBlock):
-                                        controller.add_data({
-                                            "type": "tool_use",
-                                            "id": block.id,
-                                            "tool": describe_tool(block),
-                                            "input": "",
-                                            "status": "running",
-                                        })
-
-                            elif isinstance(message, UserMessage):
-                                # Surface tool results to the user — they were previously
-                                # invisible (only the agent saw them), so the agent could
-                                # report a different story than what tools actually returned.
-                                if isinstance(message.content, list):
-                                    for block in message.content:
-                                        if isinstance(block, ToolResultBlock):
-                                            raw = block.content
-                                            if isinstance(raw, str):
-                                                summary = raw
-                                            elif isinstance(raw, list):
-                                                pieces = []
-                                                for item in raw:
-                                                    if isinstance(item, dict):
-                                                        pieces.append(item.get("text") or str(item))
-                                                    else:
-                                                        pieces.append(str(item))
-                                                summary = "\n".join(pieces)
-                                            else:
-                                                summary = ""
-                                            controller.add_data({
-                                                "type": "tool_result",
-                                                "tool_use_id": block.tool_use_id,
-                                                "content": summary[:1500],
-                                                "is_error": bool(block.is_error),
-                                                "status": "error" if block.is_error else "complete",
-                                            })
-                except (GeneratorExit, asyncio.CancelledError):
-                    log.info("assistant.cancelled", session_id=session_id)
-            finally:
-                save_content = final_text or streamed_text or "(no response)"
-                try:
-                    await asyncio.shield(
-                        _update_message(asst_msg_id_int, save_content)
+            # T037a: for container-mode chats, serialise per-instance so
+            # two concurrent messages to the same chat run one-after-the-
+            # other. FR-028 requires this — interleaved agent turns would
+            # step on the shared workspace / session branch. In host/
+            # docker mode `stack` is empty and the block is a no-op wrap.
+            from contextlib import AsyncExitStack
+            async with AsyncExitStack() as _inst_stack:
+                if container_mode and container_instance is not None:
+                    _lock_ok = await _inst_stack.enter_async_context(
+                        instance_lock(
+                            container_instance.slug,
+                            holder_id=f"msg:{asst_msg_id_int}",
+                        )
                     )
-                except (asyncio.CancelledError, Exception) as _save_exc:
-                    log.warning("assistant.save_on_cancel_failed",
-                                msg_id=asst_msg_id_int, error=str(_save_exc))
+                    if not _lock_ok:
+                        msg = (
+                            "This chat is busy finishing a previous step — "
+                            "try again in a moment."
+                        )
+                        controller.append_text(msg + "\n")
+                        controller.add_data({
+                            "type": "instance_busy",
+                            "slug": container_instance.slug,
+                        })
+                        await asyncio.shield(
+                            _update_message(asst_msg_id_int, msg)
+                        )
+                        return
+                try:
+                    try:
+                        async with asyncio.timeout(1800):
+                            async for message in query(prompt=prompt_arg, options=options):
+                                if isinstance(message, StreamEvent):
+                                    evt = message.event
+                                    if evt.get("type") == "content_block_delta":
+                                        delta = evt.get("delta", {})
+                                        if delta.get("type") == "text_delta":
+                                            text = delta.get("text", "")
+                                            controller.append_text(text)
+                                            streamed_text += text
+
+                                elif isinstance(message, AssistantMessage):
+                                    for block in message.content:
+                                        if isinstance(block, TextBlock):
+                                            final_text = block.text
+                                        elif isinstance(block, ToolUseBlock):
+                                            controller.add_data({
+                                                "type": "tool_use",
+                                                "id": block.id,
+                                                "tool": describe_tool(block),
+                                                "input": "",
+                                                "status": "running",
+                                            })
+
+                                elif isinstance(message, UserMessage):
+                                    # Surface tool results to the user — they were previously
+                                    # invisible (only the agent saw them), so the agent could
+                                    # report a different story than what tools actually returned.
+                                    if isinstance(message.content, list):
+                                        for block in message.content:
+                                            if isinstance(block, ToolResultBlock):
+                                                raw = block.content
+                                                if isinstance(raw, str):
+                                                    summary = raw
+                                                elif isinstance(raw, list):
+                                                    pieces = []
+                                                    for item in raw:
+                                                        if isinstance(item, dict):
+                                                            pieces.append(item.get("text") or str(item))
+                                                        else:
+                                                            pieces.append(str(item))
+                                                    summary = "\n".join(pieces)
+                                                else:
+                                                    summary = ""
+                                                controller.add_data({
+                                                    "type": "tool_result",
+                                                    "tool_use_id": block.tool_use_id,
+                                                    "content": summary[:1500],
+                                                    "is_error": bool(block.is_error),
+                                                    "status": "error" if block.is_error else "complete",
+                                                })
+                    except (GeneratorExit, asyncio.CancelledError):
+                        log.info("assistant.cancelled", session_id=session_id)
+                finally:
+                    save_content = final_text or streamed_text or "(no response)"
+                    try:
+                        await asyncio.shield(
+                            _update_message(asst_msg_id_int, save_content)
+                        )
+                    except (asyncio.CancelledError, Exception) as _save_exc:
+                        log.warning("assistant.save_on_cancel_failed",
+                                    msg_id=asst_msg_id_int, error=str(_save_exc))
 
             # 10. Update thread title on first message (sanitized)
             if ws.title == "New Chat" and user_text:

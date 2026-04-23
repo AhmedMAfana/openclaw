@@ -236,5 +236,18 @@ async def instance_health() -> str:
     return "\n".join(lines) or "(no allowed services reporting)"
 
 
+def get_tool_manifest() -> list[dict]:
+    """T033 helper — list each registered tool and its parameter schema.
+
+    Returns ``[{"name": str, "parameters": dict (JSON schema)}]``. Used
+    by ``tests/unit/test_mcp_manifest.py`` to assert no tool schema
+    contains an ambient-identifier argument (Principle III).
+    """
+    return [
+        {"name": t.name, "parameters": t.parameters}
+        for t in mcp._tool_manager.list_tools()
+    ]
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

@@ -308,5 +308,13 @@ def _iter_matches(abs_path: str, pattern: str) -> Iterable[str]:
             yield f"{rel}:{lineno}: {snippet}"
 
 
+def get_tool_manifest() -> list[dict]:
+    """T033 helper — see ``instance_mcp.get_tool_manifest``."""
+    return [
+        {"name": t.name, "parameters": t.parameters}
+        for t in mcp._tool_manager.list_tools()
+    ]
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

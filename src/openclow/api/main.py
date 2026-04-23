@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from openclow.api.routes import activity, health, settings, tasks, assistant, threads, plans, ws, actions, access
+from openclow.api.routes import activity, health, settings, tasks, assistant, threads, plans, ws, actions, access, instances
 
 app = FastAPI(title="THAG GROUP API", version="0.1.0")
 
@@ -36,6 +36,7 @@ app.include_router(plans.router)
 app.include_router(ws.router)
 app.include_router(actions.router)
 app.include_router(access.router)
+app.include_router(instances.router)
 
 # HTML page routes
 # - pages_router: /settings* — admin-only via verify_settings_auth dep

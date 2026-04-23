@@ -213,5 +213,13 @@ async def git_push(remote: str = "origin") -> str:
 # degenerate "cannot guarantee", so the whole family is omitted.
 
 
+def get_tool_manifest() -> list[dict]:
+    """T033 helper — see ``instance_mcp.get_tool_manifest``."""
+    return [
+        {"name": t.name, "parameters": t.parameters}
+        for t in mcp._tool_manager.list_tools()
+    ]
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")
