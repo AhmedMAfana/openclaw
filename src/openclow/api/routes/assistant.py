@@ -464,6 +464,95 @@ async def assistant_endpoint(
                 )
                 await _save_message(session_id, user.id, "user", user_text + attachment_note)
 
+            # T073: manual end-session command / button. Handled BEFORE
+            # any agent routing so the user can terminate a stuck or
+            # misbehaving instance without the LLM being involved.
+            #
+            # `/terminate` triggers the two-step confirm; a button tap
+            # that carries the `end_session_confirm:<id>` action_id
+            # executes immediately. Matching shapes:
+            #   "/terminate"               → confirm prompt
+            #   "end_session:<id>"         → confirm prompt
+            #   "end_session_confirm:<id>" → execute
+            _cmd = user_text.strip()
+            if _cmd == "/terminate" or _cmd.startswith("end_session:"):
+                msg_int = await _save_message(
+                    session_id, user.id, "assistant",
+                    "This will destroy your current environment. Continue?",
+                    is_complete=True,
+                )
+                controller.add_data({
+                    "type": "confirm",
+                    "prompt": "This will destroy your current environment. Continue?",
+                    "actions": [
+                        {"label": "✅ Confirm end session",
+                         "action_id": f"end_session_confirm:{session_id}",
+                         "style": "danger"},
+                        {"label": "Cancel", "action_id": "menu:main"},
+                    ],
+                })
+                controller.append_text(
+                    "This will destroy your current environment. Continue?"
+                )
+                return
+            if _cmd.startswith("end_session_confirm:"):
+                # Terminate whichever active instance the chat currently
+                # owns. The chat_session_id in the action_id is only
+                # used to cross-check that the user is still on the
+                # chat that issued the confirm.
+                from openclow.models.instance import Instance as _Instance, InstanceStatus as _IS
+                from sqlalchemy import select as _select
+                async with async_session() as _db:
+                    _row = (await _db.execute(
+                        _select(_Instance).where(
+                            _Instance.chat_session_id == session_id,
+                            _Instance.status.in_((
+                                _IS.PROVISIONING.value,
+                                _IS.RUNNING.value,
+                                _IS.IDLE.value,
+                            )),
+                        )
+                    )).scalar_one_or_none()
+                if _row is None:
+                    controller.append_text(
+                        "No active environment to end on this chat.\n"
+                    )
+                    await asyncio.shield(_update_message(
+                        await _save_message(
+                            session_id, user.id, "assistant",
+                            "No active environment to end on this chat.",
+                            is_complete=True,
+                        ),
+                        "No active environment to end on this chat.",
+                    ))
+                    return
+                try:
+                    await InstanceService().terminate(
+                        _row.id, reason="user_request"
+                    )
+                except Exception as _e:
+                    log.warning(
+                        "assistant.end_session_failed",
+                        slug=_row.slug, error=str(_e),
+                    )
+                msg = (
+                    "Ending your environment — teardown will complete in "
+                    "the background. Your next message will start a fresh one."
+                )
+                controller.append_text(msg + "\n")
+                controller.add_data({
+                    "type": "instance_terminating",
+                    "slug": _row.slug,
+                })
+                await asyncio.shield(_update_message(
+                    await _save_message(
+                        session_id, user.id, "assistant",
+                        msg, is_complete=True,
+                    ),
+                    msg,
+                ))
+                return
+
             # 3. Resolve project selection — persist to thread if changed
             resolved_project_id = request.projectId or ws.project_id
             if request.projectId and request.projectId != ws.project_id:

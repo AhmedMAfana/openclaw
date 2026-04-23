@@ -112,6 +112,52 @@ def confirm_keyboard() -> ActionKeyboard:
     ])
 
 
+# ── Per-chat instance controls (T074) ────────────────────────────
+#
+# Shared between Telegram + Slack + web UI via the ChatProvider
+# abstraction. No provider-specific code; each provider translates
+# ``ActionKeyboard`` → its native UI. CLAUDE.md "No Dead Ends" rule
+# requires a Cancel path alongside the destructive Confirm.
+
+
+def end_session_keyboard(chat_session_id: int) -> ActionKeyboard:
+    """A single "End session" button for a container-mode chat.
+
+    Tapping it renders the confirmation keyboard below (two-step) —
+    one tap can't destroy an environment by accident.
+    """
+    return ActionKeyboard(rows=[
+        ActionRow([
+            ActionButton(
+                "⏹ End session",
+                f"end_session:{chat_session_id}",
+                style="danger",
+            ),
+        ]),
+    ])
+
+
+def end_session_confirm_keyboard(chat_session_id: int) -> ActionKeyboard:
+    """Second step — explicit Confirm + Cancel.
+
+    Confirm routes to ``end_session_confirm:<chat_session_id>`` which
+    the chat_task / assistant handler maps to
+    ``InstanceService.terminate(..., reason='user_request')``. Cancel
+    routes back to the main menu — CLAUDE.md "No Dead Ends": never
+    a dead-end reply on denial.
+    """
+    return ActionKeyboard(rows=[
+        ActionRow([
+            ActionButton(
+                "✅ Confirm end session",
+                f"end_session_confirm:{chat_session_id}",
+                style="danger",
+            ),
+            ActionButton("Cancel", "menu:main"),
+        ]),
+    ])
+
+
 def review_keyboard(task_id: str) -> ActionKeyboard:
     """Create PR / Discard after diff preview."""
     return ActionKeyboard(rows=[
