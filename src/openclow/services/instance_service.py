@@ -38,6 +38,7 @@ from sqlalchemy import func, select
 from openclow.models import async_session
 from openclow.models.instance import Instance, InstanceStatus, TerminatedReason
 from openclow.models.web_chat import WebChatSession
+from openclow.services.config_service import get_config
 from openclow.services.credentials_service import CredentialsService
 from openclow.utils.logging import get_logger
 
@@ -215,6 +216,27 @@ class InstanceService:
     # Public API — mirrors contracts/instance-service.md method surface.
     # ------------------------------------------------------------------
 
+    async def _effective_per_user_cap(self) -> int:
+        """T053 — read ``per_user_cap`` fresh on every provision().
+
+        Operators can tune FR-030a via
+        ``platform_config(category='instance', key='per_user_cap')`` with
+        a JSONB body ``{"value": <int>}``. Changes take effect on the
+        next provision call without a worker restart. A missing row or a
+        read failure falls back to the constructor-supplied default,
+        keeping the contract tests (which don't wire ``platform_config``)
+        green.
+        """
+        try:
+            cfg = await get_config("instance", "per_user_cap")
+            if cfg and "value" in cfg:
+                v = int(cfg["value"])
+                if v > 0:
+                    return v
+        except Exception:
+            pass
+        return self._per_user_cap
+
     async def provision(self, chat_session_id: int) -> Instance:
         """Begin provisioning a fresh instance for a chat with none.
 
@@ -253,10 +275,11 @@ class InstanceService:
                     return existing
 
                 active_chat_ids = await self._list_active_chat_ids(session, user_id)
-                if len(active_chat_ids) >= self._per_user_cap:
+                effective_cap = await self._effective_per_user_cap()
+                if len(active_chat_ids) >= effective_cap:
                     raise PerUserCapExceeded(
                         user_id=user_id,
-                        cap=self._per_user_cap,
+                        cap=effective_cap,
                         active_chat_ids=active_chat_ids,
                     )
 

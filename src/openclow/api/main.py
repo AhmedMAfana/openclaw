@@ -37,6 +37,10 @@ app.include_router(ws.router)
 app.include_router(actions.router)
 app.include_router(access.router)
 app.include_router(instances.router)
+# Internal heartbeat / token-rotation — mounted on the same FastAPI app
+# but with a distinct `/internal/*` prefix. Upstream nginx/CF MUST NOT
+# route `/internal/*` to the public; compose-network only.
+app.include_router(instances.internal_router)
 
 # HTML page routes
 # - pages_router: /settings* — admin-only via verify_settings_auth dep

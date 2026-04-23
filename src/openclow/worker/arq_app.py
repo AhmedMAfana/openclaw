@@ -1,7 +1,7 @@
 """arq worker configuration — native asyncio task queue."""
 import asyncio
 
-from arq import create_pool
+from arq import create_pool, cron
 from arq.connections import RedisSettings
 
 from openclow.settings import settings
@@ -393,9 +393,31 @@ async def on_shutdown(ctx: dict):
     log.info("worker.shutdown", action="audit_flushed_and_engine_disposed")
 
 
+def _load_cron_jobs():
+    """T049: register the inactivity reaper on a 5-min cadence.
+
+    ARQ's cron() schedules by clock-wall minute; passing a set via
+    `minute={0,5,10,...,55}` gives us one tick every 5 minutes
+    regardless of how many workers are running (arq's `unique=True`
+    default ensures only one worker executes a given tick).
+    """
+    from openclow.services.inactivity_reaper import reaper_cron
+    return [
+        cron(
+            reaper_cron,
+            name="inactivity_reaper",
+            minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+            second=0,
+            run_at_startup=False,
+            unique=True,
+        ),
+    ]
+
+
 class WorkerSettings:
     """arq worker settings."""
     functions = _load_functions()
+    cron_jobs = _load_cron_jobs()
     on_startup = on_startup
     on_shutdown = on_shutdown
     redis_settings = parse_redis_url(settings.redis_url)
