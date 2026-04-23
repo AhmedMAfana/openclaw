@@ -42,6 +42,7 @@ from openclow.services.instance_service import (
     PerUserCapExceeded,
     PlatformAtCapacity,
     ProjectNotContainerMode,
+    load_upstream_state,
 )
 from openclow.services.instance_lock import instance_lock
 
@@ -935,6 +936,20 @@ async def assistant_endpoint(
                         instance_id=str(container_instance.id),
                         error=str(_e),
                     )
+                # T084: non-blocking upstream banner. FR-027a — the
+                # instance keeps running during a CF/GitHub outage; we
+                # just surface a pill in the chat so the user knows
+                # the preview URL may be flaky.
+                try:
+                    _up_state = await load_upstream_state(container_instance.slug)
+                except Exception:
+                    _up_state = {}
+                if _up_state:
+                    controller.add_data({
+                        "type": "instance_upstream_degraded",
+                        "slug": container_instance.slug,
+                        "capabilities": _up_state,  # {capability: upstream}
+                    })
             else:
                 base_tools += [
                     "mcp__actions__list_projects",

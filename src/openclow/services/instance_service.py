@@ -178,6 +178,88 @@ async def _default_enqueuer(job_name: str, *args: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# T082 / T084 — Redis-backed upstream degradation state.
+#
+# Key shape:  ``openclow:instance_upstream:<slug>:<capability>`` → ``<upstream>``
+# TTL:        180 s (3× the T083 prober cadence). A dead prober cannot
+#             leave a stuck banner; a flap-and-heal cycle clears quickly.
+# ---------------------------------------------------------------------------
+
+
+_UPSTREAM_STATE_PREFIX = "openclow:instance_upstream"
+_UPSTREAM_STATE_TTL_S = 180
+
+
+async def _upstream_redis():
+    import redis.asyncio as aioredis
+    from openclow.settings import settings as _s
+    return aioredis.from_url(_s.redis_url, decode_responses=False)
+
+
+async def _upstream_state_set(slug: str, capability: str, upstream: str) -> None:
+    try:
+        r = await _upstream_redis()
+        try:
+            await r.set(
+                f"{_UPSTREAM_STATE_PREFIX}:{slug}:{capability}",
+                upstream.encode("utf-8"),
+                ex=_UPSTREAM_STATE_TTL_S,
+            )
+        finally:
+            await r.aclose()
+    except Exception as e:
+        log.warning(
+            "upstream_state.set_failed", slug=slug, capability=capability,
+            error=str(e)[:200],
+        )
+
+
+async def _upstream_state_clear(slug: str, capability: str) -> None:
+    try:
+        r = await _upstream_redis()
+        try:
+            await r.delete(f"{_UPSTREAM_STATE_PREFIX}:{slug}:{capability}")
+        finally:
+            await r.aclose()
+    except Exception as e:
+        log.warning(
+            "upstream_state.clear_failed", slug=slug, capability=capability,
+            error=str(e)[:200],
+        )
+
+
+async def load_upstream_state(slug: str) -> dict[str, str]:
+    """T084 — return the ``{capability: upstream}`` map of current outages.
+
+    Reader API for the chat-UI banner. Empty dict = all upstreams
+    healthy. ``assistant_endpoint`` calls this once per inbound message
+    and ships any entries as an ``instance_upstream_degraded`` event.
+    """
+    out: dict[str, str] = {}
+    try:
+        r = await _upstream_redis()
+        try:
+            cursor = 0
+            pattern = f"{_UPSTREAM_STATE_PREFIX}:{slug}:*"
+            while True:
+                cursor, keys = await r.scan(cursor, match=pattern, count=50)
+                for key in keys:
+                    val = await r.get(key)
+                    if val is None:
+                        continue
+                    key_str = (key.decode() if isinstance(key, bytes) else key)
+                    cap = key_str.rsplit(":", 1)[-1]
+                    out[cap] = val.decode("utf-8", errors="replace")
+                if cursor == 0:
+                    break
+        finally:
+            await r.aclose()
+    except Exception as e:
+        log.warning("upstream_state.load_failed", slug=slug, error=str(e)[:200])
+    return out
+
+
+# ---------------------------------------------------------------------------
 # The service
 # ---------------------------------------------------------------------------
 
@@ -446,6 +528,72 @@ class InstanceService:
             stmt = stmt.order_by(Instance.created_at.desc())
             result = await session.execute(stmt)
             return list(result.scalars().all())
+
+    async def record_upstream_degradation(
+        self,
+        instance_id: UUID,
+        *,
+        capability: str,
+        upstream: str,
+    ) -> None:
+        """T082 — mark one capability as upstream-degraded. DOES NOT flip
+        the instance status.
+
+        FR-027a: an upstream outage (Cloudflare, GitHub App, DNS) is NOT
+        a reason to terminate a running instance. It's a banner-level
+        event. Callers — the periodic prober (T083), the rotate-git-
+        token handler — emit this on failure; ``record_upstream_recovery``
+        clears it. The chat-UI reads the resulting state and renders a
+        non-blocking banner (T084).
+
+        State lives in Redis with a short TTL so a dead prober never
+        leaves a banner stuck on screen: key
+        ``openclow:instance_upstream:<slug>:<capability>`` set to the
+        upstream name, expires after 180 s (3× the 60 s prober cadence).
+
+        ``capability`` is a short constant (``"preview_url"``,
+        ``"github_push"``, ``"dns"``). ``upstream`` names the upstream
+        that failed (``"cloudflare"``, ``"github_app"``, etc.) so the
+        banner copy can be specific.
+        """
+        slug = await self._load_slug(instance_id)
+        if slug is not None:
+            await _upstream_state_set(slug, capability, upstream)
+        log.info(
+            "instance.upstream_degraded",
+            instance_id=str(instance_id),
+            capability=capability,
+            upstream=upstream,
+        )
+
+    async def record_upstream_recovery(
+        self,
+        instance_id: UUID,
+        *,
+        capability: str,
+        upstream: str,
+    ) -> None:
+        """T082 — clear a previously-recorded upstream outage.
+
+        Removes the Redis state key so the chat banner clears on the
+        next poll tick (FR-027b). Idempotent — a DEL on a missing key
+        is a no-op.
+        """
+        slug = await self._load_slug(instance_id)
+        if slug is not None:
+            await _upstream_state_clear(slug, capability)
+        log.info(
+            "instance.upstream_recovered",
+            instance_id=str(instance_id),
+            capability=capability,
+            upstream=upstream,
+        )
+
+    async def _load_slug(self, instance_id: UUID) -> str | None:
+        """Look up the slug for an instance id. Cheap; cacheable later."""
+        async with self._session_factory() as session:
+            inst = await session.get(Instance, instance_id)
+            return inst.slug if inst is not None else None
 
     async def record_heartbeat(
         self, slug: str, signals: HeartbeatSignals

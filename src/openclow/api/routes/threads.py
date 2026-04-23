@@ -132,15 +132,21 @@ async def set_thread_git_mode(thread_id: int, body: dict, user: User = Depends(w
 
 @router.post("/threads/{thread_id}/archive")
 async def archive_thread(thread_id: int, user: User = Depends(web_user_dep)):
-    """Archive a session (soft delete via status)."""
+    """Archive a session — T086 full-cascade delete.
+
+    Ownership check first; then delegate to
+    ``chat_session_service.delete_chat_cascade`` which also tears down
+    the chat's active instance (if any), cleans audit rows keyed by
+    slug, and enqueues a session-branch GC job.
+    """
     async with async_session() as session:
         result = await session.get(WebChatSession, thread_id)
         if not result or result.user_id != user.id:
             raise HTTPException(404, "Thread not found")
-        await session.delete(result)
-        await session.commit()
 
-    return {"status": "ok"}
+    from openclow.services.chat_session_service import delete_chat_cascade
+    summary = await delete_chat_cascade(thread_id)
+    return {"status": "ok", **summary}
 
 
 # ── Truncate endpoint (used by edit flow) ────────────────────

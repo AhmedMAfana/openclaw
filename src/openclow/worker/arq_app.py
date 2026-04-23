@@ -41,6 +41,7 @@ def _load_functions():
         provision_instance,
         teardown_instance,
         rotate_github_token,
+        tunnel_health_check_cron,
     )
     return [
         execute_task, execute_plan, approve_task, merge_task, reject_task, discard_task,
@@ -64,6 +65,7 @@ def _load_functions():
         provision_instance,
         teardown_instance,
         rotate_github_token,
+        tunnel_health_check_cron,
     ]
 
 
@@ -407,11 +409,22 @@ def _load_cron_jobs():
     default ensures only one worker executes a given tick).
     """
     from openclow.services.inactivity_reaper import reaper_cron
+    from openclow.worker.tasks.instance_tasks import tunnel_health_check_cron
     return [
         cron(
             reaper_cron,
             name="inactivity_reaper",
             minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+            second=0,
+            run_at_startup=False,
+            unique=True,
+        ),
+        # T083: probe every running/idle instance's CF tunnel health
+        # once per minute. FR-027a — degradation NEVER flips the
+        # status to `failed`; only the banner changes.
+        cron(
+            tunnel_health_check_cron,
+            name="tunnel_health_check",
             second=0,
             run_at_startup=False,
             unique=True,

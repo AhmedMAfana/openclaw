@@ -1114,7 +1114,57 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
         await chat.send_error(chat_id, message_id, "Project not found")
         return
 
-    if (getattr(project, "mode", "docker") or "docker") == "host":
+    # T088: bootstrap router flip — go-live for per-chat instances.
+    # mode='container' projects don't use the legacy project-wide
+    # bootstrap at all. Provisioning is per-chat via
+    # InstanceService.get_or_resume (wired in assistant_endpoint).
+    # The legacy host/docker code paths below remain UNCHANGED per
+    # FR-034 (no edits to the legacy path).
+    project_mode = getattr(project, "mode", "docker") or "docker"
+    if project_mode == "container":
+        # For web chats, chat_id shape is "web:<user_id>:<session_id>";
+        # the session_id is the authoritative WebChatSession row and
+        # lets InstanceService.get_or_resume pick up the thread.
+        chat_session_id: int | None = None
+        if chat_id.startswith("web:"):
+            parts = chat_id.split(":")
+            if len(parts) == 3 and parts[2].isdigit():
+                chat_session_id = int(parts[2])
+        if chat_session_id is None:
+            await chat.edit_message(
+                chat_id, message_id,
+                "Container-mode projects are provisioned per-chat. Start "
+                "a chat and send any message — your environment will come "
+                "up automatically.",
+            )
+            return
+        from openclow.services.instance_service import (
+            InstanceService, PerUserCapExceeded, PlatformAtCapacity,
+        )
+        try:
+            inst = await InstanceService().get_or_resume(
+                chat_session_id=chat_session_id
+            )
+            await chat.edit_message(
+                chat_id, message_id,
+                f"Your environment is {inst.status}. It will be ready in "
+                "about 90 seconds.",
+            )
+        except PerUserCapExceeded as e:
+            await chat.edit_message(
+                chat_id, message_id,
+                f"You already have {len(e.active_chat_ids)} active chats "
+                f"(cap={e.cap}). End one to start another.",
+            )
+        except PlatformAtCapacity:
+            await chat.edit_message(
+                chat_id, message_id,
+                "The platform is at capacity right now. Please try again "
+                "in a few minutes.",
+            )
+        return
+
+    if project_mode == "host":
         return await _bootstrap_project_host(
             ctx, project, chat, chat_id, message_id,
         )

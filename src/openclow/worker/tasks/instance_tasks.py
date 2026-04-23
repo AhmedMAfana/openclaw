@@ -44,6 +44,7 @@ from openclow.services.instance_compose_renderer import (
     InstanceRenderContext,
     render as render_compose,
 )
+from openclow.services.instance_service import InstanceService
 from openclow.services.tunnel_service import (
     CloudflareConfig,
     TunnelService,
@@ -675,6 +676,86 @@ def _heartbeat_url_for(slug: str) -> str:
     """
     base = os.environ.get("ORCHESTRATOR_INTERNAL_URL", _DEFAULT_ORCHESTRATOR_INTERNAL_URL)
     return f"{base.rstrip('/')}/internal/instances/{slug}/heartbeat"
+
+
+async def tunnel_health_check_cron(ctx: dict) -> dict:
+    """T083 — sweep every running/idle instance and probe CF tunnel health.
+
+    ARQ cron fires every minute. For each ``running``/``idle`` row we
+    call ``TunnelService.health(slug)`` which does one CF API lookup
+    per slug (cheap). On failure we emit
+    ``instance.upstream_degraded`` via ``InstanceService``; on recovery
+    we emit ``instance.upstream_recovered``. We NEVER flip
+    ``instances.status`` to ``failed`` — FR-027a mandates the instance
+    keeps running; only the banner changes.
+
+    Returns a summary dict ``{"probed": N, "degraded": M, "recovered": K}``.
+    """
+    from openclow.services.tunnel_service import TunnelService
+
+    probed = 0
+    degraded = 0
+    recovered = 0
+
+    # Load CF config once per sweep so a mid-sweep rotation doesn't race.
+    try:
+        cf_cfg = await _load_cloudflare_config()
+    except _ProvisionFailure:
+        log.info("tunnel_health_check_cron.skipped_no_cf_config")
+        return {"probed": 0, "degraded": 0, "recovered": 0, "skipped": True}
+
+    ts = TunnelService(cf_cfg)
+    svc = InstanceService()
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Instance).where(
+                Instance.status.in_((
+                    InstanceStatus.RUNNING.value,
+                    InstanceStatus.IDLE.value,
+                )),
+            )
+        )
+        rows = list(result.scalars().all())
+
+    for inst in rows:
+        probed += 1
+        # Authoritative health is CF's tunnel status. Any API hiccup
+        # counts as "unhealthy" for this sweep — the next sweep will
+        # reconcile if CF was just flapping.
+        try:
+            healthy = await ts.health(inst.slug)
+        except Exception as e:  # pragma: no cover
+            log.warning(
+                "tunnel_health_check.probe_error",
+                slug=inst.slug, error=str(e)[:200],
+            )
+            healthy = False
+        # v1 policy: emit events on every sweep outcome. Deduping is a
+        # follow-up; the chat banner reads the most-recent event per
+        # (instance, capability) so repeated "degraded" emits are idempotent.
+        try:
+            if healthy:
+                await svc.record_upstream_recovery(
+                    inst.id, capability="preview_url", upstream="cloudflare",
+                )
+                recovered += 1
+            else:
+                await svc.record_upstream_degradation(
+                    inst.id, capability="preview_url", upstream="cloudflare",
+                )
+                degraded += 1
+        except Exception as e:  # pragma: no cover
+            log.warning(
+                "tunnel_health_check.event_failed",
+                slug=inst.slug, error=str(e)[:200],
+            )
+
+    log.info(
+        "tunnel_health_check.sweep",
+        probed=probed, degraded=degraded, recovered=recovered,
+    )
+    return {"probed": probed, "degraded": degraded, "recovered": recovered}
 
 
 async def rotate_github_token(ctx: dict, instance_id: str) -> dict:
