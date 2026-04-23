@@ -40,6 +40,115 @@ def _mcp_host() -> dict:
     return {"command": "python", "args": ["-m", "openclow.mcp_servers.host_mcp"]}
 
 
+# ---------------------------------------------------------------------------
+# Per-chat instance factories (T041). Each factory takes the Instance row
+# as its single argument and returns an argv with the slug/root/branch
+# baked in. Callers MUST NOT pass user-controlled strings to the factory;
+# the factory reads only DB-authoritative fields from the Instance row.
+#
+# Principle III invariant: the returned argv carries the identity of the
+# one chat's instance — an LLM calling any tool on that MCP subprocess
+# cannot address a different chat's instance because no tool takes an
+# `instance_*` / `project_*` / `workspace_*` / `container_*` argument
+# (T033 test enforces).
+# ---------------------------------------------------------------------------
+
+# `app,web,node,db,redis` — cloudflared NEVER in the list (Principle III).
+_DEFAULT_INSTANCE_SERVICES = "app,web,node,db,redis"
+
+
+def _mcp_instance(instance) -> dict:
+    """Spawn instance_mcp bound to this instance's compose project.
+
+    Takes an ``openclow.models.Instance`` row. Reads only DB-authoritative
+    fields (``compose_project``) — accepting the whole row rather than a
+    slug discourages callers from substituting a slug at call time.
+    """
+    return {
+        "command": "python",
+        "args": [
+            "-m", "openclow.mcp_servers.instance_mcp",
+            "--compose-project", instance.compose_project,
+            "--allowed-services", _DEFAULT_INSTANCE_SERVICES,
+        ],
+    }
+
+
+def _mcp_workspace(instance) -> dict:
+    """Spawn workspace_mcp bound to this instance's workspace root."""
+    return {
+        "command": "python",
+        "args": [
+            "-m", "openclow.mcp_servers.workspace_mcp",
+            "--root", instance.workspace_path,
+        ],
+    }
+
+
+def _mcp_git_pinned(instance) -> dict:
+    """Spawn git_mcp pinned to this instance's workspace + session branch.
+
+    Destructive ops (checkout / reset --hard / branch -D) are not exposed
+    at all in pinned mode; commit/push verify HEAD is still on the pinned
+    branch before acting. See git_mcp.py T040 notes.
+    """
+    return {
+        "command": "python",
+        "args": [
+            "-m", "openclow.mcp_servers.git_mcp",
+            "--workspace", instance.workspace_path,
+            "--branch", instance.session_branch,
+        ],
+    }
+
+
+# Explicit tool allowlist for container-mode chats (T042). Only the
+# scoped MCPs appear — NO `Bash`, `docker`, `host_run_command`, no legacy
+# `mcp__docker__*` or `mcp__host__*`. Tool calls go through audit_service
+# at the caller (chat_task.py) with {instance_slug, chat_session_id,
+# task_id} fields.
+CONTAINER_MODE_TOOLS: list[str] = [
+    # Built-in file tools operate on the workspace_mcp via the `--root`
+    # bound root; keeping them in the list mirrors coder ergonomics.
+    "Read", "Write", "Edit", "Glob", "Grep",
+    # instance_mcp — compose-scoped.
+    "mcp__instance__instance_exec",
+    "mcp__instance__instance_logs",
+    "mcp__instance__instance_restart",
+    "mcp__instance__instance_ps",
+    "mcp__instance__instance_health",
+    # workspace_mcp — root-bound.
+    "mcp__workspace__read_file",
+    "mcp__workspace__write_file",
+    "mcp__workspace__edit_file",
+    "mcp__workspace__list_dir",
+    "mcp__workspace__search",
+    # git_mcp pinned — no checkout / reset / branch -D (they are not
+    # exported when --branch is set).
+    "mcp__git__git_status",
+    "mcp__git__git_diff",
+    "mcp__git__git_diff_staged",
+    "mcp__git__git_add",
+    "mcp__git__git_commit",
+    "mcp__git__git_push",
+    "mcp__git__git_log",
+    "mcp__git__git_show",
+]
+
+
+def _container_mode_mcp_servers(instance) -> dict:
+    """Build the mcp_servers dict for a container-mode chat agent.
+
+    Every factory is bound to this one Instance — no cross-chat reach
+    exists in the resulting subprocess fleet.
+    """
+    return {
+        "instance": _mcp_instance(instance),
+        "workspace": _mcp_workspace(instance),
+        "git": _mcp_git_pinned(instance),
+    }
+
+
 def _coder_env_spec(
     mode: str,
     workspace_path: str,
