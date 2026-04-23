@@ -112,3 +112,68 @@ src/openclow/
 - **No Dead Ends**: Every error message MUST include at least a Main Menu button. Slack: use `error_blocks()`. Telegram: use `_error_keyboard()`. Never show bare text errors without navigation buttons.
 - **Shared agent utilities**: use `worker/tasks/_agent_base.py` for tool descriptions (`describe_tool`), auth error detection (`is_auth_error`), and common patterns. Don't copy-paste agent boilerplate.
 - **MCP factories live in `providers/llm/claude.py`**: `_mcp_docker()`, `_mcp_playwright()`, `_mcp_git()`. Import these, don't inline MCP server configs.
+
+## Per-chat instance mode — quick reference (T090)
+
+Every NEW web chat now runs in **container mode** by default: the chat
+gets its own isolated Docker stack + Cloudflare named tunnel, and the
+assistant agent sees ONLY a scoped MCP fleet bound to that one chat.
+Legacy host/docker modes still work unchanged — the router in
+`worker/tasks/bootstrap.py` branches on `project.mode`.
+
+**Key code locations**
+- `services/instance_service.py` — state-machine owner (`provision`,
+  `get_or_resume`, `touch`, `terminate`, `record_upstream_*`). Every
+  method injectable at every I/O seam; tests wire fakes via
+  `tests/conftest.py::inmemory_service`.
+- `worker/tasks/instance_tasks.py` — ARQ jobs: `provision_instance`
+  (compose render → CF tunnel → GH token → compose up → projctl up),
+  `teardown_instance` (idempotent subtract), `rotate_github_token`
+  (fresh token → docker exec into `~/.git-credentials`),
+  `tunnel_health_check_cron` (per-minute CF probe — FR-027a: never
+  flips status to `failed`).
+- `mcp_servers/instance_mcp.py` + `workspace_mcp.py` + `git_mcp.py` —
+  the bounded-authority trio. Every tool argument-name is free of
+  `instance`/`project`/`workspace`/`container` (Principle III / T033
+  enforced).
+- `providers/llm/claude.py` — pinned factories:
+  `_mcp_instance(instance)`, `_mcp_workspace(instance)`,
+  `_mcp_git_pinned(instance)`. Each takes the Instance row (not a
+  loose identifier) so an LLM can't substitute a slug at call time.
+  `CONTAINER_MODE_TOOLS` is the tool allowlist for container-mode
+  chats.
+- `setup/compose_templates/laravel-vue/` — v1's shipped template
+  (compose.yml, cloudflared.yml, vite.config.js, guide.md,
+  project.yaml, nginx.conf). No `ports:` outside `cloudflared`
+  (Principle V). Runtime secrets come via `environment: - KEY`
+  list-form so the renderer's `${VAR}` interpolation stays reserved
+  for render-time variables.
+
+**Entry points**
+- Web chat: `api/routes/assistant.py::assistant_endpoint`. Wires
+  `get_or_resume`, `touch`, the scoped MCP fleet, `/terminate`,
+  `end_session_confirm:<id>`, `retry_provision:<id>`, and the
+  provisioning / upstream-degraded / failure banners.
+- Chat delete: `api/routes/threads.py::archive_thread` →
+  `services/chat_session_service.py::delete_chat_cascade` (terminate
+  + FK cascade + audit GC + branch GC).
+- Internal APIs (compose-network only):
+  `POST /internal/instances/<slug>/heartbeat` (projctl cadence 60s),
+  `POST /internal/instances/<slug>/rotate-git-token` (projctl cadence
+  45min), `POST /internal/instances/<slug>/explain` (projctl LLM
+  fallback, arch §9).
+
+**Crons**
+- `inactivity_reaper` — every 5 min. Two-phase: running → idle +
+  grace banner, idle → terminating after grace window.
+- `tunnel_health_check` — every 60 s. CF tunnel probe; Redis-backed
+  degradation state at `openclow:instance_upstream:<slug>:<cap>`
+  with 180s TTL.
+
+**Docs**: full spec lives in [specs/001-per-chat-instances/](specs/001-per-chat-instances/);
+contract docs in [contracts/](specs/001-per-chat-instances/contracts/).
+
+<!-- SPECKIT START -->
+Active feature plan: [specs/001-per-chat-instances/plan.md](specs/001-per-chat-instances/plan.md)
+Spec: [specs/001-per-chat-instances/spec.md](specs/001-per-chat-instances/spec.md) · Research: [research.md](specs/001-per-chat-instances/research.md) · Data model: [data-model.md](specs/001-per-chat-instances/data-model.md) · Contracts: [contracts/](specs/001-per-chat-instances/contracts/)
+<!-- SPECKIT END -->

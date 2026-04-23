@@ -298,7 +298,7 @@ description: "Task list for per-chat isolated instances"
 ### Documentation + verification
 
 - [ ] T089 [P] Update [docs/architecture/per-chat-instances.md](../../docs/architecture/per-chat-instances.md) to reference this spec's finalised decisions from [spec.md §Clarifications](spec.md#clarifications): Q1 public preview URL, Q2 per-user cap 3, Q3 chat-lifetime retention, Q4 keep-running upstream banner, Q5 60-min grace window. Note any deltas from the original architecture doc
-- [ ] T090 [P] Update [CLAUDE.md](../../CLAUDE.md) to add a "Per-chat instance mode quick reference" section (keep the SPECKIT block untouched) with: pointers to `InstanceService`, the MCP binding factories, compose templates location, and the rotate-git-token cron
+- [X] T090 [P] Update [CLAUDE.md](../../CLAUDE.md) to add a "Per-chat instance mode quick reference" section (keep the SPECKIT block untouched) with: pointers to `InstanceService`, the MCP binding factories, compose templates location, and the rotate-git-token cron *(new section inserted just above the SPECKIT block. Covers: state-machine owner, ARQ jobs (provision/teardown/rotate/health-check), the bounded-authority MCP trio + Principle III / T033 invariant, the three pinned factories in claude.py, the laravel-vue template layout, entry points (assistant_endpoint, delete cascade, internal APIs), and both crons. SPECKIT block left untouched.)*
 - [ ] T091 Run the full [quickstart.md](quickstart.md) manually against a staging host; mark each section `done and verified` per constitution Principle VII. Record the verification in a short `VERIFICATION.md` in this feature directory
 
 ### Load / scale harness (gated, nightly only — SC-001, SC-006, SC-009)
