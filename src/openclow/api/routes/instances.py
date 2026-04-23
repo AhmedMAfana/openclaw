@@ -398,3 +398,233 @@ async def rotate_git_token(slug: str, request: Request) -> JSONResponse:
         ).isoformat(),
         "repo": token.repo,
     })
+
+
+# ---------------------------------------------------------------------------
+# LLM fallback — T079 / arch §9 / contracts/llm-fallback-envelope.schema.json
+# ---------------------------------------------------------------------------
+
+
+class _LLMEnvelopeStep(BaseModel):
+    name: str
+    cmd: str
+    cwd: str
+    success_check: str | None = None
+    skippable: bool = False
+
+
+class _LLMEnvelope(BaseModel):
+    """Shape mirrors contracts/llm-fallback-envelope.schema.json.
+
+    ``additionalProperties: false`` is enforced only at schema-validation
+    time (T077); pydantic ignores unknown keys by default which is fine
+    for the HTTP path — the JSON Schema validator is the gate.
+    """
+    instance_slug: str
+    project_name: str
+    step: _LLMEnvelopeStep
+    exit_code: int
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+    guide_section: str = ""
+    previous_attempts: int = 0
+
+
+@internal_router.post("/instances/{slug}/explain")
+async def explain(slug: str, request: Request) -> JSONResponse:
+    """Receive a failure envelope from ``projctl explain`` and return an action.
+
+    Contract (arch §9): the orchestrator-side of the self-healing loop.
+    projctl sends a bounded envelope built per
+    [contracts/llm-fallback-envelope.schema.json]; the orchestrator:
+
+      1. Verifies HMAC against the instance's heartbeat_secret.
+      2. Runs ``audit_service.redact`` on every text field (belt-and-
+         braces — projctl SHOULD already redact locally, but Principle
+         IV mandates this redactor runs on the LLM path too).
+      3. Forwards to the LLM with a structured system prompt.
+      4. Returns ``{action, payload, reason}`` per the response schema.
+
+    Response shape:
+      ```json
+      {"action": "shell_cmd" | "patch" | "skip" | "give_up",
+       "payload": "<shell command or unified diff or empty>",
+       "reason":  "<one-sentence human-readable explanation>"}
+      ```
+
+    Security rules match the heartbeat / rotate-git-token endpoints —
+    same rate limit, same HMAC authentication.
+    """
+    if not await _check_rate_limit(slug):
+        return JSONResponse(
+            status_code=429,
+            content={"status": "rate_limited"},
+            headers={"Retry-After": str(_HB_WINDOW_S)},
+        )
+
+    raw_body = await request.body()
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Instance).where(Instance.slug == slug)
+        )
+        inst = result.scalar_one_or_none()
+
+    if inst is None:
+        return JSONResponse(status_code=404, content={"status": "unknown_slug"})
+
+    sig_header = (
+        request.headers.get("x-signature") or request.headers.get("X-Signature")
+    )
+    if not _verify_hmac(sig_header, raw_body, inst.heartbeat_secret):
+        await _bump_auth_fail_counter(slug)
+        log.warning("explain.hmac_failed", slug=slug)
+        return JSONResponse(status_code=401, content={"status": "unauthorized"})
+
+    try:
+        env = _LLMEnvelope.model_validate_json(raw_body)
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "bad_envelope", "detail": str(e)[:200]},
+        )
+
+    # Belt-and-braces redaction. The redactor is idempotent; projctl
+    # may have run it locally but the LLM path MUST call it per
+    # Principle IV no matter who the upstream caller is.
+    from openclow.services.audit_service import redact as _redact
+
+    env_safe = env.model_copy(update={
+        "stdout_tail": _redact(env.stdout_tail or ""),
+        "stderr_tail": _redact(env.stderr_tail or ""),
+        "guide_section": _redact(env.guide_section or ""),
+    })
+
+    # Truncation guards: schema caps stdout/stderr at 32 KiB each. If
+    # projctl sent more, keep the tail (most recent lines are most
+    # informative). Keeps the LLM prompt predictable.
+    def _cap_tail(s: str, cap: int = 32_768) -> str:
+        if len(s) <= cap:
+            return s
+        marker = f"\n... {len(s) - cap} chars truncated ...\n"
+        return marker + s[-cap:]
+
+    # Cap previous_attempts at 3 per the schema — silently clamp.
+    attempts = max(0, min(int(env_safe.previous_attempts), 3))
+
+    log.info(
+        "explain.received",
+        slug=slug,
+        step=env_safe.step.name,
+        attempt=attempts,
+        exit_code=env_safe.exit_code,
+    )
+
+    # v1 policy: if projctl has already burned 3 attempts, refuse to
+    # call the LLM again and return `give_up` so the caller surfaces
+    # the failure to the user. Saves tokens and matches arch §9.
+    if attempts >= 3:
+        return JSONResponse({
+            "action": "give_up",
+            "payload": "",
+            "reason": "Reached the 3-attempt cap for this step.",
+        })
+
+    # Build the LLM prompt. Kept as a small inline template so the
+    # system prompt is auditable in one place.
+    prompt = (
+        "You are fixing a failing deterministic setup step inside a "
+        "project container. You MUST respond with exactly one JSON "
+        "object of shape:\n"
+        '  {"action": "shell_cmd"|"patch"|"skip"|"give_up", '
+        '"payload": "...", "reason": "..."}\n'
+        "Rules:\n"
+        "- `shell_cmd`: a single shell command to run before retrying "
+        "  the step's original cmd. Keep it short; one command only.\n"
+        "- `patch`: a unified diff. Applied with `git apply --check` "
+        "  first; rejected if it doesn't clean-apply.\n"
+        "- `skip`: only permitted if the step is marked skippable.\n"
+        "- `give_up`: no safe action — the user must intervene.\n"
+        f"Context:\n"
+        f"  instance:  {env_safe.instance_slug}\n"
+        f"  project:   {env_safe.project_name}\n"
+        f"  step:      {env_safe.step.name} ({env_safe.step.cmd})\n"
+        f"  cwd:       {env_safe.step.cwd}\n"
+        f"  skippable: {env_safe.step.skippable}\n"
+        f"  exit_code: {env_safe.exit_code}\n"
+        f"  attempt:   {attempts + 1} of 3\n"
+        "Guide section:\n"
+        f"```\n{env_safe.guide_section[:4000]}\n```\n"
+        "Last stdout (tail):\n"
+        f"```\n{_cap_tail(env_safe.stdout_tail, 4000)}\n```\n"
+        "Last stderr (tail):\n"
+        f"```\n{_cap_tail(env_safe.stderr_tail, 4000)}\n```\n"
+        "Respond with the JSON object only."
+    )
+
+    try:
+        from claude_agent_sdk import query, ClaudeAgentOptions
+        from claude_agent_sdk.types import AssistantMessage, TextBlock as _TextBlock
+        options = ClaudeAgentOptions(
+            system_prompt=(
+                "Structured self-healing. One JSON object, no prose. "
+                "Never emit secrets even if they appear in the log tail — "
+                "the upstream redactor may miss context-specific tokens."
+            ),
+            model="claude-sonnet-4-6",
+            allowed_tools=[],
+            mcp_servers={},
+            permission_mode="bypassPermissions",
+            max_turns=1,
+        )
+        full = ""
+        async for msg in query(prompt=prompt, options=options):
+            if isinstance(msg, AssistantMessage):
+                for block in msg.content:
+                    if isinstance(block, _TextBlock):
+                        full += block.text
+        full = full.strip()
+    except Exception as e:
+        log.warning("explain.llm_failed", slug=slug, error=str(e)[:200])
+        return JSONResponse({
+            "action": "give_up",
+            "payload": "",
+            "reason": f"LLM unavailable: {str(e)[:120]}",
+        })
+
+    # Parse the LLM response. Defensive: an LLM that emits fence-wrapped
+    # JSON is common; strip that before json.loads.
+    import json as _json
+    cleaned = full
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        # Drop the opening fence and (optionally) the closing fence.
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+
+    try:
+        parsed = _json.loads(cleaned or "{}")
+        action = parsed.get("action", "give_up")
+        if action not in ("shell_cmd", "patch", "skip", "give_up"):
+            action = "give_up"
+        payload = str(parsed.get("payload") or "")
+        reason = str(parsed.get("reason") or "")
+        if action == "skip" and not env_safe.step.skippable:
+            # Hard-enforced policy: LLM cannot return skip on a
+            # non-skippable step even if it tries.
+            action = "give_up"
+            reason = (
+                "LLM asked to skip a non-skippable step — refused."
+            )
+            payload = ""
+    except Exception:
+        action, payload, reason = "give_up", "", "LLM returned unparseable JSON."
+
+    return JSONResponse({
+        "action": action,
+        "payload": payload,
+        "reason": reason,
+    })

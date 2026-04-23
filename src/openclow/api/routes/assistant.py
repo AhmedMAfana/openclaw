@@ -44,6 +44,71 @@ from openclow.services.instance_service import (
     ProjectNotContainerMode,
 )
 from openclow.services.instance_lock import instance_lock
+
+
+# T080 — plain-language chat copy keyed by FailureCode. Kept as a
+# module-level dict so operators can audit the message set and
+# translators can extend it later.
+_FAILURE_CHAT_COPY: dict[str, str] = {
+    "image_build": (
+        "Couldn't build the environment image. The project's container "
+        "image failed to build — this is usually a Dockerfile or "
+        "dependency issue. Tap Retry to try again; if it keeps "
+        "failing, check the project template."
+    ),
+    "compose_up": (
+        "Couldn't start your environment — one of the containers "
+        "refused to come up. Tap Retry to try again."
+    ),
+    "projctl_up": (
+        "Your environment started but its setup steps didn't finish. "
+        "Common causes: ``composer install`` / ``npm ci`` / database "
+        "migration hit an error. Tap Retry to resume from the last "
+        "successful step."
+    ),
+    "tunnel_provision": (
+        "Couldn't set up the public preview URL. This is usually an "
+        "upstream Cloudflare issue that clears on its own. Tap Retry "
+        "in a minute."
+    ),
+    "dns": (
+        "Couldn't register the preview hostname. This is usually a "
+        "DNS propagation hiccup. Tap Retry in a minute."
+    ),
+    "health_check": (
+        "Your environment started but didn't respond in time. Tap "
+        "Retry to try again."
+    ),
+    "oom": (
+        "Your environment ran out of memory during setup. If this is "
+        "a heavy project, an operator can upgrade the resource profile."
+    ),
+    "storage_full": (
+        "The platform is temporarily out of disk space. An operator "
+        "has been alerted; try again in a few minutes."
+    ),
+    "orchestrator_crash": (
+        "Something interrupted provisioning. Tap Retry — the state is "
+        "saved so it will resume from where it left off."
+    ),
+    "unknown": (
+        "Something went wrong while starting your environment. Tap "
+        "Retry to try again; if it keeps failing, an operator can "
+        "look at the diagnostic bundle."
+    ),
+}
+
+
+def _failure_chat_copy(failure_code: str, failure_message: str | None) -> str:
+    """T080 — pick plain-language copy keyed by FailureCode.
+
+    Returns one paragraph suitable for direct display. The raw
+    ``failure_message`` is NOT included — it may contain redactor-
+    missable tokens, and the chat copy speaks to end users, not
+    operators. Operators see the raw message through the diagnostic
+    bundle (T082 follow-up).
+    """
+    return _FAILURE_CHAT_COPY.get(failure_code, _FAILURE_CHAT_COPY["unknown"])
 from openclow.utils.logging import get_logger
 
 log = get_logger()
@@ -495,6 +560,70 @@ async def assistant_endpoint(
                     "This will destroy your current environment. Continue?"
                 )
                 return
+            if _cmd.startswith("retry_provision:"):
+                # T080: user tapped Retry on a failed-provision card.
+                # We re-use the standard get_or_resume path by
+                # teardown-then-provision: the failed row is left as a
+                # terminal record for diagnostics, and a fresh provision
+                # enters with `session_branch` inherited from the failed
+                # row (T069 ensures this). projctl's state.json on the
+                # named volume survives `compose down`-WITHOUT-`-v`, so
+                # retries pick up from the last-successful step per
+                # FR-025.
+                _, _, failed_id_str = _cmd.partition(":")
+                from uuid import UUID as _UUID
+                try:
+                    failed_uuid = _UUID(failed_id_str)
+                except Exception:
+                    controller.append_text("Invalid retry target.\n")
+                    return
+                try:
+                    # Trigger teardown of the failed row so `get_or_resume`
+                    # on the next message sees no active row → provisions
+                    # fresh. Teardown is idempotent and safe on a failed
+                    # row.
+                    await InstanceService().terminate(
+                        failed_uuid, reason="failed"
+                    )
+                except Exception as _e:
+                    log.warning(
+                        "assistant.retry_terminate_failed",
+                        failed_id=failed_id_str, error=str(_e),
+                    )
+                msg = "Retrying — starting a fresh environment now."
+                controller.append_text(msg + "\n")
+                controller.add_data({
+                    "type": "instance_retry_started",
+                    "failed_instance_id": failed_id_str,
+                })
+                # Immediately attempt get_or_resume; if the teardown is
+                # still in-flight, the cap-check will reject and the user
+                # sees the "busy" pill — a rare race that resolves on
+                # next message.
+                try:
+                    _ = await InstanceService().get_or_resume(
+                        chat_session_id=session_id
+                    )
+                    msg_follow = "Starting up your environment — about 90 seconds."
+                    controller.append_text(msg_follow + "\n")
+                    controller.add_data({
+                        "type": "instance_provisioning",
+                        "slug": getattr(_, "slug", ""),
+                        "estimated_seconds": 90,
+                    })
+                except Exception as _e:
+                    log.warning(
+                        "assistant.retry_get_or_resume_failed",
+                        error=str(_e),
+                    )
+                await asyncio.shield(_update_message(
+                    await _save_message(
+                        session_id, user.id, "assistant",
+                        msg, is_complete=True,
+                    ),
+                    msg,
+                ))
+                return
             if _cmd.startswith("end_session_confirm:"):
                 # Terminate whichever active instance the chat currently
                 # owns. The chat_session_id in the action_id is only
@@ -650,6 +779,61 @@ async def assistant_endpoint(
                     if _proj is not None and _proj.mode == "container":
                         container_mode = True
             if container_mode:
+                # T080: if the chat's most-recent instance row is in
+                # ``failed`` state, surface a structured failure card
+                # BEFORE attempting a fresh provision. The card drives
+                # a Retry (re-enqueues provision_instance, which resumes
+                # from the last-successful projctl step per FR-025) and
+                # a Main Menu button (no dead-end; CLAUDE.md).
+                from openclow.models.instance import (
+                    Instance as _Instance, InstanceStatus as _IS, FailureCode as _FC,
+                )
+                async with async_session() as _db:
+                    _last_failed = (await _db.execute(
+                        sqlalchemy.select(_Instance)
+                        .where(
+                            _Instance.chat_session_id == session_id,
+                            _Instance.status == _IS.FAILED.value,
+                        )
+                        .order_by(_Instance.created_at.desc())
+                        .limit(1)
+                    )).scalar_one_or_none()
+                    _active = (await _db.execute(
+                        sqlalchemy.select(_Instance).where(
+                            _Instance.chat_session_id == session_id,
+                            _Instance.status.in_((
+                                _IS.PROVISIONING.value,
+                                _IS.RUNNING.value,
+                                _IS.IDLE.value,
+                                _IS.TERMINATING.value,
+                            )),
+                        )
+                    )).scalar_one_or_none()
+                if _last_failed is not None and _active is None:
+                    _msg = _failure_chat_copy(
+                        _last_failed.failure_code or _FC.UNKNOWN.value,
+                        _last_failed.failure_message,
+                    )
+                    controller.append_text(_msg + "\n")
+                    controller.add_data({
+                        "type": "instance_failed",
+                        "slug": _last_failed.slug,
+                        "failure_code": _last_failed.failure_code or _FC.UNKNOWN.value,
+                        "actions": [
+                            {"label": "🔄 Retry",
+                             "action_id": f"retry_provision:{_last_failed.id}",
+                             "style": "primary"},
+                            {"label": "Main Menu", "action_id": "menu:main"},
+                        ],
+                    })
+                    await asyncio.shield(_update_message(
+                        await _save_message(
+                            session_id, user.id, "assistant",
+                            _msg, is_complete=True,
+                        ),
+                        _msg,
+                    ))
+                    return
                 try:
                     container_instance = await InstanceService().get_or_resume(
                         chat_session_id=session_id
