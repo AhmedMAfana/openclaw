@@ -40,3 +40,4 @@ alembic/versions/__pycache__/
 # Vendored / reference repos — not part of this project
 assistant-ui/
 claude-code-leak/
+artifacts/

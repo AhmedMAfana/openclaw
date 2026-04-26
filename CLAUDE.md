@@ -181,6 +181,46 @@ scanner. It catches "A calls B but B doesn't know about it" — not
 the test suites under `tests/` (unit, contract, integration, load)
 are still the gate.
 
+## Live end-to-end pipeline test
+
+Where `/pipeline-audit` is the static gate, **`/e2e-pipeline`** is the
+live gate. It drives a real chat through the full per-chat-instances
+pipeline via Playwright MCP and proves the system actually works —
+not just that the UI state machine renders the right banners.
+
+```bash
+# What it does, phase by phase:
+#   0. preflight        — runs /pipeline-audit + scripts/e2e/preflight.py
+#   1. pick-project     — picks a container-mode project from the DB
+#   2. new-chat         — opens chat frontend, creates a chat
+#   3. provision        — sends first message, watches provision land
+#   4. app-live         — opens the tunnel URL, verifies real HTML loads
+#   5. workspace-edit   — writes a marker file via workspace MCP
+#   6. hmr              — verifies Vite HMR pushed the change to the live app
+#   7. git-push         — commits + pushes via git MCP
+#   8. multi-chat       — opens a second chat, verifies isolation
+#   9. terminate        — /terminate, verifies DB + tunnel + container all gone
+#   10. report          — writes REPORT.md with screenshots + log excerpts
+```
+
+Forensic capture: every phase boundary writes `services.txt`, `ps.txt`,
+`api.log`, `worker.log`, `instance.log`, `instance.json`, `redis-keys.txt`
+under `artifacts/e2e-<timestamp>/<phase>/` (gitignored). When a phase
+fails, the skill classifies the failure, applies a hot-fix to keep
+going, then a root-fix in code/template/Dockerfile, then re-runs the
+phase. Both fixes are documented in the final report.
+
+Helper scripts:
+- `scripts/e2e/preflight.py` — JSON readiness probe (services up,
+  cloudflare/github_app credentials in `platform_config`, container-mode
+  project exists, playwright-mcp reachable, compose template present,
+  fitness audit clean).
+- `scripts/e2e/capture.sh` — phase artifact dump.
+
+When to invoke: before cutting a release tag, after any change to
+`instance_service.py`, `worker/tasks/instance_tasks.py`, the compose
+templates, the MCP fleet, or the chat frontend's instance handlers.
+
 ## Playwright MCP — Claude Code setup
 
 Playwright MCP runs **inside the worker container** (the host Mac has no
