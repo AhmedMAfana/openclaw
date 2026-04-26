@@ -221,6 +221,23 @@ When to invoke: before cutting a release tag, after any change to
 `instance_service.py`, `worker/tasks/instance_tasks.py`, the compose
 templates, the MCP fleet, or the chat frontend's instance handlers.
 
+### First-run setup
+
+The pipeline needs three credentials before it can provision anything:
+Cloudflare API token + zone, GitHub App + private key, and a real
+GitHub repo wired to a project row. Walkthrough:
+[docs/setup/CREDENTIALS.md](docs/setup/CREDENTIALS.md). Or run the
+guided seeder which validates against the live APIs before writing:
+
+```bash
+python3 scripts/seed_platform_creds.py
+# Or just one at a time:
+python3 scripts/seed_platform_creds.py --only cloudflare
+python3 scripts/seed_platform_creds.py --only github_app
+# Plus update a project's repo in one shot:
+python3 scripts/seed_platform_creds.py --update-project test-project=you/laravel-test-app
+```
+
 ## Playwright MCP — Claude Code setup
 
 Playwright MCP runs **inside the worker container** (the host Mac has no
