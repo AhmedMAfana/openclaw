@@ -438,6 +438,29 @@ async def recover_stuck_tasks(max_stuck_minutes: int = 30):
 # 5. Audit log trimming
 # ─────────────────────────────────────────────────
 
+async def gc_session_branch(ctx: dict, project_id: int, session_branch: str) -> dict:
+    """T086 follow-up: prune a chat's session branch from the per-project cache.
+
+    Enqueued by ``chat_session_service.delete_chat_cascade`` when a chat
+    is deleted. Today this is a stub that records the request — a full
+    implementation needs to reach into ``/workspaces/_cache/<project>/``
+    and ``git branch -D <session_branch>``, which requires a per-project
+    lock to avoid racing the workspace_service. Filed as a follow-up
+    behind T086.
+
+    Registered in arq_app._load_functions so the cascade does NOT
+    KeyError at dequeue time. The pipeline-audit script
+    (scripts/audit_arq_jobs.py) catches this exact bug class.
+    """
+    log.info(
+        "maintenance.gc_session_branch.requested",
+        project_id=project_id,
+        branch=session_branch,
+        note="stub — real branch GC pending; see T086 follow-up",
+    )
+    return {"ok": True, "project_id": project_id, "branch": session_branch, "stubbed": True}
+
+
 async def trim_audit_logs(keep_days: int = 7):
     """Delete audit log entries older than keep_days."""
     from datetime import datetime, timedelta

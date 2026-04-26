@@ -43,6 +43,7 @@ def _load_functions():
         rotate_github_token,
         tunnel_health_check_cron,
     )
+    from openclow.worker.tasks.maintenance import gc_session_branch
     return [
         execute_task, execute_plan, approve_task, merge_task, reject_task, discard_task,
         onboard_project, confirm_project,
@@ -66,6 +67,7 @@ def _load_functions():
         teardown_instance,
         rotate_github_token,
         tunnel_health_check_cron,
+        gc_session_branch,
     ]
 
 

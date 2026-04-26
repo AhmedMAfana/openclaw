@@ -34,3 +34,13 @@ repos:
         language: system
         pass_filenames: false
         files: ^(src/openclow/api/routes/assistant\.py|chat_frontend/src/App\.tsx)$
+
+      - id: audit-arq-jobs
+        name: audit ARQ enqueue_job names ↔ worker registrations
+        entry: python scripts/audit_arq_jobs.py
+        language: system
+        pass_filenames: false
+        # Run on any change under src/ — enqueue_job calls and the
+        # worker function list both live here, and either side moving
+        # could drift the contract.
+        files: ^src/openclow/.*\.py$
