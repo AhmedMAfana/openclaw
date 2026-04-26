@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tagh.co.uk/schemas/instance-manifest/v1.json",
+  "title": "TAGH Instance Manifest (v1)",
+  "description": "Project-owned declarative manifest at .tagh/instance.yml. Declares which service in the project's compose stack receives platform-managed ingress, which ports map to web/HMR/IDE roles, which commands to run after boot, and which env vars the platform should inject.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "spec"],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "tagh/v1",
+      "description": "Schema version. v1 is the only shape understood by the v1 platform release."
+    },
+    "kind": {
+      "type": "string",
+      "const": "Instance",
+      "description": "Document kind. Reserved for future kinds (e.g. Project)."
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compose", "primary_service", "ingress"],
+      "properties": {
+        "compose": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path inside the project repo to the substrate compose file. Resolved relative to the repo root.",
+          "examples": ["docker-compose.yml", "compose/dev.yml"]
+        },
+        "primary_service": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9._-]+$",
+          "description": "Service name in the substrate compose that receives ingress + boot commands. Must match a services.<name> key in the substrate."
+        },
+        "ingress": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["web"],
+          "properties": {
+            "web": { "$ref": "#/$defs/IngressTarget" },
+            "hmr": { "$ref": "#/$defs/IngressTarget" },
+            "ide": { "$ref": "#/$defs/IngressTarget" }
+          }
+        },
+        "boot": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Shell command run inside primary_service after compose-up succeeds and the service is healthy."
+          },
+          "examples": [
+            ["composer install --no-interaction --prefer-dist", "php artisan key:generate --force", "php artisan migrate --force", "npm install", "npm run dev -- --host 0.0.0.0"]
+          ]
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": { "required": [], "inherit": [] },
+          "properties": {
+            "required": {
+              "type": "array",
+              "default": [],
+              "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" },
+              "description": "Env-var names that must resolve in the container at compose-up time. Platform refuses to provision if any required name is missing from both the substrate's `environment:` and the manifest's `env.inherit`."
+            },
+            "inherit": {
+              "type": "array",
+              "default": [],
+              "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" },
+              "description": "Env-var names the platform exports into the parent process so the substrate's list-form `environment: - NAME` resolves them at compose-up."
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "IngressTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "port"],
+      "properties": {
+        "service": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9._-]+$",
+          "description": "Service name in the substrate compose. Conventionally matches primary_service for the web role."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Container port that handles this ingress role."
+        }
+      }
+    }
+  }
+}
