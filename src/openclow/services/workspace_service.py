@@ -152,7 +152,8 @@ class WorkspaceService:
 
             os.makedirs(self.cache_path, exist_ok=True)
 
-            if os.path.exists(cache):
+            cache_is_git_repo = os.path.isdir(os.path.join(cache, ".git"))
+            if cache_is_git_repo:
                 log.info("workspace.cache_hit", project=project.name)
 
                 # Update cache
@@ -184,6 +185,12 @@ class WorkspaceService:
                 from_cache = True
             else:
                 log.info("workspace.first_clone", project=project.name, repo=project.github_repo)
+
+                # An empty/half-cloned dir would defeat clone_repo (it
+                # refuses non-empty targets). Wipe it so the clone is
+                # idempotent on retry after a previous failed provision.
+                if os.path.exists(cache):
+                    shutil.rmtree(cache, ignore_errors=True)
 
                 # First time: full clone (uses configured git provider)
                 from openclow.providers import factory
@@ -261,8 +268,14 @@ class WorkspaceService:
         try:
             os.makedirs(self.cache_path, exist_ok=True)
 
-            # 1. Ensure cache exists.
-            if not os.path.exists(cache):
+            # 1. Ensure cache is a real git repo. An empty placeholder
+            # directory (left behind by a previously-failed provision)
+            # would otherwise defeat `os.path.exists` and skip the clone,
+            # making the subsequent `git fetch` blow up with
+            # "fatal: not a git repository".
+            if not os.path.isdir(os.path.join(cache, ".git")):
+                if os.path.exists(cache):
+                    shutil.rmtree(cache, ignore_errors=True)
                 log.info(
                     "workspace.instance_first_clone",
                     project=project.name,

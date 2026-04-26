@@ -22,9 +22,11 @@ Idempotency contract (research.md §4):
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import pathlib
+import secrets
 import shutil
 from datetime import datetime, timezone
 from typing import Any
@@ -143,33 +145,11 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
             credentials_secret=tunnel_result.credentials_secret,
         )
 
-        # 2. Render compose + cloudflared config into the instance's
-        # workspace. Copy any static support files the template ships.
-        template_dir = _template_dir_for_instance(inst_uuid)
-        output_dir = pathlib.Path(workspace_path)
-        render_ctx = InstanceRenderContext(
-            slug=slug,
-            workspace_path=workspace_path,
-            compose_project=compose_project,
-            web_hostname=tunnel_result.web_hostname,
-            hmr_hostname=tunnel_result.hmr_hostname,
-            ide_hostname=tunnel_result.ide_hostname,
-            cf_tunnel_id=tunnel_result.cf_tunnel_id,
-            cf_credentials_secret=tunnel_result.credentials_secret,
-            db_password=db_password,
-            heartbeat_secret=heartbeat_secret,
-        )
-        compose_path, cloudflared_path = render_compose(
-            render_ctx, template_dir, output_dir
-        )
-        _copy_template_support_files(template_dir, output_dir)
-
-        # T069: reattach the chat's session branch BEFORE compose up.
-        # The compose.yml bind-mounts the instance workspace into
-        # ``/app``, so the project files must already be on disk when
-        # the containers start — otherwise php-fpm/node boot against
-        # an empty dir. Idempotent: re-runs on an already-attached
-        # worktree are a no-op.
+        # T069: reattach the chat's session branch BEFORE rendering
+        # compose templates. ``git worktree add`` refuses a non-empty
+        # target directory, so the worktree must be attached first and
+        # the compose files dropped on top of the cloned project tree.
+        # Idempotent: re-runs on an already-attached worktree are a no-op.
         async with async_session() as session:
             inst_row = await session.get(Instance, inst_uuid)
             project_row = inst_row.project if inst_row is not None else None
@@ -192,6 +172,45 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
                     f"session-branch reattach failed: {str(e)[:300]}",
                 )
 
+        # 2. Render compose + cloudflared config into the instance's
+        # workspace, on top of the now-cloned project tree. The
+        # compose.yml bind-mounts the workspace into ``/app``, so the
+        # project files must be on disk when the containers start —
+        # otherwise php-fpm/node boot against an empty dir.
+        # The orchestrator runs inside a container that bind-mounts a
+        # host directory onto its internal /workspaces, so the rendered
+        # compose file must use the HOST path for bind-mount sources
+        # (the docker daemon resolves them against the host filesystem).
+        from openclow.services.docker_guard import _detect_host_workspace_path
+        host_workspace_dir = await _detect_host_workspace_path()
+        if host_workspace_dir is None:
+            log.warning(
+                "provision_instance.no_host_workspace_path",
+                slug=slug,
+                workspace_path=workspace_path,
+                hint="set WORKSPACE_HOST_PATH env on the worker, or "
+                     "ensure a host bind-mount targets /workspaces",
+            )
+        template_dir = _template_dir_for_instance(inst_uuid)
+        output_dir = pathlib.Path(workspace_path)
+        render_ctx = InstanceRenderContext(
+            slug=slug,
+            workspace_path=workspace_path,
+            workspace_host_dir=host_workspace_dir,
+            compose_project=compose_project,
+            web_hostname=tunnel_result.web_hostname,
+            hmr_hostname=tunnel_result.hmr_hostname,
+            ide_hostname=tunnel_result.ide_hostname,
+            cf_tunnel_id=tunnel_result.cf_tunnel_id,
+            cf_credentials_secret=tunnel_result.credentials_secret,
+            db_password=db_password,
+            heartbeat_secret=heartbeat_secret,
+        )
+        compose_path, cloudflared_path = render_compose(
+            render_ctx, template_dir, output_dir
+        )
+        _copy_template_support_files(template_dir, output_dir)
+
         # 3. Mint a GitHub installation token scoped to the one repo.
         # Kept in-process memory only — never written to the rendered
         # compose file (Principle IV).
@@ -210,6 +229,29 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
                 # Continue: projctl may not need git push during up;
                 # rotation (T063) will retry every 45 min.
 
+        # COMPOSER_AUTH lets the per-instance composer install authenticate
+        # against private VCS deps (gitlab.com, private github org packages)
+        # without writing auth.json to disk. The orchestrator's worker has
+        # /app/auth.json bind-mounted from the host; we read its content
+        # and forward as an env var per composer's documented protocol.
+        composer_auth = ""
+        try:
+            auth_json_path = pathlib.Path("/app/auth.json")
+            if auth_json_path.is_file():
+                composer_auth = auth_json_path.read_text().strip()
+        except Exception as e:
+            log.debug("provision_instance.composer_auth_read_failed", error=str(e))
+
+        # Per-instance Laravel APP_KEY. Laravel uses this for session +
+        # cookie encryption. Generated freshly per provision so each
+        # instance has its own session keyspace (terminating one chat
+        # invalidates only that chat's sessions). Format matches what
+        # `php artisan key:generate` would produce: `base64:<32 bytes>`.
+        # Injected via compose env so Laravel's env('APP_KEY') resolves
+        # without a .env file written to disk (Principle IV — no
+        # secrets on disk).
+        app_key = "base64:" + base64.b64encode(secrets.token_bytes(32)).decode()
+
         # 4. docker compose up -p <compose_project> -f _compose.yml -d.
         # Secrets injected via env; never touch disk.
         await _compose_up(
@@ -223,6 +265,9 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
                 "HEARTBEAT_SECRET": heartbeat_secret,
                 "HEARTBEAT_URL": _heartbeat_url_for(slug),
                 "CF_TUNNEL_TOKEN": tunnel_result.credentials_blob,
+                "TUNNEL_TOKEN": tunnel_result.credentials_blob,
+                "COMPOSER_AUTH": composer_auth,
+                "APP_KEY": app_key,
             },
         )
 
@@ -414,7 +459,7 @@ async def _compose_up(
         raise _ProvisionFailure(
             FailureCode.COMPOSE_UP,
             f"docker compose up exited {proc.returncode}: "
-            f"{(stderr or b'').decode(errors='replace')[:500]}",
+            f"{(stderr or b'').decode(errors='replace')[-4000:]}",
         )
 
 
@@ -459,11 +504,18 @@ async def _projctl_up(*, compose_project: str, slug: str) -> None:
     the provision on ``fatal`` or on any stream that ends without a
     ``step_success`` for the last step (projctl exits non-zero on fatal).
     """
+    # The laravel-vue template bind-mounts the workspace at /var/www/html
+    # (matching the serversideup base image's docroot expectation), not
+    # at /app. projctl's defaults are /app — pass the workspace path
+    # explicitly so guide.md is found and step `cwd` resolves correctly.
+    # When other compose templates land, plumb this from
+    # InstanceRenderContext.app_workspace_path instead of hardcoding.
     proc = await asyncio.create_subprocess_exec(
         "docker", "compose",
         "-p", compose_project,
         "exec", "-T", "app",
         "projctl", "up",
+        "--guide", "/var/www/html/guide.md",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=get_docker_env(),
@@ -661,9 +713,14 @@ def _copy_template_support_files(
     additional static files referenced by the compose file (here:
     ``./_nginx.conf`` mount) must exist in the output dir alongside.
     """
+    # NOTE: do NOT copy vite.config.js into the worktree. Vite picks
+    # `.js` over the project's own `.ts` config, which silently
+    # disables every project-side server option (CORS, HMR, allowed
+    # hosts). Projects own their Vite config; the platform documents
+    # the required HMR/CORS snippet (see docs/setup/PROJECT_VITE.md
+    # — TODO) and the project commits it to its repo.
     for src_name, dst_name in (
         ("nginx.conf", "_nginx.conf"),
-        ("vite.config.js", "vite.config.js"),
         ("guide.md", "guide.md"),
         ("project.yaml", "project.yaml"),
     ):

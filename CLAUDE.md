@@ -331,4 +331,6 @@ contract docs in [contracts/](specs/001-per-chat-instances/contracts/).
 <!-- SPECKIT START -->
 Active feature plan: [specs/001-per-chat-instances/plan.md](specs/001-per-chat-instances/plan.md)
 Spec: [specs/001-per-chat-instances/spec.md](specs/001-per-chat-instances/spec.md) · Research: [research.md](specs/001-per-chat-instances/research.md) · Data model: [data-model.md](specs/001-per-chat-instances/data-model.md) · Contracts: [contracts/](specs/001-per-chat-instances/contracts/)
+
+Open phases: **Phase 10** (Chat UI container-mode compat — T097–T106) and **Phase 11** (Admin dashboard for instances — T107–T116) per [tasks.md](specs/001-per-chat-instances/tasks.md). The architectural-redesign spec [002-instance-manifest-overlay](specs/002-instance-manifest-overlay/) is **deferred**; revisit only after Phase 10 + 11 land.
 <!-- SPECKIT END -->

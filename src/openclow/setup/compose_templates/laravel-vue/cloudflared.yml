@@ -15,5 +15,11 @@ ingress:
     originRequest:
       noTLSVerify: true
   - hostname: ${INSTANCE_HOST}
-    service: http://web:80
+    # APP_HTTP_PORT is baked in at render time from
+    # InstanceRenderContext.app_http_port. Per-template default; for
+    # this laravel-vue template it's 8080 (serversideup nginx-fpm
+    # variant's NGINX_HTTP_PORT). No host port is published; only the
+    # cloudflared sidecar reaches this port, via the instance's
+    # internal compose network (Principle V — egress-only).
+    service: http://app:${APP_HTTP_PORT}
   - service: http_status:404

@@ -57,6 +57,26 @@ class InstanceRenderContext:
     cf_credentials_secret: str
     db_password: str
     heartbeat_secret: str
+    # Host-side path that resolves to the same bytes as the worker's
+    # in-container `workspace_path`. Set when the orchestrator runs
+    # inside a container that bind-mounts a host directory onto its
+    # internal `/workspaces` (the standard dev + prod layout). The
+    # rendered compose file's volume sources must use the HOST path
+    # because docker daemon (running on the host) interprets bind
+    # mounts against the host filesystem, not the worker's namespace.
+    # Falls back to `workspace_path` when worker and host filesystems
+    # are 1:1 (e.g., orchestrator running directly on the host).
+    workspace_host_dir: str | None = None
+    # HTTP port the primary application service listens on inside the
+    # per-instance compose network. The cloudflared sidecar uses this
+    # to route web ingress to the right service:port. Image-dependent —
+    # serversideup combined images default to 8080, alpine nginx to 80,
+    # node/Vite to 5173. Each template's compose+cloudflared pair must
+    # agree on this value; the renderer is the single point of truth.
+    # No host port is exposed (Principle V) — only the cloudflared
+    # sidecar reaches this port, via service-name DNS on the instance
+    # network.
+    app_http_port: int = 8080
     # The GitHub installation token is injected at compose-up time, not
     # baked into the rendered file (Principle IV). We only reserve the
     # env-var name here.
@@ -98,6 +118,20 @@ def render(
     # per-instance secret that the compose file will reference via ${VAR}.
     # The actual secret values are passed to `docker compose up` via env,
     # NOT written to the rendered file.
+    # workspace_host_dir is the host-side directory whose subdirs map
+    # 1:1 to the worker's /workspaces. Without translation, the rendered
+    # compose file would tell the host docker daemon to bind-mount
+    # /workspaces/inst-X — which doesn't exist on the host filesystem,
+    # producing "mounts denied: path not shared". Falling back to
+    # workspace_path (which equals "/workspaces/<slug>/") preserves the
+    # historic behavior for environments where worker == host.
+    if ctx.workspace_host_dir:
+        host_workspace_dir = ctx.workspace_host_dir.rstrip("/")
+    else:
+        # Trim "/workspaces/<slug>/" → "/workspaces" so subdirs can be
+        # appended in the template without slug duplication.
+        host_workspace_dir = ctx.workspace_path.rstrip("/").rsplit("/", 1)[0] or "/workspaces"
+
     env: Mapping[str, str] = {
         "INSTANCE_SLUG": ctx.slug,
         "INSTANCE_HOST": ctx.web_hostname,
@@ -106,6 +140,8 @@ def render(
         "COMPOSE_PROJECT": ctx.compose_project,
         "CF_TUNNEL_ID": ctx.cf_tunnel_id,
         "CF_CREDENTIALS_SECRET": ctx.cf_credentials_secret,
+        "WORKSPACE_HOST_DIR": host_workspace_dir,
+        "APP_HTTP_PORT": str(ctx.app_http_port),
     }
 
     compose_out = output_dir / "_compose.yml"

@@ -9,7 +9,6 @@
 package guide
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -88,45 +87,52 @@ func ParseFile(path string) (*Guide, error) {
 //   - max_attempts capped at 5
 //   - forbidden patterns in cmd (docker, sudo, etc.) per GUIDE_SPEC.md §7
 func Parse(r io.Reader) (*Guide, error) {
-	// We read the whole thing so we can hash it and also walk it twice.
 	buf, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("read: %w", err)
 	}
 	hash := sha256.Sum256(buf)
 
-	scanner := bufio.NewScanner(strings.NewReader(string(buf)))
-	// Large enough for typical guide.md files without buffer-grow churn.
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// Pre-tokenise into a slice so the per-step body parser can stop
+	// at a `## ` boundary without losing the boundary line. The earlier
+	// bufio-based design dropped every other step (the `##` consumed by
+	// parseStepBody never re-surfaced in the outer loop). Indexing a
+	// slice is the simplest fix; `lines[i]` can be re-read freely.
+	lines := strings.Split(string(buf), "\n")
+	// Trim a trailing empty line introduced by a final newline.
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
 
 	var steps []Step
 	seen := make(map[string]bool)
-	line := 0
 
-	for scanner.Scan() {
-		line++
-		text := scanner.Text()
+	i := 0
+	for i < len(lines) {
+		text := lines[i]
 		m := headingRE.FindStringSubmatch(text)
 		if m == nil {
+			i++
 			continue
 		}
 		name := m[1]
+		lineNo := i + 1
 		if seen[name] {
-			return nil, fmt.Errorf("line %d: duplicate step name %q", line, name)
+			return nil, fmt.Errorf("line %d: duplicate step name %q", lineNo, name)
 		}
 		seen[name] = true
 
-		// Expect a projctl fence within the next few lines.
-		step, consumed, err := parseStepBody(scanner, &line, name)
+		// parseStepBodySlice consumes from i+1 up to but not including the
+		// next `## ` heading (or end of file). It returns the index of the
+		// next line to inspect, so the outer loop sees the next heading.
+		step, next, err := parseStepBodySlice(lines, i+1, name)
 		if err != nil {
 			return nil, err
 		}
 		steps = append(steps, step)
-		_ = consumed
+		i = next
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan: %w", err)
-	}
+
 	if len(steps) == 0 {
 		return nil, fmt.Errorf("guide has no steps (no `## name` headings found)")
 	}
@@ -137,10 +143,11 @@ func Parse(r io.Reader) (*Guide, error) {
 	}, nil
 }
 
-// parseStepBody consumes lines until either another `## ` heading or EOF.
-// *linep is incremented for every line consumed. The caller is responsible
-// for keeping the Scanner advancing through successive headings.
-func parseStepBody(s *bufio.Scanner, linep *int, name string) (Step, int, error) {
+// parseStepBodySlice replaces the bufio-pushback dance in parseStepBody.
+// It walks `lines` starting at `start`, returning the populated Step and
+// the index of the line where parsing should resume — either the next
+// `## ` heading or len(lines).
+func parseStepBodySlice(lines []string, start int, name string) (Step, int, error) {
 	step := Step{
 		Name:           name,
 		Cwd:            defaultCwd,
@@ -152,82 +159,68 @@ func parseStepBody(s *bufio.Scanner, linep *int, name string) (Step, int, error)
 	inFence := false
 	fenceSeen := false
 	var descLines []string
-	consumed := 0
 
-	for s.Scan() {
-		*linep++
-		consumed++
-		text := s.Text()
+	i := start
+	for i < len(lines) {
+		text := lines[i]
+		lineNo := i + 1
+
+		// A new `## ` heading ends this step's body. Return the index
+		// pointing AT the heading so the outer loop sees it.
+		if !inFence && strings.HasPrefix(text, "## ") {
+			break
+		}
 
 		if !inFence && fenceOpen.MatchString(text) {
 			inFence = true
 			fenceSeen = true
+			i++
 			continue
 		}
 		if inFence {
 			if fenceAny.MatchString(text) {
 				inFence = false
+				i++
 				continue
 			}
-			// Empty lines and comments inside the fence: ignore.
 			trimmed := strings.TrimSpace(text)
 			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				i++
 				continue
 			}
 			m := kvRE.FindStringSubmatch(text)
 			if m == nil {
-				return step, consumed, fmt.Errorf(
+				return step, i, fmt.Errorf(
 					"line %d: step %q has a non-kv line inside projctl fence: %q",
-					*linep, name, text,
+					lineNo, name, text,
 				)
 			}
 			if err := applyKey(&step, m[1], m[2]); err != nil {
-				return step, consumed, fmt.Errorf("line %d: step %q: %w", *linep, name, err)
+				return step, i, fmt.Errorf("line %d: step %q: %w", lineNo, name, err)
 			}
+			i++
 			continue
 		}
-		// Outside a fence. A `## ` line means the next step starts — but we
-		// can't peek and push back, so we instead accept that the outer loop
-		// will see a fresh `## ` on its NEXT Scan(). Here we just stop
-		// collecting description once we see a `## ` heading.
-		if strings.HasPrefix(text, "## ") {
-			// The outer loop already consumed this line via Scan(). We need
-			// to undo that — but bufio.Scanner doesn't support push-back.
-			// Instead, the outer loop's `text := scanner.Text()` will see
-			// THIS text on its next iteration because we return here.
-			// Rewriting this with a tokenised pre-pass would avoid the
-			// double-step problem, but this simpler approach works because
-			// parseStepBody only gets called via the outer loop and the
-			// outer loop is pure-forward.
-			//
-			// HOWEVER: returning early here means the outer loop won't see
-			// this `## ` heading until the NEXT Scan(). To handle that, we
-			// flag the heading via the guide-level seen map by letting the
-			// outer loop do a re-check; but a cleaner implementation is to
-			// pre-tokenise. For now, the outer loop just ignores non-heading
-			// lines so this early return is safe: the `## ` line is lost and
-			// the NEXT `## ` is seen instead.
-			//
-			// TODO: convert to a two-pass tokeniser when T028 lands to
-			// remove this subtle behaviour.
-			break
-		}
+
 		descLines = append(descLines, text)
+		i++
 	}
 
 	if !fenceSeen {
-		return step, consumed, fmt.Errorf(
+		return step, i, fmt.Errorf(
 			"step %q is missing a ```projctl fenced block", name,
 		)
 	}
-
 	if err := validate(&step); err != nil {
-		return step, consumed, err
+		return step, i, err
 	}
-
 	step.Description = strings.TrimSpace(strings.Join(descLines, "\n"))
-	return step, consumed, nil
+	return step, i, nil
 }
+
+// (Old `parseStepBody` removed — it had a known bufio-pushback bug that
+// dropped every other step from a multi-step guide. Replaced by
+// parseStepBodySlice above.)
 
 func applyKey(s *Step, key, val string) error {
 	// Trim surrounding quotes if present so `cmd: "echo hi"` works.

@@ -3,12 +3,31 @@ from __future__ import annotations
 
 import asyncio
 import json as _json
+from datetime import datetime, timezone
 
 import redis.asyncio as aioredis
 import sqlalchemy as _sa
 from arq import create_pool
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, desc, delete
+
+
+def _utc_iso(dt: datetime | None) -> str | None:
+    """Serialize a naive UTC datetime as an ISO string with `Z` suffix.
+
+    The `web_chat_sessions` / `web_chat_messages` tables use Postgres
+    `timestamp without time zone` columns; SQLAlchemy returns naive
+    datetimes. `dt.isoformat()` on those produces e.g.
+    `2026-04-26T15:24:26.969811` with no offset — browsers parse that
+    string as LOCAL time (so a UTC+8 user sees timestamps 8 hours in
+    the past). Forcing the offset on the wire makes the parse correct
+    on every client.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 from openclow.api.web_auth import web_user_dep
 from openclow.models.user import User
@@ -56,7 +75,7 @@ async def list_threads(user: User = Depends(web_user_dep)):
                 "status": "regular",
                 "projectId": s.project_id,
                 "gitMode": s.git_mode,
-                "lastMessageAt": s.last_message_at.isoformat() if s.last_message_at else s.created_at.isoformat(),
+                "lastMessageAt": _utc_iso(s.last_message_at) or _utc_iso(s.created_at),
             }
             for s in sessions
         ]
@@ -94,7 +113,7 @@ async def get_thread(thread_id: int, user: User = Depends(web_user_dep)):
         "remoteId": str(result.id),
         "title": result.title,
         "gitMode": result.git_mode,
-        "createdAt": result.created_at.isoformat(),
+        "createdAt": _utc_iso(result.created_at),
     }
 
 
@@ -230,7 +249,7 @@ async def get_thread_messages(thread_id: int, user: User = Depends(web_user_dep)
                 "id": str(m.id),
                 "role": m.role,
                 "content": m.content,
-                "createdAt": m.created_at.isoformat(),
+                "createdAt": _utc_iso(m.created_at),
                 "isComplete": m.is_complete,
             }
             for m in messages

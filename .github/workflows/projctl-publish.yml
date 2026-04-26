@@ -1,0 +1,59 @@
+name: Publish projctl image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "projctl/**"
+      - ".github/workflows/projctl-publish.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: projctl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read VERSION
+        id: version
+        run: echo "value=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Build (smoke)
+        run: go build ./...
+
+      - name: Run unit tests
+        run: go test ./...
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: projctl
+          file: projctl/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/projctl:${{ steps.version.outputs.value }}
+            ghcr.io/${{ github.repository_owner }}/projctl:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.value }}

@@ -151,6 +151,15 @@ class TunnelService:
             the connection is registered
         """
         tunnel_name = self._tunnel_name(instance_slug)
+        # NOTE — Cloudflare Universal SSL coverage:
+        #   zone_domain = "tagh.co.uk"        → "inst-X.tagh.co.uk"        (1 level, covered FREE)
+        #   zone_domain = "apps.tagh.co.uk"   → "inst-X.apps.tagh.co.uk"   (2 levels, NOT covered by Universal SSL —
+        #                                        needs either an Advanced Certificate ($10/mo) OR `apps.tagh.co.uk`
+        #                                        registered as its own Cloudflare zone with separate Universal SSL)
+        # Toggle by updating platform_config:
+        #   UPDATE platform_config
+        #     SET value = jsonb_set(value, '{zone_domain}', '"<new>"')
+        #     WHERE category='cloudflare' AND key='settings';
         web_host = f"{instance_slug}.{self._config.zone_domain}"
         hmr_host = f"hmr-{instance_slug}.{self._config.zone_domain}"
         ide_host = f"ide-{instance_slug}.{self._config.zone_domain}"
