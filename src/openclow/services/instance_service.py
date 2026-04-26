@@ -313,7 +313,12 @@ class InstanceService:
             cfg = await get_config("instance", "per_user_cap")
             if cfg and "value" in cfg:
                 v = int(cfg["value"])
-                if v > 0:
+                # 0 is a valid "block all new provisions" value — used
+                # for maintenance windows. >0 is the normal range.
+                # Negative is interpreted as "operator typo, fall
+                # through to constructor default" so we don't honour
+                # nonsense values blindly.
+                if v >= 0:
                     return v
         except Exception:
             pass

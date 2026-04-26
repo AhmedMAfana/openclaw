@@ -217,6 +217,103 @@ export default function App() {
     setActiveBanners((prev) => prev.filter((b) => !kinds.includes(b.kind)));
   }
 
+  // Single dispatch of one StreamEvent into banner / card state.
+  // Used by BOTH the runtime's readStream pipeline AND the
+  // action-button handler (which raw-fetches /api/assistant for
+  // synthetic action_id chat messages and needs to drain the
+  // response stream so the events reach this dispatcher).
+  function dispatchInstanceEvent(evt: StreamEvent) {
+    switch (evt.type) {
+      case "instance_provisioning":
+        // Clear any stale failure card — a fresh provision started.
+        setActiveCard(null);
+        // Drop terminating / busy / retry banners since the new
+        // status is live.
+        clearBannersOfKind(["terminating", "busy", "retry_started"]);
+        pushBanner({ kind: "provisioning", slug: evt.slug, etaSeconds: evt.estimated_seconds });
+        break;
+      case "instance_upstream_degraded":
+        pushBanner({ kind: "upstream_degraded", slug: evt.slug, capabilities: evt.capabilities });
+        break;
+      case "instance_busy":
+        pushBanner({ kind: "busy", slug: evt.slug });
+        break;
+      case "instance_terminating":
+        clearBannersOfKind(["provisioning", "upstream_degraded", "busy", "retry_started"]);
+        pushBanner({ kind: "terminating", slug: evt.slug });
+        break;
+      case "instance_retry_started":
+        // Retry just started: kill the old provisioning banner so the
+        // user doesn't see a stale slug between events.
+        clearBannersOfKind(["provisioning", "terminating"]);
+        pushBanner({ kind: "retry_started" });
+        break;
+      case "instance_failed":
+        // A new failure replaces the old card and clears any stale
+        // provisioning banner from the previous attempt.
+        clearBannersOfKind(["provisioning", "retry_started"]);
+        setActiveCard({
+          kind: "failed",
+          prompt: "Something went wrong starting your environment.",
+          actions: evt.actions ?? [],
+          failureCode: evt.failure_code,
+        });
+        break;
+      case "instance_limit_exceeded":
+        if (evt.variant === "per_user_cap") {
+          setActiveCard({
+            kind: "cap_exceeded",
+            prompt: `You already have ${evt.active_chat_ids?.length ?? 0} active chats (cap=${evt.cap}). End one to start another.`,
+            actions: evt.actions ?? [],
+            variant: "per_user_cap",
+          });
+        } else {
+          setActiveCard({
+            kind: "cap_exceeded",
+            prompt: "The platform is at capacity right now. Please try again in a few minutes.",
+            actions: [],
+            variant: "platform_capacity",
+          });
+        }
+        break;
+      case "confirm":
+        setActiveCard({
+          kind: "confirm",
+          prompt: evt.prompt,
+          actions: evt.actions ?? [],
+        });
+        break;
+      case "tool_result":
+        // Pre-existing event — surfaced via the assistant-ui
+        // ToolResultBlock pipeline elsewhere. No-op here keeps the
+        // exhaustiveness gate satisfied.
+        break;
+      // tool_use / message_id are handled by their dedicated
+      // callbacks; they shouldn't reach this dispatcher, but the
+      // exhaustiveness gate forces explicit cases.
+      case "tool_use":
+      case "message_id":
+        break;
+    }
+  }
+
+  // Drain the body of a raw /api/assistant response so events from
+  // an action-button-triggered request reach dispatchInstanceEvent.
+  // Without this, the action button would POST + ignore the response
+  // and the user would never see the resulting banners/cards.
+  async function drainAssistantResponse(res: Response) {
+    if (!res.body) return;
+    const abort = new AbortController();
+    await readStream(
+      res.body,
+      abort.signal,
+      () => {},
+      () => {},
+      () => {},
+      dispatchInstanceEvent,
+    );
+  }
+
   // Projects
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<number | null>(null);
@@ -766,65 +863,10 @@ export default function App() {
             prev.map((m) => m.id === asstMsgId ? { ...m, id: realId } : m)
           );
         },
-        // T100 — container-mode events. Each backend event maps to a
-        // banner update or a card replacement.
-        (evt) => {
-          switch (evt.type) {
-            case "instance_provisioning":
-              pushBanner({ kind: "provisioning", slug: evt.slug, etaSeconds: evt.estimated_seconds });
-              break;
-            case "instance_upstream_degraded":
-              pushBanner({ kind: "upstream_degraded", slug: evt.slug, capabilities: evt.capabilities });
-              break;
-            case "instance_busy":
-              pushBanner({ kind: "busy", slug: evt.slug });
-              break;
-            case "instance_terminating":
-              clearBannersOfKind(["provisioning", "upstream_degraded", "busy"]);
-              pushBanner({ kind: "terminating", slug: evt.slug });
-              break;
-            case "instance_retry_started":
-              pushBanner({ kind: "retry_started" });
-              break;
-            case "instance_failed":
-              setActiveCard({
-                kind: "failed",
-                prompt: "Something went wrong starting your environment.",
-                actions: evt.actions ?? [],
-                failureCode: evt.failure_code,
-              });
-              break;
-            case "instance_limit_exceeded":
-              if (evt.variant === "per_user_cap") {
-                setActiveCard({
-                  kind: "cap_exceeded",
-                  prompt: `You already have ${evt.active_chat_ids?.length ?? 0} active chats (cap=${evt.cap}). End one to start another.`,
-                  actions: evt.actions ?? [],
-                  variant: "per_user_cap",
-                });
-              } else {
-                setActiveCard({
-                  kind: "cap_exceeded",
-                  prompt: "The platform is at capacity right now. Please try again in a few minutes.",
-                  actions: [],
-                  variant: "platform_capacity",
-                });
-              }
-              break;
-            case "confirm":
-              setActiveCard({
-                kind: "confirm",
-                prompt: evt.prompt,
-                actions: evt.actions ?? [],
-              });
-              break;
-            case "tool_result":
-              // Pre-existing event — surfaced via the assistant-ui
-              // ToolResultBlock pipeline elsewhere. No-op here keeps
-              // the exhaustiveness gate satisfied.
-              break;
-          }
-        },
+        // T100 — container-mode events go through the shared
+        // dispatcher so the action-button raw-fetch path can drain
+        // the same way (drainAssistantResponse calls into it).
+        dispatchInstanceEvent,
       );
     } finally {
       streamDone = true;
@@ -1263,6 +1305,15 @@ export default function App() {
                     // Cards close on any action so the user isn't
                     // stuck looking at a stale card after acting.
                     setActiveCard(null);
+                    // UI-only action_ids (menu navigation): close the
+                    // card and stop. Don't POST back to /api/assistant
+                    // — that would re-trigger the same context (e.g.
+                    // re-emit the failure card if the instance is
+                    // still failed). User wanted out of this card,
+                    // not a fresh round-trip.
+                    if (a.action_id?.startsWith("menu:")) {
+                      return;
+                    }
                     if (a.link) {
                       // Direct navigation (e.g. "/chat" Main Menu).
                       window.location.assign(a.link);
@@ -1270,9 +1321,12 @@ export default function App() {
                     }
                     if (a.action_id) {
                       // Send the action_id back as a chat message —
-                      // assistant_endpoint switches on it.
+                      // assistant_endpoint switches on it. Drain the
+                      // response stream so the resulting events
+                      // (instance_provisioning, instance_terminating,
+                      // etc.) reach the dispatcher and update the UI.
                       try {
-                        await fetch("/api/assistant", {
+                        const res = await fetch("/api/assistant", {
                           method: "POST",
                           credentials: "include",
                           headers: { "Content-Type": "application/json" },
@@ -1288,6 +1342,7 @@ export default function App() {
                             projectId: activeProjectId,
                           }),
                         });
+                        await drainAssistantResponse(res);
                       } catch { /* best-effort; user can retry */ }
                     }
                   }}
