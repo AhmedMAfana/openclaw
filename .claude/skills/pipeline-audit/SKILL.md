@@ -97,6 +97,9 @@ Common patterns:
 |-------|---|---|
 | `stream_event_contract` | VII, VIII | Backend `controller.add_data` event types match the JSON schema, the runtime `_REQUIRED_BY_TYPE` table is in sync, the generated TS types are fresh, every schema type has a frontend handler. |
 | `arq_job_contract` | VII, VI | Every `enqueue_job("X", ...)` name is registered in `arq_app._load_functions`. |
+| `api_route_contract` | VII | Every frontend `fetch('/api/X')` URL is served by some FastAPI route (path-parameter aware). |
+| `mcp_tool_contract` | III, VII | Every `mcp__<server>__<tool>` string in `CONTAINER_MODE_TOOLS` corresponds to a real `@mcp.tool()` registration on the pinned MCP server. |
+| `db_model_drift` | VI, VII | Every SQLAlchemy `mapped_column` declaration is reflected in alembic migration history. Optional live `alembic check --autogenerate` when `DATABASE_URL` is reachable. |
 | `no_ambient_args` | III | No `@mcp.tool` parameter name contains `instance`/`project`/`workspace`/`container`. |
 | `compose_no_host_ports` | V | No service in any per-instance compose template publishes host ports outside cloudflared. |
 | `redactor_coverage` | IV | Every `tool_result` emit wraps `content` in a known redactor function. |

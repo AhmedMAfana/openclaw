@@ -130,6 +130,32 @@ async def set_thread_git_mode(thread_id: int, body: dict, user: User = Depends(w
     return {"status": "ok", "git_mode": new_mode}
 
 
+@router.put("/threads/{thread_id}/project")
+async def set_thread_project(
+    thread_id: int, body: dict, user: User = Depends(web_user_dep)
+):
+    """Bind (or unbind) a project to a chat session.
+
+    Frontend's project picker calls this on selection change. Before
+    this endpoint existed the call silently 404'd inside an empty
+    try/catch — caught by `pipeline-fitness::api_route_contract`.
+
+    Body: ``{"project_id": <int|null>}``. ``null`` clears the binding.
+    Returns ``{"status": "ok", "project_id": <id>}``.
+    """
+    raw = body.get("project_id")
+    project_id = int(raw) if raw is not None else None
+
+    async with async_session() as session:
+        ws = await session.get(WebChatSession, thread_id)
+        if not ws or ws.user_id != user.id:
+            raise HTTPException(404, "Thread not found")
+        ws.project_id = project_id
+        await session.commit()
+
+    return {"status": "ok", "project_id": project_id}
+
+
 @router.post("/threads/{thread_id}/archive")
 async def archive_thread(thread_id: int, user: User = Depends(web_user_dep)):
     """Archive a session — T086 full-cascade delete.

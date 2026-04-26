@@ -148,6 +148,9 @@ Each maps to one or more constitution principles (Roman numerals).
 |---|---|---|
 | `stream_event_contract` | VII, VIII | Backend `add_data` events ↔ JSON schema ↔ runtime validator's `_REQUIRED_BY_TYPE` ↔ generated TS types ↔ frontend `parseStream` handlers all align. |
 | `arq_job_contract` | VII, VI | Every `enqueue_job("X", ...)` name is in `arq_app._load_functions`. |
+| `api_route_contract` | VII | Every frontend `fetch('/api/X')` URL is served by some FastAPI route (path-parameter aware). |
+| `mcp_tool_contract` | III, VII | `CONTAINER_MODE_TOOLS` strings ↔ `@mcp.tool()` registrations on the pinned MCP servers. |
+| `db_model_drift` | VI, VII | SQLAlchemy `mapped_column` declarations match alembic migration history; optional live `alembic check`. |
 | `no_ambient_args` | III | No `@mcp.tool` parameter name contains `instance`/`project`/`workspace`/`container`. |
 | `compose_no_host_ports` | V | No service in any per-instance compose template publishes host ports outside `cloudflared`. |
 | `redactor_coverage` | IV | Every `tool_result` emit wraps `content` in `redact()`. |
