@@ -113,31 +113,70 @@ src/openclow/
 - **Shared agent utilities**: use `worker/tasks/_agent_base.py` for tool descriptions (`describe_tool`), auth error detection (`is_auth_error`), and common patterns. Don't copy-paste agent boilerplate.
 - **MCP factories live in `providers/llm/claude.py`**: `_mcp_docker()`, `_mcp_playwright()`, `_mcp_git()`. Import these, don't inline MCP server configs.
 
-## Pipeline-integrity audits
+## Architecture-fitness suite
 
-Static, fast (<1s) checks that catch contract drift between layers
-where type checkers can't help — string keys in JSON-RPC streams,
-ARQ job names, FastAPI route paths. Run before claiming "done":
+Static, principle-mapped checks that prove the project's intended
+architectural properties hold. Run before claiming any feature done
+and before any expensive test session:
 
 ```bash
-python scripts/audit_stream_events.py
+python scripts/pipeline_fitness.py            # Markdown report
+python scripts/pipeline_fitness.py --json     # machine output
+python scripts/pipeline_fitness.py --check stream_event_contract
 ```
 
-`audit_stream_events.py` proves backend `controller.add_data({type:
-"X"})` events are 1:1 with frontend `parseStream` handlers in
-`chat_frontend/src/App.tsx`. Catches the exact bug from 2026-04-24
-where backend emitted `instance_provisioning` but the frontend's
-parser only knew about `tool_use` and `message_id` — the rich UI
-silently dropped, the user only saw the plain-text fallback.
+Or via the slash command: `/pipeline-audit`.
 
-Wired into pre-commit (`.pre-commit-config.yaml::audit-stream-events`)
-so a commit that adds a new `controller.add_data` call without a
-matching frontend handler fails locally before it lands.
+### Layered architecture
 
-When you add a new audit script for a new contract surface
-(ARQ jobs, REST routes, MCP tool names), drop it next to this one
-and add a hook entry. The pattern is one file per contract; keep
-each script tight.
+The suite implements a four-layer contract enforcement strategy
+(borrows from Neal Ford's *Building Evolutionary Architectures* —
+fitness functions as automated guardrails):
+
+| Layer | Where it lives | What it catches |
+|---|---|---|
+| **Schema** (source of truth) | `specs/001-per-chat-instances/contracts/*.schema.json` | The contract itself — every event/job/tool name with its full payload shape. Single source of truth. |
+| **Codegen** (build-time) | `scripts/codegen/gen_*.py` → `chat_frontend/src/types/*.ts` | TypeScript discriminated unions generated from schema. The frontend's `switch` becomes exhaustive at compile time — adding a new event in the schema breaks `tsc` until every consumer adds a `case`. |
+| **Runtime** (emit-time) | `src/openclow/services/stream_validator.py` | Every `controller.add_data` payload validated against the schema. Strict mode raises (dev/test); warn mode logs telemetry (prod). |
+| **Static audit** (CI gate) | `scripts/fitness/check_*.py` + `scripts/pipeline_fitness.py` | Cross-checks schema ↔ runtime ↔ codegen ↔ frontend ↔ backend, plus other contract surfaces (ARQ jobs, MCP tool args, compose ports, httpx timeouts, redactor coverage). |
+
+### Today's fitness checks
+
+Each maps to one or more constitution principles (Roman numerals).
+
+| Check | Principle(s) | Asserts |
+|---|---|---|
+| `stream_event_contract` | VII, VIII | Backend `add_data` events ↔ JSON schema ↔ runtime validator's `_REQUIRED_BY_TYPE` ↔ generated TS types ↔ frontend `parseStream` handlers all align. |
+| `arq_job_contract` | VII, VI | Every `enqueue_job("X", ...)` name is in `arq_app._load_functions`. |
+| `no_ambient_args` | III | No `@mcp.tool` parameter name contains `instance`/`project`/`workspace`/`container`. |
+| `compose_no_host_ports` | V | No service in any per-instance compose template publishes host ports outside `cloudflared`. |
+| `redactor_coverage` | IV | Every `tool_result` emit wraps `content` in `redact()`. |
+| `timeouts` | IX | Every `httpx.AsyncClient(...)` in `services/` carries a `timeout=` kwarg. |
+
+### Adding a new fitness function
+
+When a new contract surface appears in the system, drop a file
+under `scripts/fitness/check_<name>.py` exporting `check() ->
+FitnessResult`. The runner discovers it. Map it to constitution
+principle(s) via the `principles=[...]` field. Keep each check ≤200
+lines, ≤2 s offline, deterministic.
+
+### Pre-commit wiring
+
+`.pre-commit-config.yaml::pipeline-fitness` runs the suite with
+`--fail-on critical` — only hard violations block commits, while
+HIGH-severity drift is surfaced in the report (so a Phase 10
+work-in-progress branch isn't gated by frontend handlers that are
+deliberately scoped for a follow-up commit). Codegen freshness is
+its own hook so a schema bump without a regen also fails locally.
+
+### What this suite is NOT
+
+Not a runtime monitor. Not a replacement for tests. Not a security
+scanner. It catches "A calls B but B doesn't know about it" — not
+"A calls B and B does the wrong thing". For behavioural correctness,
+the test suites under `tests/` (unit, contract, integration, load)
+are still the gate.
 
 ## Playwright MCP — Claude Code setup
 

@@ -24,23 +24,30 @@ repos:
 
   - repo: local
     hooks:
-      # Pipeline-integrity audits — catch the class of bug that silently
-      # broke the chat UI on 2026-04-24 (backend emits an event, frontend
-      # doesn't handle it, type checker has nothing to say). Static, fast,
-      # offline. Add new audits as new contracts emerge.
-      - id: audit-stream-events
-        name: audit stream-event contract (backend ↔ frontend)
-        entry: python scripts/audit_stream_events.py
+      # Architecture-fitness suite — runs every scripts/fitness/check_*.py
+      # via scripts/pipeline_fitness.py. Each check is mapped to one or
+      # more constitution principles; see .claude/skills/pipeline-audit/
+      # SKILL.md for the catalogue. Default --fail-on=critical so the
+      # commit blocks ONLY on hard violations; high-severity drift is
+      # surfaced in the report but doesn't fail the commit (so a Phase
+      # 10 work-in-progress branch isn't gated by frontend handlers
+      # that are deliberately scoped for a follow-up commit).
+      - id: pipeline-fitness
+        name: pipeline-fitness suite (constitution principles)
+        entry: python scripts/pipeline_fitness.py --fail-on critical
         language: system
         pass_filenames: false
-        files: ^(src/openclow/api/routes/assistant\.py|chat_frontend/src/App\.tsx)$
+        # Run on changes to any contract surface: backend, schema,
+        # codegen, frontend, validators, fitness checks themselves.
+        files: ^(src/openclow/.*\.py|chat_frontend/src/.*\.(ts|tsx)|specs/001-per-chat-instances/contracts/.*|scripts/(fitness/.*|codegen/.*|pipeline_fitness)\.py|src/openclow/setup/compose_templates/.*\.yml)$
 
-      - id: audit-arq-jobs
-        name: audit ARQ enqueue_job names ↔ worker registrations
-        entry: python scripts/audit_arq_jobs.py
+      # Codegen freshness gate — generated TS types must match the
+      # JSON schema. Lower-severity than fitness (a stale codegen is
+      # easy to fix and doesn't ship code that will crash) but still
+      # blocks commits that bumped the schema without rerunning codegen.
+      - id: codegen-stream-events-fresh
+        name: stream-event TS types match the JSON schema
+        entry: python scripts/codegen/gen_stream_event_types.py --check
         language: system
         pass_filenames: false
-        # Run on any change under src/ — enqueue_job calls and the
-        # worker function list both live here, and either side moving
-        # could drift the contract.
-        files: ^src/openclow/.*\.py$
+        files: ^(specs/001-per-chat-instances/contracts/stream-events\.schema\.json|chat_frontend/src/types/stream-events\.ts)$

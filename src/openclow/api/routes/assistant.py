@@ -45,6 +45,31 @@ from openclow.services.instance_service import (
     load_upstream_state,
 )
 from openclow.services.instance_lock import instance_lock
+from openclow.services.stream_validator import validate_event as _validate_stream_event
+
+
+# Senior-audit runtime layer: every `controller.add_data` payload runs
+# through the schema validator at emit time. In `strict` mode (dev /
+# tests) an invalid payload raises StreamEventInvalidError so the bug
+# surfaces at the emit site, not in production. In `warn` mode (prod)
+# the validator logs telemetry and lets the partial event through —
+# failing closed in prod would degrade every chat into errors.
+#
+# Monkey-patch RunController once at module load so all 13 existing
+# emit sites are covered without a mass edit. Future emit sites get
+# the same validation for free.
+_RC_ADD_DATA_ORIG = RunController.add_data
+
+
+def _add_data_validated(self, payload):  # type: ignore[override]
+    try:
+        _validate_stream_event(payload)
+    except Exception:
+        raise
+    return _RC_ADD_DATA_ORIG(self, payload)
+
+
+RunController.add_data = _add_data_validated  # type: ignore[assignment]
 
 
 # T080 — plain-language chat copy keyed by FailureCode. Kept as a
@@ -910,8 +935,23 @@ async def assistant_endpoint(
                     container_instance
                 )
                 # Use the instance's workspace as cwd so built-in Read/Edit
-                # see the instance's files and not the orchestrator's.
+                # see the instance's files and not the orchestrator's. If
+                # the row just flipped to `provisioning` the ARQ job
+                # hasn't created the dir yet — create an empty one so the
+                # claude_agent_sdk subprocess can chdir into it without
+                # crashing. reattach_session_branch + compose up will
+                # populate it as soon as the job picks up.
                 workspace = container_instance.workspace_path
+                if not os.path.isdir(workspace):
+                    try:
+                        os.makedirs(workspace, exist_ok=True)
+                    except OSError:
+                        workspace = "/tmp"
+                        log.warning(
+                            "assistant.container_workspace_fallback",
+                            slug=container_instance.slug,
+                            wanted=container_instance.workspace_path,
+                        )
                 # T070: if we're still provisioning (fresh chat or
                 # resuming from a prior teardown), render a non-blocking
                 # "starting up" banner so the user knows to expect a

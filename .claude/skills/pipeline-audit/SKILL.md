@@ -1,7 +1,7 @@
 ---
 name: "pipeline-audit"
-description: "Static contract-drift audit across the TAGH Dev pipeline. Catches the bug class where backend emits/calls a thing the other side forgot to handle — stream-event drift (backend `controller.add_data` vs frontend `parseStream`), ARQ job dead-ends (`enqueue_job(\"X\")` vs registered worker functions), API-route drift (frontend `fetch('/api/X')` vs FastAPI routes), MCP tool-name drift. Type checkers can't see these contracts because they live in string keys. Run before claiming \"feature done\" and before any e2e test session."
-argument-hint: "Optional: specific audit to run (stream-events | arq-jobs | api-routes | mcp-tools | all). Default: all."
+description: "TAGH Dev architecture-fitness audit. Runs scripts/pipeline_fitness.py, which discovers every scripts/fitness/check_*.py and aggregates findings into a Markdown report mapped to constitution principles. Catches the bug class where backend emits/calls a thing the other side forgot to handle, where redactor coverage breaks on a new emit site, where MCP tools accidentally accept ambient-identifier arguments, where compose templates leak host ports, where httpx clients are constructed without timeouts, where ARQ enqueue_job names typo'd against the worker registry. Type checkers can't see these because the contracts are implicit (string keys, naming conventions, schema-vs-code drift). Run before claiming any feature done and before any e2e test session."
+argument-hint: "Optional: comma-separated check names to run (default all). Append --json for machine output."
 user-invocable: true
 disable-model-invocation: false
 ---
@@ -12,113 +12,94 @@ disable-model-invocation: false
 $ARGUMENTS
 ```
 
-If `$ARGUMENTS` is empty or `all`, run every audit listed below in order.
-If `$ARGUMENTS` matches a single audit name, run only that one.
-If `$ARGUMENTS` is unrecognised, list the available audits and exit cleanly without running anything.
+If `$ARGUMENTS` is empty, run the full suite. Otherwise treat it as a comma-separated list of fitness-check names (e.g. `stream_event_contract,arq_job_contract`).
 
 ## Goal
 
-Prove the project's cross-component contracts hold **before** anyone runs a test session. The contracts checked here are all of the form "side A emits / calls a string that side B is expected to recognise" — JSON-RPC event types, ARQ job names, REST URL paths, MCP tool identifiers. Type checkers and linters are blind to these. Tests catch them only after the fact, and only the cases someone wrote tests for.
+Prove every architectural-fitness check defined under `scripts/fitness/check_*.py` passes. Each check enforces ONE invariant from the project constitution. The skill is the canonical "is the system internally consistent?" gate — run it BEFORE you reach for Playwright or another expensive test runner.
 
-This skill is **read-only**. It runs the audit scripts under `scripts/audit_*.py`, reports the findings, and recommends concrete next actions. It does NOT edit code on its own.
+This skill is **read-only**. It runs the suite, reports the findings, recommends concrete fix sites with `file:line` citations. It NEVER edits code.
 
 ## Operating Constraints
 
-- **STRICTLY READ-ONLY**. No file edits. No git operations. Just run the scripts and report.
-- **Fast**. Each individual audit must finish in under 2 seconds offline. If something needs network or a running stack, it does not belong here.
-- **Deterministic**. Re-running with no code changes must produce identical output.
-- **Honest**. If an audit script doesn't exist yet, report that, don't pretend it ran.
+- **STRICTLY READ-ONLY.** The fitness checks themselves are read-only by contract; this skill MUST NOT add edits on top.
+- **Authoritative report.** When a check fails, quote the script's output verbatim — do not summarise away severity or location.
+- **Map to principles.** Every failure cites which constitution principle the check enforces. The user should be able to read the report and know which non-negotiable was violated.
+- **Honest about scope.** The fitness suite catches **static** contracts (what types, names, signatures, structures). It does NOT catch behavioural correctness — that's what tests are for.
 
-## Available audits
+## How the suite works
 
-The skill discovers audits by listing `scripts/audit_*.py`. Today's catalogue (verify by `ls scripts/audit_*.py` before claiming any of them exist):
+`scripts/pipeline_fitness.py` is the runner. It:
 
-| Audit | Script | Catches |
-|---|---|---|
-| `stream-events` | `scripts/audit_stream_events.py` | Backend `controller.add_data({type: "X"})` calls that have no matching `case "X":` arm in `chat_frontend/src/App.tsx::parseStream`. Was used to find the 9-event UI gap on 2026-04-24. |
-| `arq-jobs` | `scripts/audit_arq_jobs.py` *(may not exist yet — report if absent)* | `enqueue_job("X", ...)` references that don't match a function registered in `worker/arq_app.py::_load_functions`. |
-| `api-routes` | `scripts/audit_api_routes.py` *(may not exist yet)* | Frontend `fetch('/api/X')` URLs that no FastAPI router serves. |
-| `mcp-tools` | `scripts/audit_mcp_tools.py` *(may not exist yet)* | Tool names referenced in `providers/llm/claude.py::CONTAINER_MODE_TOOLS` (or any `allowed_tools` list) that aren't registered by an `@mcp.tool()` decorator on the corresponding MCP server. |
+1. Discovers every file under `scripts/fitness/check_*.py`.
+2. Imports each module, calls its `check()` function.
+3. Each `check()` returns a `FitnessResult(name, principles, description, passed, findings)`.
+4. Aggregates results into a Markdown report (or JSON via `--json`).
+5. Exit codes: 0 (clean), 1 (findings at or above the `--fail-on` threshold; default `critical`), 2 (a check crashed).
 
-If a referenced script does not exist, the skill MUST say so explicitly — do not invent its output.
+### Adding a new fitness function
+
+When the system grows a new contract surface, add `scripts/fitness/check_<name>.py` exporting a `check() -> FitnessResult` function. The runner picks it up automatically. Map the function to one or more constitution principles via the `principles` field of the result. Keep each check ≤200 lines, ≤2 s offline, deterministic.
 
 ## Execution Steps
 
-### 1. Resolve which audits to run
+### 1. Run the suite
 
-Parse `$ARGUMENTS`. Map to the catalogue above. If empty/`all`, set the run list to every script that actually exists under `scripts/audit_*.py`.
+Default: `python scripts/pipeline_fitness.py`.
 
-### 2. Run each script via Bash
+If `$ARGUMENTS` names specific checks, pass them as `--check <name1>,<name2>`. Validate the names exist under `scripts/fitness/` first; if any don't, list the valid set and exit cleanly.
 
-For each audit in the run list:
+### 2. Aggregate the output
 
-- Invoke `python scripts/audit_<name>.py` (or whatever its filename is).
-- Capture stdout, stderr, and exit code.
-- Bound it: if the script takes longer than 30 seconds, kill it and treat it as a failure with cause "audit timed out — likely needs network or a running stack, file a bug".
+The runner already produces a Markdown report. Pass it through verbatim. Add a one-line summary above it:
 
-### 3. Aggregate results into a structured report
+> "X of Y checks pass. Z critical findings. W high. See per-check details below."
 
-Output one Markdown section per audit:
+### 3. Recommend next actions
 
-```
-## <audit-name>
-**Status**: PASS / FAIL / SCRIPT-MISSING / TIMEOUT
-**Exit code**: <n>
-**Findings**:
-<the script's stdout>
-```
+For each failing check, drill into the findings and recommend concrete file edits with `file:line` citations.
 
-Then a top-level summary table:
+Common patterns:
 
-| Audit | Result | Critical | Warnings |
-|---|---|---:|---:|
-| stream-events | FAIL | 9 | 0 |
-| ... |
+- **`stream_event_contract` → frontend handler missing**: point at `chat_frontend/src/App.tsx:120-128` (or wherever `parseStream` lives) and reference Phase 10 task IDs (T100–T106). Show the exact `case` arm template.
+- **`arq_job_contract` → name not registered**: point at `src/openclow/worker/arq_app.py::_load_functions` and quote the missing function name.
+- **`no_ambient_args`** failure: point at the offending `@mcp.tool` definition and show how to reshape the args without an ambient identifier.
+- **`compose_no_host_ports`** failure: point at the `ports:` line in the compose template and recommend moving ingress to the cloudflared sidecar.
+- **`redactor_coverage`** failure: point at the unguarded `controller.add_data` site and show the `redact()` wrap.
+- **`timeouts`** failure: point at the `httpx.AsyncClient(...)` site and show the `timeout=DEFAULT_TIMEOUT` parameter.
 
-### 4. Recommend next actions
+### 4. Honest reporting rules
 
-If any audit FAILED:
-
-- For `stream-events` failures: point at `chat_frontend/src/App.tsx::parseStream` and quote the exact `case "X":` arms the user needs to add. Reference Phase 10 task IDs (T100–T106) if they exist in `tasks.md`.
-- For `arq-jobs` failures: point at `worker/arq_app.py::_load_functions` and quote the missing function name.
-- For `api-routes` failures: point at the FastAPI router file the URL pattern would belong to (`api/routes/<group>.py`).
-- For `mcp-tools` failures: point at the MCP server file (`mcp_servers/<server>.py`) and the factory in `providers/llm/claude.py`.
-
-If all audits PASSED:
-
-- State that the static contracts hold.
-- Remind the caller this only covers contract drift — semantic correctness still requires tests.
-- Suggest the next gate: `python -m py_compile` on changed files, then any relevant `pytest` selection, then `quickstart.md` walk-through against staging if the change touches user-facing code.
-
-### 5. Honest reporting rules
-
-- NEVER claim an audit script exists without checking. `ls scripts/audit_*.py` is your source of truth.
-- NEVER claim an audit passed without seeing its exit code = 0. Treat any uncertainty as a fail-loud.
-- NEVER edit files. If a fix is obvious, recommend it; do NOT apply it.
-- Cite `file_path:line_number` when pointing at the next-action site so the caller can navigate directly. (Constitution Principle VII: evidence-based claims.)
+- NEVER claim the suite passed without running it. The runner's exit code is your source of truth.
+- NEVER summarise away the principle citations. The user needs to know WHICH constitutional invariant is at stake.
+- NEVER suggest skipping a check or whitelisting a finding without an explicit reason from the user. Constitution conflicts are CRITICAL by definition (Principle VIII: Root-Cause Fixes Over Bypasses).
 
 ## What this skill is NOT
 
-- Not a runtime monitor. It only checks **static** contracts.
-- Not a replacement for tests. It catches "A calls B but B doesn't know about it" — not "A calls B and B does the wrong thing".
-- Not a security scan. Use `/security-review` for that.
-- Not a refactor. Use plain editing for that.
+- Not a runtime monitor — it's static.
+- Not a replacement for tests — it catches "A calls B but B doesn't know about it", not "A calls B and B does the wrong thing".
+- Not a security scanner — use `/security-review` for that.
+- Not a refactorer — it reports, you (or another skill) fix.
 
 ## When to invoke
 
-- Before claiming "feature done" on any change that touches a string-keyed contract surface (chat UI events, ARQ jobs, REST routes, MCP tools).
-- Before starting an end-to-end test session — Playwright in particular is expensive to set up and you want to know the static gaps first.
-- After a `/speckit-analyze` run, as a complementary check on the actual code (analyze checks artifacts; this checks code).
-- During a code review, on the changed files, to spot drift introduced by the diff.
+- **Before claiming "feature done"** on any change that touches: stream events, ARQ jobs, MCP tools, compose templates, async I/O.
+- **Before starting an end-to-end test session** — Playwright, manual quickstart walks, anything expensive. Static contract check first.
+- **After `/speckit-analyze`** as a complementary check — analyze runs over spec/plan/tasks artifacts; this runs over actual code.
+- **In a code review**, on the changed files, to spot drift the diff introduces.
+- **In CI** — the runner is wired into pre-commit (see `.pre-commit-config.yaml::audit-pipeline-fitness`) and any CI workflow that runs pre-commit-hooks-on-changed-files will pick it up.
 
-## Extending the audit suite
+## Today's check catalogue
 
-When you add a new contract surface to the system, add a matching audit script under `scripts/audit_<name>.py` following the same template:
+(Verify by `ls scripts/fitness/check_*.py` before claiming any of these run.)
 
-1. AST-walk one side, regex-scan the other.
-2. Diff the two sets.
-3. Print exit-1 with a CRITICAL summary on drift.
-4. Add a row to the catalogue table at the top of this SKILL.md.
-5. Wire into `.pre-commit-config.yaml` so commits drifting it fail locally.
+| Check | Principle(s) | What it asserts |
+|-------|---|---|
+| `stream_event_contract` | VII, VIII | Backend `controller.add_data` event types match the JSON schema, the runtime `_REQUIRED_BY_TYPE` table is in sync, the generated TS types are fresh, every schema type has a frontend handler. |
+| `arq_job_contract` | VII, VI | Every `enqueue_job("X", ...)` name is registered in `arq_app._load_functions`. |
+| `no_ambient_args` | III | No `@mcp.tool` parameter name contains `instance`/`project`/`workspace`/`container`. |
+| `compose_no_host_ports` | V | No service in any per-instance compose template publishes host ports outside cloudflared. |
+| `redactor_coverage` | IV | Every `tool_result` emit wraps `content` in a known redactor function. |
+| `timeouts` | IX | Every `httpx.AsyncClient(...)` in `services/` passes a `timeout=` kwarg. |
 
-The pattern is intentionally one-script-per-contract so each is small, fast, and easy to read. Don't try to build a single mega-audit.
+To add new checks, drop `scripts/fitness/check_<name>.py` and follow the existing template. The runner discovers them; this catalogue should be updated to keep humans informed.
