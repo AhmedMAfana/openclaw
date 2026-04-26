@@ -113,6 +113,32 @@ src/openclow/
 - **Shared agent utilities**: use `worker/tasks/_agent_base.py` for tool descriptions (`describe_tool`), auth error detection (`is_auth_error`), and common patterns. Don't copy-paste agent boilerplate.
 - **MCP factories live in `providers/llm/claude.py`**: `_mcp_docker()`, `_mcp_playwright()`, `_mcp_git()`. Import these, don't inline MCP server configs.
 
+## Pipeline-integrity audits
+
+Static, fast (<1s) checks that catch contract drift between layers
+where type checkers can't help — string keys in JSON-RPC streams,
+ARQ job names, FastAPI route paths. Run before claiming "done":
+
+```bash
+python scripts/audit_stream_events.py
+```
+
+`audit_stream_events.py` proves backend `controller.add_data({type:
+"X"})` events are 1:1 with frontend `parseStream` handlers in
+`chat_frontend/src/App.tsx`. Catches the exact bug from 2026-04-24
+where backend emitted `instance_provisioning` but the frontend's
+parser only knew about `tool_use` and `message_id` — the rich UI
+silently dropped, the user only saw the plain-text fallback.
+
+Wired into pre-commit (`.pre-commit-config.yaml::audit-stream-events`)
+so a commit that adds a new `controller.add_data` call without a
+matching frontend handler fails locally before it lands.
+
+When you add a new audit script for a new contract surface
+(ARQ jobs, REST routes, MCP tool names), drop it next to this one
+and add a hook entry. The pattern is one file per contract; keep
+each script tight.
+
 ## Playwright MCP — Claude Code setup
 
 Playwright MCP runs **inside the worker container** (the host Mac has no

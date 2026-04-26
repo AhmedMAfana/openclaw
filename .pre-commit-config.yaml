@@ -21,3 +21,16 @@ repos:
         files: \.py$
         # Scope to async-heavy code paths; expand as the team opts in.
         exclude: ^(alembic/|tests/fixtures/|migrations/)
+
+  - repo: local
+    hooks:
+      # Pipeline-integrity audits — catch the class of bug that silently
+      # broke the chat UI on 2026-04-24 (backend emits an event, frontend
+      # doesn't handle it, type checker has nothing to say). Static, fast,
+      # offline. Add new audits as new contracts emerge.
+      - id: audit-stream-events
+        name: audit stream-event contract (backend ↔ frontend)
+        entry: python scripts/audit_stream_events.py
+        language: system
+        pass_filenames: false
+        files: ^(src/openclow/api/routes/assistant\.py|chat_frontend/src/App\.tsx)$
