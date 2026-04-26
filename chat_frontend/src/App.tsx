@@ -53,6 +53,9 @@ import {
 } from "@assistant-ui/react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Thread } from "@/components/assistant-ui/thread";
+import { InstanceBanner, type BannerKind } from "@/components/instance/InstanceBanner";
+import { InstanceCard, type CardKind } from "@/components/instance/InstanceCard";
+import type { CardAction } from "@/types/stream-events";
 import { ThinkingContext } from "@/lib/thinking-context";
 import { TaskModeContext } from "@/lib/task-mode-context";
 import { PlusIcon, SettingsIcon, LogOutIcon, PencilIcon, TrashIcon, CheckIcon, XIcon, ShieldIcon, AlertCircleIcon, Loader2 } from "lucide-react";
@@ -83,6 +86,20 @@ interface ChatMessage {
 }
 
 // ── Stream reader ─────────────────────────────────────────────────────────────
+//
+// `2:`-prefixed lines carry an array of StreamEvent payloads (see
+// chat_frontend/src/types/stream-events.ts — generated from the JSON
+// Schema at specs/001-per-chat-instances/contracts/stream-events.schema.json).
+// `0:`-prefixed lines carry text deltas.
+//
+// Until 2026-04-24 this parser only handled `tool_use` + `message_id`
+// and silently dropped the seven container-mode events. The
+// pipeline-fitness audit (`stream_event_contract`) now gates this:
+// every type in the schema MUST have a case here. The exhaustive
+// switch (with a `never`-typed default) makes adding a new event in
+// the schema a TypeScript compile error until every consumer updates.
+
+import type { StreamEvent } from "@/types/stream-events";
 
 async function readStream(
   body: ReadableStream<Uint8Array>,
@@ -90,6 +107,7 @@ async function readStream(
   onText: (accumulated: string) => void,
   onTool: (tool: string) => void,
   onId?: (id: string) => void,
+  onInstanceEvent?: (evt: StreamEvent) => void,
 ): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -117,10 +135,35 @@ async function readStream(
           } catch { /* malformed */ }
         } else if (line.startsWith("2:")) {
           try {
-            const events = JSON.parse(line.slice(2)) as Array<{ type?: string; tool?: string; id?: string }>;
+            const events = JSON.parse(line.slice(2)) as StreamEvent[];
             for (const evt of events) {
-              if (evt.type === "tool_use" && evt.tool) onTool(evt.tool);
-              if (evt.type === "message_id" && evt.id) onId?.(evt.id);
+              switch (evt.type) {
+                case "tool_use":
+                  if (evt.tool) onTool(evt.tool);
+                  break;
+                case "message_id":
+                  if (evt.id) onId?.(evt.id);
+                  break;
+                case "instance_provisioning":
+                case "instance_failed":
+                case "instance_limit_exceeded":
+                case "instance_upstream_degraded":
+                case "instance_busy":
+                case "instance_terminating":
+                case "instance_retry_started":
+                case "confirm":
+                case "tool_result":
+                  onInstanceEvent?.(evt);
+                  break;
+                default: {
+                  // Exhaustiveness gate: TypeScript reports a `never`
+                  // mismatch here if a new StreamEvent variant lands
+                  // without a matching case above.
+                  const _exhaustive: never = evt;
+                  void _exhaustive;
+                  console.warn("[parseStream] unknown event type", evt);
+                }
+              }
             }
           } catch { /* malformed */ }
         }
@@ -140,6 +183,39 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [sidebarLoading, setSidebarLoading] = useState(true);
   const [thinkingSteps, setThinkingSteps] = useState<string[]>([]);
+
+  // T100/T101/T102/T104 — container-mode UX state. Banners stack
+  // (newest-first, max 3); the active card replaces any prior card.
+  type Banner = {
+    kind: BannerKind;
+    slug?: string;
+    etaSeconds?: number;
+    capabilities?: Record<string, string>;
+    /** monotonic id for keying React lists + de-dup */
+    seq: number;
+  };
+  type Card = {
+    kind: CardKind;
+    prompt: string;
+    actions: CardAction[];
+    failureCode?: string;
+    variant?: "per_user_cap" | "platform_capacity";
+  };
+  const [activeBanners, setActiveBanners] = useState<Banner[]>([]);
+  const [activeCard, setActiveCard] = useState<Card | null>(null);
+  const bannerSeq = useRef(0);
+
+  function pushBanner(b: Omit<Banner, "seq">) {
+    bannerSeq.current += 1;
+    const seq = bannerSeq.current;
+    setActiveBanners((prev) => [
+      { ...b, seq },
+      ...prev.filter((x) => x.kind !== b.kind),
+    ].slice(0, 3));
+  }
+  function clearBannersOfKind(kinds: BannerKind[]) {
+    setActiveBanners((prev) => prev.filter((b) => !kinds.includes(b.kind)));
+  }
 
   // Projects
   const [projects, setProjects] = useState<Project[]>([]);
@@ -690,6 +766,65 @@ export default function App() {
             prev.map((m) => m.id === asstMsgId ? { ...m, id: realId } : m)
           );
         },
+        // T100 — container-mode events. Each backend event maps to a
+        // banner update or a card replacement.
+        (evt) => {
+          switch (evt.type) {
+            case "instance_provisioning":
+              pushBanner({ kind: "provisioning", slug: evt.slug, etaSeconds: evt.estimated_seconds });
+              break;
+            case "instance_upstream_degraded":
+              pushBanner({ kind: "upstream_degraded", slug: evt.slug, capabilities: evt.capabilities });
+              break;
+            case "instance_busy":
+              pushBanner({ kind: "busy", slug: evt.slug });
+              break;
+            case "instance_terminating":
+              clearBannersOfKind(["provisioning", "upstream_degraded", "busy"]);
+              pushBanner({ kind: "terminating", slug: evt.slug });
+              break;
+            case "instance_retry_started":
+              pushBanner({ kind: "retry_started" });
+              break;
+            case "instance_failed":
+              setActiveCard({
+                kind: "failed",
+                prompt: "Something went wrong starting your environment.",
+                actions: evt.actions ?? [],
+                failureCode: evt.failure_code,
+              });
+              break;
+            case "instance_limit_exceeded":
+              if (evt.variant === "per_user_cap") {
+                setActiveCard({
+                  kind: "cap_exceeded",
+                  prompt: `You already have ${evt.active_chat_ids?.length ?? 0} active chats (cap=${evt.cap}). End one to start another.`,
+                  actions: evt.actions ?? [],
+                  variant: "per_user_cap",
+                });
+              } else {
+                setActiveCard({
+                  kind: "cap_exceeded",
+                  prompt: "The platform is at capacity right now. Please try again in a few minutes.",
+                  actions: [],
+                  variant: "platform_capacity",
+                });
+              }
+              break;
+            case "confirm":
+              setActiveCard({
+                kind: "confirm",
+                prompt: evt.prompt,
+                actions: evt.actions ?? [],
+              });
+              break;
+            case "tool_result":
+              // Pre-existing event — surfaced via the assistant-ui
+              // ToolResultBlock pipeline elsewhere. No-op here keeps
+              // the exhaustiveness gate satisfied.
+              break;
+          }
+        },
       );
     } finally {
       streamDone = true;
@@ -1106,6 +1241,60 @@ export default function App() {
               </div>
             );
           })()}
+          {(activeBanners.length > 0 || activeCard) && (
+            <div className="px-4 pt-2 pb-1 space-y-2">
+              {activeBanners.map((b) => (
+                <InstanceBanner
+                  key={b.seq}
+                  kind={b.kind}
+                  slug={b.slug}
+                  etaSeconds={b.etaSeconds}
+                  capabilities={b.capabilities}
+                />
+              ))}
+              {activeCard && (
+                <InstanceCard
+                  kind={activeCard.kind}
+                  prompt={activeCard.prompt}
+                  actions={activeCard.actions}
+                  failureCode={activeCard.failureCode}
+                  variant={activeCard.variant}
+                  onAction={async (a) => {
+                    // Cards close on any action so the user isn't
+                    // stuck looking at a stale card after acting.
+                    setActiveCard(null);
+                    if (a.link) {
+                      // Direct navigation (e.g. "/chat" Main Menu).
+                      window.location.assign(a.link);
+                      return;
+                    }
+                    if (a.action_id) {
+                      // Send the action_id back as a chat message —
+                      // assistant_endpoint switches on it.
+                      try {
+                        await fetch("/api/assistant", {
+                          method: "POST",
+                          credentials: "include",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            threadId: activeThreadId,
+                            commands: [{
+                              type: "add-message",
+                              message: { role: "user", parts: [{ type: "text", text: a.action_id }] },
+                            }],
+                            attachments: [],
+                            retry: false,
+                            mode: taskMode,
+                            projectId: activeProjectId,
+                          }),
+                        });
+                      } catch { /* best-effort; user can retry */ }
+                    }
+                  }}
+                />
+              )}
+            </div>
+          )}
           <ThreadErrorBoundary key={activeThreadId ?? "no-thread"}>
             <ThinkingContext.Provider value={{ steps: thinkingSteps }}>
               <TaskModeContext.Provider value={{ mode: taskMode, setMode: setTaskMode }}>
