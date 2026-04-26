@@ -41,3 +41,5 @@ alembic/versions/__pycache__/
 assistant-ui/
 claude-code-leak/
 artifacts/
+claudeflare.md
+github_pat.md

@@ -123,21 +123,30 @@ ON CONFLICT (category, key) DO UPDATE SET value = EXCLUDED.value;"
 
 ---
 
-## Blocker 2 — GitHub App (app_id + private key)
+## Blocker 2 — GitHub credentials (App OR PAT)
 
-### Why a GitHub App, not a personal token
+### Two supported modes
 
-The per-instance container is owned by an end user, not by you.
-Personal access tokens (PATs) tie auth to a single human account
-and grant access to *all* their repos. A GitHub App lets us:
+The system accepts EITHER of two credential shapes — pick one:
 
-- Mint short-lived (1-hour) install tokens scoped to one repo.
-- Rotate them automatically (the `rotate_github_token` job runs
-  every 45 min).
-- Limit blast radius — if a token leaks, it expires.
+| Mode | Best for | Setup time | Token lifetime | Repo coverage |
+|---|---|---|---|---|
+| **PAT** (Personal Access Token) | Single-developer dev setup | 2 min | Long (you set, up to no-expiry) | Every repo your account can reach |
+| **GitHub App** | Multi-tenant production | 8 min | 1 hour, auto-rotated | Per-installation; install on each repo |
 
-This is **strictly better** than a long-lived PAT in a multi-tenant
-setup.
+For a single-dev local setup, **PAT is fine and faster**. Skip ahead
+to "Mode B — Personal Access Token" below.
+
+For production / multi-developer / least-privilege, prefer the App
+path — installation tokens are short-lived and scoped per repo, so
+the blast radius of a leak is bounded to 1 hour.
+
+The code paths are unified: `services/credentials_service.py::
+GitHubAppConfig` accepts either shape; `github_push_token()` returns
+the PAT verbatim in PAT mode (no JWT minting, no exchange) and mints
+a fresh installation token in App mode. No other code changes.
+
+### Mode A — GitHub App (preferred for multi-tenant)
 
 ### What you need
 
@@ -233,6 +242,77 @@ docker compose exec -T postgres psql -U openclow -d openclow -c \
 ```
 
 (Or just run the seeder.)
+
+### Mode B — Personal Access Token (PAT, single-developer)
+
+#### What you need
+
+| Field | Example | Notes |
+|---|---|---|
+| `pat` | `ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789` | Classic or fine-grained; needs `repo` scope |
+
+#### 2.B.1 — Create the PAT
+
+1. Open https://github.com/settings/tokens (classic) or
+   https://github.com/settings/personal-access-tokens (fine-grained).
+2. Click **Generate new token (classic)** (recommended for this use case).
+3. Note: `tagh-devops-pat`
+4. Expiration: pick anything (the rotate cron treats PATs as non-expiring,
+   so expiry is your call — recommend 90 days for safety, "No expiration"
+   if you're a single developer who doesn't want token renewal hassle).
+5. Scopes: tick **`repo`** (full control of private repositories — covers
+   read + write to all your repos). That's all the orchestrator needs.
+6. Click **Generate token** at the bottom.
+7. **Copy the token immediately** — GitHub shows it once.
+
+#### 2.B.2 — Verify the PAT works
+
+```bash
+TOKEN="<paste here>"
+curl -s -H "Authorization: Bearer $TOKEN" https://api.github.com/user | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(f\"login={d.get('login')}, plan={d.get('plan',{}).get('name')}, public_repos={d.get('public_repos')}\")
+"
+# Should print your login + plan + repo count.
+```
+
+(Don't actually run this — the `tagh-devops` skill seeder validates the
+PAT for you without exposing it on shell argv.)
+
+#### 2.B.3 — Write the row
+
+Either use the seeder (`scripts/seed_platform_creds.py --only github_app`,
+which prompts whether to use App or PAT mode) or directly:
+
+```bash
+# Drop the PAT into a gitignored file first (safer than shell argv).
+echo "ghp_..." > github_pat.md
+chmod 600 github_pat.md
+echo "github_pat.md" >> .gitignore
+
+docker compose exec -T postgres psql -U openclow -d openclow <<EOF
+INSERT INTO platform_config (category, key, value, is_active)
+VALUES ('github_app', 'settings', jsonb_build_object('pat', '$(cat github_pat.md)'), true)
+ON CONFLICT (category, key) DO UPDATE SET value = EXCLUDED.value;
+EOF
+
+# Then delete the file:
+rm github_pat.md
+```
+
+#### Trade-offs of PAT mode
+
+- **Pro**: 1 token covers every repo your account can access — no
+  per-repo install dance.
+- **Pro**: 2-minute setup vs ~8 min for App.
+- **Con**: longer-lived (your expiry choice). If it leaks, blast
+  radius is whatever scope you granted, until you manually revoke.
+- **Con**: tied to your user account — if your account loses access
+  to a repo, the orchestrator does too.
+- **Neutral**: the `rotate_github_token` cron still runs but is a
+  no-op (returns the same PAT each rotation). If you want true
+  rotation, use App mode.
 
 ---
 

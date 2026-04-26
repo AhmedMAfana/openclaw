@@ -47,16 +47,48 @@ APP_JWT_TTL_SECONDS = 9 * 60
 
 @dataclasses.dataclass(frozen=True)
 class GitHubAppConfig:
-    """Deployment-level GitHub App settings.
+    """Deployment-level GitHub credentials.
 
     Loaded from `platform_config` (category='github_app') by the caller.
-    `private_key_pem` is the raw PEM string (starts with
-    `-----BEGIN RSA PRIVATE KEY-----` or `-----BEGIN PRIVATE KEY-----`).
+    Two supported shapes:
+
+      A) **GitHub App** (preferred for multi-tenant): set ``app_id`` +
+         ``private_key_pem``. The service mints fresh 1-hour installation
+         tokens per provision and the rotate-token cron refreshes every
+         45 min. Token blast-radius is bounded.
+
+      B) **Personal Access Token (PAT)** (single-developer ergonomic):
+         set ``pat`` only (leave ``app_id``/``private_key_pem`` blank).
+         The service returns the PAT verbatim with a far-future expiry
+         from ``github_push_token``. No rotation, no JWT minting, no
+         per-repo install needed — one credential covers every repo
+         the PAT can reach.
+
+    `private_key_pem` (App mode) is the raw PEM string (starts with
+    ``-----BEGIN RSA PRIVATE KEY-----`` or ``-----BEGIN PRIVATE KEY-----``).
+    `pat` (PAT mode) is a classic or fine-grained token starting
+    ``ghp_…`` / ``github_pat_…``.
     """
 
-    app_id: str
-    private_key_pem: str
+    app_id: str = ""
+    private_key_pem: str = ""
+    pat: str = ""
     api_base: str = "https://api.github.com"
+
+    def __post_init__(self) -> None:
+        # Either App credentials OR a PAT must be present. Belt + braces
+        # against a half-filled config row.
+        has_app = bool(self.app_id and self.private_key_pem)
+        has_pat = bool(self.pat)
+        if not (has_app or has_pat):
+            raise ValueError(
+                "GitHubAppConfig requires either (app_id + private_key_pem) "
+                "or pat to be set"
+            )
+
+    @property
+    def mode(self) -> str:
+        return "pat" if self.pat else "app"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -114,13 +146,37 @@ class CredentialsService:
         instance_id: UUID,
         repo: str,
     ) -> InstallationToken:
-        """Mint a 1-hour installation token scoped to the single repo.
+        """Return a token usable for `git clone`/`git push` against ``repo``.
+
+        Two paths depending on config mode:
+
+          * **App mode** — mints a fresh 1-hour installation token scoped
+            to the single repo (FR-023, research.md §3).
+          * **PAT mode** — returns the configured PAT verbatim with a
+            far-future expiry. No HTTP, no JWT, no per-repo install.
 
         Token is never persisted — caller either injects it into the
         instance container's env on compose up, or returns it over the
         `/internal/instances/<slug>/rotate-git-token` endpoint and
         immediately discards the local copy.
         """
+        if self._config.mode == "pat":
+            # PAT path: no exchange, no expiry chasing. Surface a far-
+            # future expiry so the rotate-cron treats it as fresh.
+            token = InstallationToken(
+                token=self._config.pat,
+                # +30 days; rotate cron will re-call this and get the
+                # same PAT back. Effectively "no rotation".
+                expires_at=time.time() + 30 * 24 * 3600,
+                repo=repo,
+            )
+            log.info(
+                "credentials.github_pat_returned",
+                instance_id=str(instance_id),
+                repo=repo,
+            )
+            return token
+
         jwt_token = self._sign_app_jwt()
         async with self._http_client_factory() as client:
             installation_id = await self._get_installation_id(client, repo, jwt_token)

@@ -624,13 +624,20 @@ async def _load_cloudflare_config() -> CloudflareConfig:
 
 
 async def _load_github_app_config() -> GitHubAppConfig:
-    """Read platform_config → GitHubAppConfig."""
+    """Read platform_config → GitHubAppConfig.
+
+    Accepts either of two row shapes:
+      * App mode: {"app_id": "...", "private_key_pem": "..."}
+      * PAT mode: {"pat": "ghp_..."}
+    See credentials_service.GitHubAppConfig for the trade-off.
+    """
     cfg = await get_config("github_app", "settings")
     if not cfg:
         raise RuntimeError("platform_config github_app/settings not configured")
     return GitHubAppConfig(
-        app_id=str(cfg["app_id"]),
-        private_key_pem=cfg["private_key_pem"],
+        app_id=str(cfg.get("app_id", "")),
+        private_key_pem=cfg.get("private_key_pem", ""),
+        pat=cfg.get("pat", ""),
     )
 
 

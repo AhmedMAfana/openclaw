@@ -91,10 +91,13 @@ def _check_platform_config() -> dict:
     Uses `docker compose exec postgres psql` rather than importing the
     app — keeps this script standalone, no Python deps to align.
     """
+    # github_app accepts either shape — encoded as a tuple-of-tuples.
+    # The check passes if AT LEAST ONE shape is fully satisfied.
+    SHAPE_GH_APP = (("app_id", "private_key_pem"), ("pat",))
     out = {"name": "platform_config", "ok": True, "rows": {}}
     for category, key, must_have in (
         ("cloudflare", "settings", ("account_id", "zone_id", "api_token")),
-        ("github_app", "settings", ("app_id", "private_key_pem")),
+        ("github_app", "settings", SHAPE_GH_APP),
     ):
         try:
             proc = subprocess.run(
@@ -127,15 +130,35 @@ def _check_platform_config() -> dict:
             blob = json.loads(raw)
         except json.JSONDecodeError:
             blob = {}
-        missing = [k for k in must_have if not blob.get(k)]
-        ok = not missing
+        # Single-shape vs alt-shapes branching.
+        if must_have and isinstance(must_have[0], tuple):
+            # Alt-shapes: pass if ANY shape is fully satisfied.
+            ok = any(all(blob.get(k) for k in shape) for shape in must_have)
+            missing = [] if ok else [
+                f"need EITHER {' + '.join(s)}" for s in must_have
+            ]
+            present = sorted(k for k in blob if blob.get(k))
+            mode = (
+                "pat" if blob.get("pat")
+                else "app" if blob.get("app_id") and blob.get("private_key_pem")
+                else "?"
+            )
+            out["rows"][f"{category}/{key}"] = {
+                "ok": ok,
+                "mode": mode,
+                "missing_fields": missing,
+                "present_fields": present,
+            }
+        else:
+            missing = [k for k in must_have if not blob.get(k)]
+            ok = not missing
+            out["rows"][f"{category}/{key}"] = {
+                "ok": ok,
+                "missing_fields": missing,
+                "present_fields": sorted(k for k in blob if blob.get(k)),
+            }
         if not ok:
             out["ok"] = False
-        out["rows"][f"{category}/{key}"] = {
-            "ok": ok,
-            "missing_fields": missing,
-            "present_fields": sorted(k for k in blob if blob.get(k)),
-        }
     return out
 
 
