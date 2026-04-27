@@ -1084,14 +1084,43 @@ async def assistant_endpoint(
                             wanted=container_instance.workspace_path,
                         )
                 # T070: if we're still provisioning (fresh chat or
-                # resuming from a prior teardown), render a non-blocking
-                # "starting up" banner so the user knows to expect a
-                # pause. The ~90s number is SC-002's cold-start budget.
+                # resuming from a prior teardown), surface an INLINE
+                # progress card in the thread (the existing
+                # __PROGRESS_CARD__ pattern that thread.tsx renders via
+                # WorkerProgressCard). The card is its own assistant
+                # message row so the LLM's response below it doesn't
+                # overwrite it. Live step updates are deferred (worker
+                # → chat-stream push channel is spec 002 territory) —
+                # for now the card sits as a "we're working on it"
+                # signal, and the LLM's reply on the next turn surfaces
+                # the live URL via the YOUR INSTANCE prompt block.
                 if container_instance.status == "provisioning":
-                    # The provisioning banner card is sufficient — no
-                    # LLM-voice impersonation in the text channel
-                    # (Change 3). The LLM still narrates around the card
-                    # in its own tokens once the agent runs.
+                    import json as _pcj
+                    _progress_card = {
+                        "title": "Spinning up your environment",
+                        "steps": [
+                            {"label": "Image pull + dependencies", "status": "running"},
+                            {"label": "Container startup", "status": "pending"},
+                            {"label": "Cloudflare tunnel", "status": "pending"},
+                            {"label": "App health check", "status": "pending"},
+                        ],
+                        "overall_status": "running",
+                        "elapsed": 0,
+                        "session_id": str(session_id),
+                    }
+                    try:
+                        await _save_message(
+                            session_id, user.id, "assistant",
+                            f"__PROGRESS_CARD__{_pcj.dumps(_progress_card)}",
+                            is_complete=False,
+                        )
+                    except Exception as _e:
+                        log.warning(
+                            "assistant.progress_card_save_failed",
+                            slug=container_instance.slug, error=str(_e),
+                        )
+                    # Keep the stream-event for any client that wants to
+                    # render a banner pill in addition (legacy path).
                     controller.add_data({
                         "type": "instance_provisioning",
                         "slug": container_instance.slug,

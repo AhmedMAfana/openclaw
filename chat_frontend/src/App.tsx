@@ -239,26 +239,19 @@ export default function App() {
   function dispatchInstanceEvent(evt: StreamEvent) {
     switch (evt.type) {
       case "instance_provisioning":
-        // Plan v2 Change 2: render provisioning as a full-width card
-        // (the user explicitly asked for this — the banner pill was
-        // too thin to convey "the platform is working for me right
-        // now"). The card's body has a live elapsed counter against
-        // the ETA. Replaces any stale failure card from a prior
-        // attempt; clears terminating / busy / retry banners.
+        // Plan v3: provisioning is now an INLINE thread message via the
+        // existing WorkerProgressCard pattern (`__PROGRESS_CARD__` prefix
+        // on a real assistant message — see thread.tsx::WorkerProgressCard
+        // and src/openclow/api/routes/assistant.py auto-provision block).
+        // The hovering card is gone. This branch is now a no-op (and any
+        // stale failure card from a prior attempt gets cleared).
+        setActiveCard(null);
         clearBannersOfKind([
           "terminating",
           "busy",
           "retry_started",
           "provisioning",
         ]);
-        setActiveCard({
-          kind: "provisioning",
-          prompt: "Spinning up your environment",
-          actions: [],
-          slug: evt.slug,
-          etaSeconds: evt.estimated_seconds,
-          startedAtMs: Date.now(),
-        });
         break;
       case "instance_upstream_degraded":
         pushBanner({ kind: "upstream_degraded", slug: evt.slug, capabilities: evt.capabilities });
