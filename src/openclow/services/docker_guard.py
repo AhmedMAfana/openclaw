@@ -11,6 +11,9 @@ Allows safe operations like:
 import asyncio
 import os
 import re
+import shutil
+
+from openclow.utils.docker_path import get_docker_env
 
 import json
 import socket
@@ -29,13 +32,19 @@ _host_detect_done = False
 
 
 async def _detect_host_workspace_path() -> str | None:
-    """Auto-detect the real host path for /workspaces.
+    """Auto-detect the real host path for the workspace base path.
 
     The worker runs inside a container but uses the HOST Docker socket.
     Project docker-compose files have relative volume mounts (./:/var/www).
     These must resolve on the HOST filesystem, not the container filesystem.
 
-    We inspect our own container to find where /workspaces is mounted from.
+    Tries multiple strategies so it works in any environment (Docker Desktop,
+    Linux Docker, rootless, etc.) without hardcoded paths:
+      1. WORKSPACE_HOST_PATH env var — explicit override
+      2. Cache file — written by a previous successful detection
+      3. docker inspect — works when docker CLI is available
+      4. /proc/self/mountinfo fallback — works on Linux without docker CLI
+
     Handles Docker Desktop Mac's /host_mnt/ prefix automatically.
     """
     global _host_workspace_path, _host_detect_done
@@ -43,7 +52,31 @@ async def _detect_host_workspace_path() -> str | None:
         return _host_workspace_path
 
     _host_detect_done = True
+    from openclow.settings import settings
 
+    # Strategy 1 — explicit env override (highest priority, portable)
+    env_path = os.environ.get("WORKSPACE_HOST_PATH")
+    if env_path:
+        _host_workspace_path = env_path
+        log.info("docker_guard.host_path_from_env", path=env_path)
+        return env_path
+
+    # Strategy 2 — cache file shared between services (e.g. worker -> api)
+    cache_file = os.path.join(settings.workspace_base_path, ".openclow_host_path")
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file) as f:
+                cached = f.read().strip()
+            if cached:
+                _host_workspace_path = cached
+                log.info("docker_guard.host_path_from_cache", path=cached)
+                return cached
+        except Exception:
+            pass
+
+    source: str | None = None
+
+    # Strategy 3 — docker inspect (requires docker CLI)
     try:
         container_id = socket.gethostname()
         proc = await asyncio.create_subprocess_exec(
@@ -51,28 +84,55 @@ async def _detect_host_workspace_path() -> str | None:
             "--format", '{{json .Mounts}}',
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=get_docker_env(),
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-        if proc.returncode != 0:
-            log.warning("docker_guard.self_inspect_failed")
-            return None
-
-        mounts = json.loads(stdout.decode())
-        for mount in mounts:
-            if mount.get("Destination") == "/workspaces":
-                source = mount.get("Source", "")
-                # Docker Desktop Mac adds /host_mnt/ prefix — strip it
-                if source.startswith("/host_mnt/"):
-                    source = source[len("/host_mnt"):]  # keeps the leading /
-                _host_workspace_path = source
-                log.info("docker_guard.host_path_detected", path=source)
-                return source
-
-        log.warning("docker_guard.no_workspace_mount")
-        return None
+        if proc.returncode == 0:
+            mounts = json.loads(stdout.decode())
+            for mount in mounts:
+                if mount.get("Destination") == settings.workspace_base_path:
+                    source = mount.get("Source", "")
+                    break
     except Exception as e:
-        log.warning("docker_guard.detect_failed", error=str(e))
-        return None
+        log.debug("docker_guard.docker_inspect_failed", error=str(e))
+
+    # Strategy 4 — /proc/self/mountinfo (Linux, no docker CLI needed)
+    if not source and os.path.exists("/proc/self/mountinfo"):
+        try:
+            with open("/proc/self/mountinfo") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 5 and parts[4] == settings.workspace_base_path:
+                        # parts[3] is the relative mount root, parts[4] is the mount point
+                        # For bind mounts, the host path is in parts[3]
+                        candidate = parts[3]
+                        # Docker Desktop Mac uses /host_mnt prefix in mountinfo too
+                        if candidate.startswith("/host_mnt/"):
+                            candidate = candidate[len("/host_mnt"):]
+                        # Ignore named-volume paths (they contain /docker/volumes/)
+                        if "/docker/volumes/" not in candidate:
+                            source = candidate
+                            break
+        except Exception as e:
+            log.debug("docker_guard.mountinfo_failed", error=str(e))
+
+    if source:
+        # Docker Desktop Mac adds /host_mnt/ prefix — strip it
+        if source.startswith("/host_mnt/"):
+            source = source[len("/host_mnt"):]
+        _host_workspace_path = source
+        log.info("docker_guard.host_path_detected", path=source)
+        # Write cache so other services (api, etc.) can reuse without docker CLI
+        try:
+            with open(cache_file, "w") as f:
+                f.write(source)
+        except Exception:
+            pass
+        return source
+
+    log.warning("docker_guard.no_workspace_mount",
+                expected=settings.workspace_base_path)
+    return None
 
 # ─────────────────────────────────────────────
 # Allowlist: these Docker subcommands are safe
@@ -155,10 +215,12 @@ def _extract_docker_subcommand(cmd: str) -> str | None:
     cmd = cmd.strip()
     parts = cmd.split()
 
-    # Find 'docker' in the command
-    try:
-        idx = parts.index("docker")
-    except ValueError:
+    # Find 'docker' in the command — handles both "docker" and "/path/to/docker"
+    idx = next(
+        (i for i, p in enumerate(parts) if p == "docker" or p.endswith("/docker")),
+        None,
+    )
+    if idx is None:
         return None
 
     remaining = parts[idx + 1:]
@@ -251,9 +313,17 @@ async def run_docker(
         log.warning("docker_guard.blocked", command=cmd_str[:200], reason=reason)
         return -1, f"BLOCKED: {reason}"
 
-    # Run the command
-    env = {**os.environ}
+    # Run the command — resolve absolute docker binary path so subprocess exec
+    # doesn't depend on PATH lookup (MCP server subprocesses may inherit a minimal env).
+    env = get_docker_env()
     final_args = list(args)
+    from openclow.utils.docker_path import get_docker_bin
+    try:
+        docker_bin = get_docker_bin()
+        if final_args and final_args[0] == "docker":
+            final_args[0] = docker_bin
+    except FileNotFoundError as e:
+        return -1, f"Docker binary not found: {e}"
 
     # Port isolation: inject unique port env vars so projects don't conflict
     if project_id and "compose" in cmd_str:
@@ -356,12 +426,19 @@ async def run_docker_compose(
             compose_file="docker-compose.yml",
             compose_project="openclow-trade-bot",
             actor="bootstrap",
-            cwd="/workspaces/_cache/trade-bot",
+            cwd="/path/to/workspace/_cache/trade-bot",
         )
     """
     args = ["docker", "compose"]
     if compose_file:
         args.extend(["-f", compose_file])
+        # Mimic default docker compose behavior: auto-load override file
+        # when the main file is the standard docker-compose.yml/yaml.
+        if os.path.basename(compose_file) in ("docker-compose.yml", "docker-compose.yaml"):
+            _override_dir = cwd or "."
+            _override_path = os.path.join(_override_dir, "docker-compose.override.yml")
+            if os.path.exists(_override_path):
+                args.extend(["-f", "docker-compose.override.yml"])
     if compose_project:
         args.extend(["-p", compose_project])
     args.extend(compose_args)

@@ -4,7 +4,7 @@ Slack is for team members, not admins. Admin commands (addproject, docker,
 bootstrap, logs, settings) are managed via Telegram or the Settings Dashboard.
 
 Note: Slack reserves /status, /help, /join, /leave, /me, etc.
-We prefix with /oc- (OpenClow) to avoid conflicts.
+We prefix with /oc- (TAGH Dev) to avoid conflicts.
 """
 from __future__ import annotations
 

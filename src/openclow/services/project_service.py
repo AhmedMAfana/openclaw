@@ -3,6 +3,12 @@ from sqlalchemy import select
 
 from openclow.models import Project, async_session
 
+# Default mode for newly created projects (FR-035). Existing rows retain their
+# prior value (FR-034). The DB-layer CHECK constraint (migration 012) and the
+# Project model's own default both reflect this; this constant exists so tests
+# and any non-ORM create-paths can assert parity in one place.
+DEFAULT_PROJECT_MODE = "container"
+
 
 async def get_all_projects(include_inactive: bool = False) -> list[Project]:
     async with async_session() as session:

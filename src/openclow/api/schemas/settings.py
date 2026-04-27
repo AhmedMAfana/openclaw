@@ -86,6 +86,15 @@ class ProjectUpdate(BaseModel):
     docker_compose_file: str | None = None
     app_container_name: str | None = None
     app_port: int | None = None
+    # Host mode + public URL
+    mode: str | None = None
+    project_dir: str | None = None
+    start_command: str | None = None
+    stop_command: str | None = None
+    health_url: str | None = None
+    process_manager: str | None = None
+    public_url: str | None = None
+    tunnel_enabled: bool | None = None
 
 
 class ProjectResponse(BaseModel):
@@ -100,6 +109,14 @@ class ProjectResponse(BaseModel):
     app_container_name: str | None
     app_port: int | None
     status: str
+    mode: str = "docker"
+    project_dir: str | None = None
+    start_command: str | None = None
+    stop_command: str | None = None
+    health_url: str | None = None
+    process_manager: str | None = None
+    public_url: str | None = None
+    tunnel_enabled: bool = True
     model_config = ConfigDict(from_attributes=True)
 
 

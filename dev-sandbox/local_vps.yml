@@ -1,0 +1,21 @@
+# Local "VPS" process list — run each sample app on its reserved port.
+# Structure mirrors what pm2/systemd would do on a real VPS.
+#
+# Paths under `cwd` are RELATIVE to dev-sandbox/. The sample apps are tracked
+# under dev-sandbox/sample-apps/ so contributors can run the whole flow locally.
+
+processes:
+  - name: sim-fastapi
+    cwd: ./sample-apps/sim-fastapi
+    cmd: [".venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8101"]
+    port: 8101
+    env_file: ../env/sim-fastapi.env
+    health_url: http://127.0.0.1:8101/
+
+  # Add more sample apps here as needed:
+  # - name: sim-next
+  #   cwd: ./sample-apps/sim-next
+  #   cmd: ["npm", "start"]
+  #   env: { PORT: "8102", NODE_ENV: "production" }
+  #   port: 8102
+  #   health_url: http://127.0.0.1:8102/

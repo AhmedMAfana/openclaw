@@ -14,6 +14,7 @@ from openclow.providers.registry import get_chat_provider, get_git_provider, get
 # Each import is guarded — missing optional deps shouldn't crash the whole app.
 import openclow.providers.llm.claude  # noqa: F401
 import openclow.providers.chat.telegram  # noqa: F401
+import openclow.providers.chat.web  # noqa: F401
 import openclow.providers.git.github  # noqa: F401
 
 try:
@@ -68,16 +69,22 @@ async def get_chat_by_type(provider_type: str) -> ChatProvider:
     key = f"chat.{provider_type}"
     async with _lock:
         if key not in _instances:
-            from openclow.services.config_service import get_provider_config_by_type
-            config = await get_provider_config_by_type("chat", provider_type)
-            if not config:
-                raise ValueError(
-                    f"No config found for chat provider '{provider_type}'. "
-                    f"Configure it via Settings Dashboard → Chat."
-                )
-            provider = get_chat_provider(provider_type, config)
-            _make_factory_managed(provider)
-            _instances[key] = provider
+            # Web provider is always available — no DB config needed, just Redis URL from settings
+            if provider_type == "web":
+                provider = get_chat_provider("web", {})
+                _make_factory_managed(provider)
+                _instances[key] = provider
+            else:
+                from openclow.services.config_service import get_provider_config_by_type
+                config = await get_provider_config_by_type("chat", provider_type)
+                if not config:
+                    raise ValueError(
+                        f"No config found for chat provider '{provider_type}'. "
+                        f"Configure it via Settings Dashboard → Chat."
+                    )
+                provider = get_chat_provider(provider_type, config)
+                _make_factory_managed(provider)
+                _instances[key] = provider
     return _instances[key]
 
 

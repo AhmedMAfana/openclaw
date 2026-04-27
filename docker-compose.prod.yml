@@ -1,0 +1,117 @@
+# Staging / production override — use with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml ...
+#
+# This file intentionally drops the dev-only niceties from
+# docker-compose.override.yml (which compose only auto-loads when NO -f flags
+# are passed): no source bind-mounts, no watchfiles reload, no public Postgres
+# or Redis ports. The api binds only to 127.0.0.1 so nginx is the single
+# public entry point.
+services:
+  api:
+    command: >
+      bash -c "
+        if [ -z \"$$WEB_CHAT_JWT_SECRET\" ]; then
+          JWT_FILE=/home/openclow/.claude/.jwt_secret;
+          [ -f $$JWT_FILE ] || openssl rand -hex 32 > $$JWT_FILE;
+          export WEB_CHAT_JWT_SECRET=$$(cat $$JWT_FILE);
+          echo '[api] WEB_CHAT_JWT_SECRET loaded from volume';
+        fi;
+        exec uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 10
+      "
+    ports: !override
+      - "127.0.0.1:8000:8000"
+    # !override replaces the base's volume list wholesale — critical because
+    # the base bind-mounts ./src and ./chat_frontend/dist for dev live-reload,
+    # which would mask the code + frontend built into the prod image.
+    volumes: !override
+      - activity_logs:/app/logs
+      - workspaces:/workspaces
+      - claude_auth:/home/openclow/.claude
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./auth.json:/app/auth.json:ro
+      # Bind-mount source + alembic + frontend dist so Python / migration /
+      # built-frontend changes ship via `git pull && docker compose restart`,
+      # no image rebuild. Tradeoff: the running code is whatever's at
+      # /home/web/vhosts/openclow/app on the host, not what was baked into
+      # the image. For staging that's the right call (5 s restart vs 5+ min
+      # rebuild). For real prod, drop these mounts and rebuild on every
+      # change — the image becomes the immutable source of truth.
+      - ./src:/app/src
+      - ./alembic:/app/alembic
+      # Mount the built frontend read-only — lets us ship UX-only changes
+      # via `npm run build` locally + `rsync dist/` to the host + `docker
+      # compose up -d api`. Keep the host dir populated (the image bakes a
+      # fallback bundle, but an empty host dir would mask it and 404). The
+      # :ro keeps the container from mutating host files.
+      - ./chat_frontend/dist:/app/chat_frontend/dist:ro
+      # Host-mode projects live at /srv/projects/<name> on the host
+      # (typically symlinked to /home/web/vhosts/<name>/htdocs/live).
+      - /srv/projects:/srv/projects:rw
+      - /home/web/vhosts:/home/web/vhosts:rw
+    environment:
+      - LOG_LEVEL=INFO
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  bot:
+    # base already uses the image's CMD; just pin limits and log level.
+    environment:
+      - LOG_LEVEL=INFO
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+  worker:
+    command: >
+      bash -c "
+        chmod 666 /var/run/docker.sock 2>/dev/null || true;
+        exec su -l openclow -c 'arq openclow.worker.arq_app.WorkerSettings'
+      "
+    user: root
+    # Same reason as api: replace base volumes so ./src and ./dev-sandbox
+    # bind-mounts don't leak in from docker-compose.override.yml.
+    volumes: !override
+      - workspaces:/workspaces
+      - claude_auth:/home/openclow/.claude
+      - activity_logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./auth.json:/app/auth.json:ro
+      # Bind-mount source + alembic so Python edits ship via restart, not rebuild.
+      - ./src:/app/src
+      - ./alembic:/app/alembic
+      # Host-mode projects — see api.volumes for context.
+      - /srv/projects:/srv/projects:rw
+      # /srv/projects/<name> is typically a symlink to /home/web/vhosts/<name>/htdocs/live —
+      # mount the symlink target too so the link resolves inside the container.
+      - /home/web/vhosts:/home/web/vhosts:rw
+    environment:
+      - LOG_LEVEL=INFO
+      - DOCKER_BIN=/usr/bin/docker
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  postgres:
+    # Remove any host port published by override files — only reachable on the
+    # compose network. Cap memory so a runaway query can't OOM the host.
+    ports: !reset []
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  redis:
+    ports: !reset []
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  dozzle:
+    # Log viewer — loopback only, reach it via SSH tunnel.
+    ports:
+      - "127.0.0.1:9999:8080"

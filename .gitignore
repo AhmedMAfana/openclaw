@@ -1,5 +1,6 @@
 # Secrets
 tokens.txt
+tokens.md
 *.secret
 
 # Environment
@@ -35,3 +36,10 @@ Thumbs.db
 alembic/versions/__pycache__/
 *.png
 .playwright-mcp/
+
+# Vendored / reference repos — not part of this project
+assistant-ui/
+claude-code-leak/
+artifacts/
+claudeflare.md
+github_pat.md

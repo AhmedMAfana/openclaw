@@ -17,6 +17,9 @@ import os
 import re
 import shutil
 
+from openclow.utils.docker_path import get_docker_env
+import time
+
 from sqlalchemy import select
 
 from openclow.models import Project, async_session
@@ -25,6 +28,14 @@ from openclow.settings import settings
 from openclow.utils.logging import get_logger
 
 log = get_logger()
+
+# Appended to every sub-agent system prompt — prevents the single most common hang.
+_NO_DOCKER_SOCKET = (
+    " NEVER run 'curl --unix-socket /run/docker.sock' or any raw Docker API call"
+    " via docker_exec inside a project container — the socket is NOT mounted there"
+    " and the call hangs forever. Use ONLY MCP tools (compose_ps, compose_up,"
+    " container_logs, docker_exec for app commands) for all Docker operations."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -54,34 +65,49 @@ DOCKER-COMPOSE CONTENTS:
 YOUR MISSION — execute these steps IN ORDER:
 
 STEP 2 — INSTALL DEPENDENCIES:
-- Read the project to understand the package manager (composer, npm, pip, etc.)
-- For DOCKERIZED projects: usually SKIP — Docker handles deps at build time
-- For non-dockerized: run the install command
-- Verify deps exist (vendor/, node_modules/, .venv/, etc.)
-- Output: STEP_DONE: 2 <short result> OR STEP_SKIP: 2 <reason>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE: If docker-compose.yml OR docker-compose.yaml EXISTS in the workspace →
+      output STEP_SKIP: 2 docker-handles-deps IMMEDIATELY. No reading package.json.
+      No running npm/composer/pip. Docker build handles all dependencies.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For non-dockerized projects ONLY: run the install command on the host.
+Output: STEP_DONE: 2 <short result> OR STEP_SKIP: 2 <reason>
 
 STEP 3 — BUILD FRONTEND:
-- If package.json exists with a build script, check if assets already compiled
-- If the Dockerfile or docker-compose handles the build: SKIP
-- If no frontend or assets already built: SKIP
-- ONLY build on host if no Docker build step AND no compiled assets exist
-- Output: STEP_DONE: 3 <short result> OR STEP_SKIP: 3 <reason>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE: If docker-compose.yml EXISTS → output STEP_SKIP: 3 docker-handles-build IMMEDIATELY.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For non-dockerized projects ONLY: check if assets need building and build them.
+Output: STEP_DONE: 3 <short result> OR STEP_SKIP: 3 <reason>
 
 STEP 4 — START DOCKER CONTAINERS:
-- Use compose_up(build=True) for the first attempt — it handles build + start automatically.
-  compose_up with build=True runs 'compose build' then 'compose up -d' as separate steps,
-  which correctly handles Docker-in-Docker path translation (build contexts use container
-  paths, volume mounts use host paths).
-- You also have compose_build() if you need to build images separately before starting.
-- If it FAILS — THIS IS CRITICAL:
-  * Read the error output carefully
-  * DIAGNOSE the root cause (missing env vars? ARM image issue? port conflict? build failure?)
-  * Output DIAGNOSIS: <your analysis>
-  * FIX IT (edit docker-compose.yml, .env, Dockerfile — whatever is needed)
-  * Output ACTION: <what you're fixing>
-  * Retry compose_up (or compose_build then compose_up if the build step is what failed)
-  * You get up to 3 fix attempts
-- After containers start, verify ALL are running via Docker MCP list_containers
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MANDATORY: Always call compose_build() FIRST, then compose_up().
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4a. Build images:
+    STATUS: Building Docker images — this may take 5-20 minutes, please wait...
+    → compose_build("{compose}", "{compose_project}", "{workspace}")
+
+    compose_build responses:
+    - "DONE ..." → build succeeded, proceed to 4b immediately
+    - "FAILED ..." → read the error, fix the Dockerfile/.env/docker-compose.yml, retry once
+    - "BUILDING ..." → build is running in the background (ARM builds take 5-20min).
+      YOU MUST poll with compose_build_status("{compose_project}") every 30s.
+      Keep polling until it returns "DONE" or "FAILED". Output STATUS: Building... each poll.
+      Do NOT call compose_up until compose_build_status returns "DONE".
+      Do NOT output STEP_DONE: 4 until containers are actually confirmed running.
+
+4b. Start containers (fast, <30s):
+    STATUS: Starting containers...
+    → compose_up("{compose}", "{compose_project}", "{workspace}")
+
+4c. Verify all containers are running:
+    → compose_ps("{compose_project}")
+    → list_containers("{compose_project}")
+    For any container NOT running: read container_logs, diagnose, fix.
+    You get up to 3 fix attempts total.
+
 - Output: STEP_DONE: 4 <X/Y containers running>
 
 STEP 5 — DATABASE MIGRATIONS:
@@ -155,6 +181,20 @@ async def _set_project_status(project_id: int, status: str):
             await session.commit()
 
 
+async def _save_project_port(project_id: int, port: int):
+    """Persist the allocated host port to project.app_port.
+
+    Required so the tunnel health loop (which filters by app_port IS NOT NULL)
+    can find this project and auto-restart its tunnel if it dies.
+    """
+    async with async_session() as session:
+        result = await session.execute(select(Project).where(Project.id == project_id))
+        proj = result.scalar_one_or_none()
+        if proj and proj.app_port != port:
+            proj.app_port = port
+            await session.commit()
+
+
 # ---------------------------------------------------------------------------
 # Shell helpers
 # ---------------------------------------------------------------------------
@@ -182,7 +222,7 @@ async def _run(*args: str, cwd: str = None, timeout: int = 300,
             cwd=cwd, timeout=docker_timeout,
         )
 
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    env = get_docker_env({**os.environ, "GIT_TERMINAL_PROMPT": "0"})
     try:
         from openclow.services.config_service import get_config
         config = await get_config("git", "provider")
@@ -220,44 +260,10 @@ async def _run(*args: str, cwd: str = None, timeout: int = 300,
     return rc, output
 
 
-async def _run_shell(cmd: str, cwd: str = None, timeout: int = 300) -> tuple[int, str]:
-    """Run a shell command string."""
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    try:
-        from openclow.services.config_service import get_config
-        config = await get_config("git", "provider")
-        if config and config.get("token"):
-            env["GH_TOKEN"] = config["token"]
-            env["GITHUB_TOKEN"] = config["token"]
-    except Exception:
-        pass
-
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            cmd, cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        combined = (stdout.decode() + stderr.decode()).strip()
-        return proc.returncode, combined[-4000:]
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return -1, f"TIMEOUT after {timeout}s"
-    except Exception as e:
-        return -1, str(e)
-
-
-# ---------------------------------------------------------------------------
 # Telegram reporters (shared services)
 # ---------------------------------------------------------------------------
 
 from openclow.services.checklist_reporter import ChecklistReporter  # noqa: E402
-from openclow.services.status_reporter import LineReporter as StatusReporter  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +307,91 @@ async def _step_env(on_progress, workspace: str, compose: str) -> str:
         return "no .env found (may be fine)"
 
 
+def _ensure_restart_policy(workspace: str) -> None:
+    """Inject `restart: unless-stopped` into every service via compose override.
+
+    Framework compose files (Laravel Sail, etc.) don't include restart policies, so
+    containers die when Docker restarts and never come back. We create/update a
+    docker-compose.override.yml in the workspace that adds the policy to all services.
+
+    Idempotent — regenerates the file each time, which is safe.
+    """
+    import subprocess
+
+    compose_path = os.path.join(workspace, "docker-compose.yml")
+    if not os.path.exists(compose_path):
+        return
+
+    # Read service names from the compose file
+    result = subprocess.run(
+        ["docker", "compose", "-f", compose_path, "config", "--services"],
+        capture_output=True, text=True, timeout=10, env=get_docker_env(),
+    )
+    if result.returncode != 0:
+        return
+
+    services = [s.strip() for s in result.stdout.strip().split("\n") if s.strip()]
+    if not services:
+        return
+
+    lines = ["# Auto-generated by TAGH Dev preflight — adds restart policy to all services",
+             "# Ensures containers survive Docker/worker restarts without manual intervention",
+             "services:"]
+    for svc in services:
+        lines.append(f"  {svc}:")
+        lines.append("    restart: unless-stopped")
+
+    override_path = os.path.join(workspace, "docker-compose.override.yml")
+    with open(override_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+    log.info("preflight.restart_policy_written", services=services)
+
+
+def _patch_sail_dockerfile_if_needed(workspace: str) -> None:
+    """Patch Laravel Sail vendor Dockerfile to survive npm compatibility issues.
+
+    On arm64 (Apple Silicon) with certain Node.js versions, `npm install -g npm`
+    fails because of broken native modules (e.g. promise-retry). Making the step
+    non-fatal with `|| true` lets the build complete with the bundled npm version,
+    which is perfectly fine for Laravel development.
+
+    Only patches when the sail-8.4/app image doesn't exist yet — once the image is
+    built, it's shared across ALL projects (Docker image name is fixed) so this code
+    path is skipped on every subsequent bootstrap.
+    Idempotent: safe to call multiple times.
+    """
+    import re
+    import subprocess
+
+    # Skip if the shared sail image already exists — no rebuild will happen
+    check = subprocess.run(
+        ["docker", "image", "inspect", "sail-8.4/app"],
+        capture_output=True, timeout=5, env=get_docker_env(),
+    )
+    if check.returncode == 0:
+        return  # Image cached — Dockerfile won't be executed
+
+    sail_dockerfile = os.path.join(workspace, "vendor/laravel/sail/runtimes/8.4/Dockerfile")
+    if not os.path.exists(sail_dockerfile):
+        return  # Not a Laravel Sail 8.4 project
+
+    with open(sail_dockerfile) as f:
+        content = f.read()
+
+    # Replace `npm install -g npm \` with the non-fatal variant (idempotent via negative lookahead)
+    patched, n = re.subn(
+        r'(npm install -g npm)(?!\s*--force)(\s*\\)',
+        r'\1 --force 2>/dev/null || true\2',
+        content,
+    )
+    if n:
+        with open(sail_dockerfile, "w") as f:
+            f.write(patched)
+        log.info("preflight.sail_dockerfile_patched", path=sail_dockerfile,
+                 reason="npm self-upgrade non-fatal (arm64 + Node.js compatibility)")
+
+
 async def _preflight(project, workspace: str, compose: str, compose_project: str):
     """Pre-bootstrap/repair cleanup and verification. Runs BEFORE the agent starts.
 
@@ -317,16 +408,18 @@ async def _preflight(project, workspace: str, compose: str, compose_project: str
     """
     from openclow.services.docker_guard import run_docker_compose, _detect_host_workspace_path
     from openclow.services.port_allocator import get_port_env_vars
-    import subprocess
 
     # 1. Verify Docker daemon is accessible
+    _denv = get_docker_env()
     try:
-        result = subprocess.run(
-            ["docker", "info", "--format", "{{.ServerVersion}}"],
-            capture_output=True, text=True, timeout=5,
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "info", "--format", "{{.ServerVersion}}",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=_denv,
         )
-        if result.returncode != 0:
-            log.error("preflight.docker_unavailable", stderr=result.stderr[:200])
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+        if proc.returncode != 0:
+            log.error("preflight.docker_unavailable", stderr=stderr.decode()[:200])
             raise RuntimeError("Docker daemon is not running or not accessible")
     except FileNotFoundError:
         raise RuntimeError("Docker CLI not found")
@@ -345,37 +438,42 @@ async def _preflight(project, workspace: str, compose: str, compose_project: str
 
     # 3. Kill orphan stacks with task ID suffixes (openclow-{name}-{taskid})
     try:
-        result = subprocess.run(
-            ["docker", "ps", "-a", "--filter", f"name=openclow-{project.name}-",
-             "--format", "{{.Names}}"],
-            capture_output=True, text=True, timeout=5,
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "ps", "-a", "--filter", f"name=openclow-{project.name}-",
+            "--format", "{{.Names}}",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=_denv,
         )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
         orphans = set()
-        for name in result.stdout.strip().split("\n"):
+        for name in stdout.decode().strip().split("\n"):
             name = name.strip()
             if not name:
                 continue
-            # Extract compose project from container name (e.g. openclow-tagh-fre-abc12345-app-1 → openclow-tagh-fre-abc12345)
-            parts = name.rsplit("-", 1)  # Remove service suffix (-1)
+            parts = name.rsplit("-", 1)
             if len(parts) == 2:
-                stack = parts[0].rsplit("-", 1)[0]  # Remove service name
+                stack = parts[0].rsplit("-", 1)[0]
                 if stack != compose_project and stack.startswith(f"openclow-{project.name}"):
                     orphans.add(stack)
         for orphan in orphans:
             log.warning("preflight.cleaning_orphan", stack=orphan)
-            subprocess.run(
-                ["docker", "compose", "-p", orphan, "down", "--remove-orphans"],
-                capture_output=True, timeout=30,
+            orphan_proc = await asyncio.create_subprocess_exec(
+                "docker", "compose", "-p", orphan, "down", "--remove-orphans",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=_denv,
             )
+            await asyncio.wait_for(orphan_proc.communicate(), timeout=30)
     except Exception:
         pass
 
     # 4. Prune dangling networks (leftover from failed compose down)
     try:
-        subprocess.run(
-            ["docker", "network", "prune", "-f"],
-            capture_output=True, timeout=10,
+        prune_proc = await asyncio.create_subprocess_exec(
+            "docker", "network", "prune", "-f",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=_denv,
         )
+        await asyncio.wait_for(prune_proc.communicate(), timeout=10)
     except Exception:
         pass
 
@@ -387,7 +485,7 @@ async def _preflight(project, workspace: str, compose: str, compose_project: str
             env_content = f.read()
         lines = [l for l in env_content.split("\n")
                  if not any(l.startswith(f"{k}=") for k in port_vars)]
-        lines.append("\n# OpenClow port isolation (auto-generated)")
+        lines.append("\n# TAGH Dev port isolation (auto-generated)")
         for k, v in port_vars.items():
             lines.append(f"{k}={v}")
         with open(env_path, "w") as f:
@@ -410,17 +508,21 @@ async def _preflight(project, workspace: str, compose: str, compose_project: str
     app_port = port_vars.get("APP_PORT", "")
     if app_port:
         try:
-            result = subprocess.run(
-                ["docker", "ps", "--filter", f"publish={app_port}", "--format", "{{.Names}}"],
-                capture_output=True, text=True, timeout=5,
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "ps", "--filter", f"publish={app_port}", "--format", "{{.Names}}",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=_denv,
             )
-            for container in result.stdout.strip().split("\n"):
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            for container in stdout.decode().strip().split("\n"):
                 container = container.strip()
                 if container and container != f"{compose_project}-{project.app_container_name or 'app'}-1":
-                    subprocess.run(
-                        ["docker", "stop", container],
-                        capture_output=True, timeout=10,
+                    stop_proc = await asyncio.create_subprocess_exec(
+                        "docker", "stop", container,
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                        env=_denv,
                     )
+                    await asyncio.wait_for(stop_proc.communicate(), timeout=10)
                     log.info("preflight.stopped_port_conflict", container=container, port=app_port)
         except Exception:
             pass
@@ -430,142 +532,18 @@ async def _preflight(project, workspace: str, compose: str, compose_project: str
     if not os.path.exists(compose_path):
         raise RuntimeError(f"Compose file not found: {compose_path}")
 
+    # 10. Patch sail vendor Dockerfile for arm64/Node.js npm compatibility
+    #     `npm install -g npm` fails on certain Node/arm64 combos (missing promise-retry).
+    #     Makes it non-fatal so builds succeed. Only runs when sail-8.4/app image is missing.
+    _patch_sail_dockerfile_if_needed(workspace)
+
+    # 11. Ensure restart policy — project containers survive worker/Docker restarts
+    #     Docker Compose files from frameworks (Laravel Sail, etc.) don't include restart
+    #     policies. We inject them via compose override so containers auto-recover.
+    _ensure_restart_policy(workspace)
+
     log.info("preflight.done", project=project.name, host_path=host_path,
              ports=f"app={app_port}")
-
-
-async def _step_docker_up(
-    checklist: ChecklistReporter, project, workspace: str, compose: str, compose_project: str,
-) -> bool:
-    """Step 4: Start Docker containers — generic for ANY project.
-
-    Python-driven with live polling:
-    1. docker compose up -d (through docker_guard for host path + ports)
-    2. Poll every 5s for 90s — show "X/Y running"
-    3. On failure — extract clean error per container from logs
-    4. If stuck — call Doctor agent to diagnose
-    No hardcoded container names or tech stack assumptions.
-
-    ⚠️ LEGACY FUNCTION — Use _run_master_agent() instead.
-    This function is kept for backward compatibility and may still be used by
-    health_task.py for periodic repairs. The main bootstrap flow now uses the
-    master agent which handles Docker operations inline with self-healing.
-
-    Alternative: _run_master_agent(checklist, project, workspace, compose, compose_project, port)
-    """
-    log.warning("bootstrap.legacy_function_called", function="_step_docker_up",
-                message="This function is deprecated for bootstrap. Use _run_master_agent() instead.")
-    import json as _json
-
-    await checklist.start_step(4)
-    await checklist.update_step(4, "starting containers...")
-
-    # 1. Get list of services first
-    rc_cfg, cfg_output = await _run(
-        "docker", "compose", "-f", compose, "-p", compose_project, "config", "--services",
-        cwd=workspace, project_id=project.id,
-    )
-    all_services = [s.strip() for s in cfg_output.strip().split("\n") if s.strip()] if rc_cfg == 0 else []
-    total_expected = len(all_services) or "?"
-    await checklist.update_step(4, f"starting {total_expected} services...")
-
-    # Run compose up through docker_guard (host path + port injection)
-    rc, output = await _run(
-        "docker", "compose", "-f", compose, "-p", compose_project, "up", "-d",
-        cwd=workspace, timeout=600, project_id=project.id,
-    )
-
-    # rc != 0 doesn't always mean total failure — some containers may have started
-    # while others failed (e.g. selenium has no ARM image). Check actual state.
-    if rc != 0:
-        key_error = _parse_docker_error(output)
-        log.warning("bootstrap.compose_up_failed", error=key_error)
-
-        # Let the agent diagnose and fix ANY docker compose failure
-        await checklist.update_step(4, "agent diagnosing docker failure...")
-        fixed = await _agent_fix_docker_config(
-            workspace, compose, compose_project, project, output,
-            checklist=checklist, step_idx=4,
-        )
-        if fixed:
-            # Retry compose up after agent fix
-            rc, output = await _run(
-                "docker", "compose", "-f", compose, "-p", compose_project, "up", "-d",
-                cwd=workspace, timeout=600, project_id=project.id,
-            )
-            if rc != 0:
-                log.warning("bootstrap.compose_up_retry_failed", error=_parse_docker_error(output))
-                await checklist.update_step(4, "checking what started...")
-        else:
-            log.warning("bootstrap.agent_fix_docker_failed")
-            await checklist.update_step(4, "checking what started...")
-
-    # 2. Poll containers until all running or timeout
-    total_services = 0
-    max_wait = 90
-    poll_interval = 5
-
-    for elapsed in range(0, max_wait, poll_interval):
-        await asyncio.sleep(poll_interval)
-
-        containers = await _get_compose_containers(compose_project, workspace, project.id)
-        if not containers:
-            await checklist.update_step(4, "waiting for containers...")
-            continue
-
-        total_services = len(containers)
-        running = [c for c in containers if c["state"] == "running"]
-        exited = [c for c in containers if c["state"] == "exited"]
-        starting = [c for c in containers if c["state"] not in ("running", "exited")]
-
-        # Update progress
-        if starting:
-            waiting = ", ".join(c["name"] for c in starting[:3])
-            await checklist.update_step(4, f"{len(running)}/{total_services} running ({waiting}...)")
-        else:
-            await checklist.update_step(4, f"{len(running)}/{total_services} running")
-
-        # All done (running or exited)?
-        if len(running) + len(exited) >= total_services:
-            break
-
-    # 3. Final check
-    containers = await _get_compose_containers(compose_project, workspace, project.id)
-    if not containers:
-        await checklist.fail_step(4, "no containers found after compose up")
-        return False
-
-    running = [c for c in containers if c["state"] == "running"]
-    failed = [c for c in containers if c["state"] != "running"]
-
-    if failed:
-        # Get error details for each failed container
-        error_details = []
-        for c in failed[:3]:
-            err = await _get_container_error(c["full_name"])
-            error_details.append(f"{c['name']}: {err}")
-
-        # Check if the APP container is running (the one with a web port)
-        app_info = await _find_app_container(compose_project, workspace, project.id)
-        app_is_running = app_info is not None
-
-        if app_is_running:
-            # App container is up — non-critical services failed (selenium, etc.)
-            detail = f"{len(running)}/{total_services} up ({len(failed)} skipped)"
-            await checklist.complete_step(4, detail[:50])
-            checklist._footer = "Skipped: " + ", ".join(c["name"] for c in failed)
-            await checklist._force_render()
-            return True
-        else:
-            # App container is down — real failure
-            detail = f"{len(running)}/{total_services} up"
-            await checklist.fail_step(4, detail)
-            checklist._footer = "Errors:\n" + "\n".join(f"  ❌ {e}" for e in error_details)
-            await checklist._force_render()
-            return False
-
-    await checklist.complete_step(4, f"{len(running)}/{total_services} running")
-    return True
 
 
 def _parse_docker_error(output: str) -> str:
@@ -669,9 +647,13 @@ async def _configure_app_for_tunnel(workspace: str, tunnel_url: str, compose_pro
     # URL env vars to update (key → new value)
     # ASSET_URL must be the full HTTPS tunnel URL — empty causes Laravel to use
     # the request scheme (http from cloudflared) which causes mixed content.
+    # APP_URL → tunnel URL (for SSO callbacks, email links, CSRF origin checks)
+    # ASSET_URL → "/" (relative). Vite bakes the base URL into chunk imports at
+    # compile time. With ASSET_URL=/, assets resolve to the current page origin —
+    # any tunnel URL serves them correctly without a rebuild.
     url_vars = {
         "APP_URL": tunnel_url,
-        "ASSET_URL": tunnel_url,
+        "ASSET_URL": "/",
         "VITE_API_BASE_URL": "/",
         "VITE_APP_URL": "",
         "NEXT_PUBLIC_URL": tunnel_url,
@@ -790,465 +772,6 @@ async def _find_app_container(
     return None
 
 
-async def _step_agentic_setup(
-    checklist: ChecklistReporter, project, workspace: str, compose: str, compose_project: str,
-) -> bool:
-    """Steps 2-3: Agent handles deps + build only.
-    Docker (step 4) and migrations (step 5) are handled by the caller.
-
-    The agent outputs DONE: 1 (deps), DONE: 2 (build).
-
-    ⚠️ LEGACY FUNCTION — Use _run_master_agent() instead.
-    This function is kept for backward compatibility but is no longer used
-    in the main bootstrap flow. The master agent handles steps 2-6 with
-    unified reasoning and self-healing capabilities.
-
-    Alternative: _run_master_agent(checklist, project, workspace, compose, compose_project, port)
-    """
-    log.warning("bootstrap.legacy_function_called", function="_step_agentic_setup",
-                message="This function is deprecated. Use _run_master_agent() instead.")
-    STEP_MAP = {1: 2, 2: 3}  # agent step → checklist index (only deps + build)
-
-    try:
-        from claude_agent_sdk import query, ClaudeAgentOptions
-        from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
-    except ImportError:
-        await checklist.skip_step(2, "no SDK")
-        await checklist.skip_step(3, "no SDK")
-        return True
-
-    await checklist.start_step(2)
-
-    is_dockerized = getattr(project, "is_dockerized", True)
-
-    if is_dockerized:
-        prompt = f"""Set up "{project.name}" for development. Tech: {project.tech_stack or 'unknown'}.
-This is a DOCKERIZED project — dependencies and builds happen INSIDE Docker containers.
-
-YOU MUST DO EXACTLY 2 STEPS:
-
-STEP 1 — INSTALL DEPENDENCIES:
-- This is a dockerized project. Check if a Dockerfile or docker-compose.yml handles deps (composer install, npm install, pip install etc.)
-- If the Dockerfile installs deps during build: SKIP: 1 handled by Docker
-- ONLY install deps on the host if there is NO Docker-based build AND deps are missing
-- If auth.json exists in workspace root, copy it to ~/.composer/auth.json before Docker build
-- Output: DONE: 1 <short result> OR SKIP: 1 <reason>
-
-STEP 2 — BUILD FRONTEND:
-- If public/build/ already has compiled assets, skip
-- If the Dockerfile or docker-compose handles the build: SKIP: 2 handled by Docker
-- ONLY build on host if no Docker build step AND no compiled assets exist
-- Output: DONE: 2 <short result> OR SKIP: 2 <reason>
-
-After both: SETUP_OK
-
-RULES:
-- Do NOT run docker compose — handled separately
-- Do NOT run migrations — handled separately
-- For dockerized projects, PREFER skipping host-side deps/builds — Docker handles them
-- Output STATUS: <what you're doing> BEFORE each action (e.g. STATUS: reading Dockerfile)
-- Output DONE: or SKIP: IMMEDIATELY after each step
-- Be fast. Skip what already exists.
-"""
-    else:
-        prompt = f"""Set up "{project.name}" for development. Tech: {project.tech_stack or 'unknown'}.
-
-YOU MUST DO EXACTLY 2 STEPS:
-
-STEP 1 — INSTALL DEPENDENCIES:
-- Check vendor/, node_modules/, requirements — if they exist and look complete, skip
-- If auth.json exists in workspace root, copy it to ~/.composer/auth.json
-- Output: DONE: 1 <short result> OR SKIP: 1 <reason>
-
-STEP 2 — BUILD FRONTEND:
-- If public/build/ already has compiled assets, skip
-- Otherwise: npm run build (or equivalent for the stack)
-- Output: DONE: 2 <short result> OR SKIP: 2 <reason>
-
-After both: SETUP_OK
-
-RULES:
-- Do NOT run docker compose — handled separately
-- Do NOT run migrations — handled separately
-- Output STATUS: <what you're doing> BEFORE each action (e.g. STATUS: running composer install)
-- Output DONE: or SKIP: IMMEDIATELY after each step
-- Be fast. Skip what already exists.
-"""
-
-    from openclow.providers.llm.claude import _mcp_docker
-
-    options = ClaudeAgentOptions(
-        cwd=workspace,
-        system_prompt="Senior DevOps engineer. 2 steps: deps + build. Skip what exists. Use docker_exec MCP tool for container commands. Be fast.",
-        model="claude-sonnet-4-6",
-        allowed_tools=[
-            "Read", "Glob", "Grep", "Edit", "Write",
-            # Docker MCP tools — use instead of Bash
-            "mcp__docker__list_containers",
-            "mcp__docker__container_logs",
-            "mcp__docker__container_health",
-            "mcp__docker__docker_exec",
-            "mcp__docker__restart_container",
-            "mcp__docker__compose_build",
-            "mcp__docker__compose_up",
-            "mcp__docker__compose_down",
-            "mcp__docker__compose_ps",
-        ],
-        mcp_servers={
-            "docker": _mcp_docker(),
-        },
-        permission_mode="bypassPermissions",
-        max_turns=15,
-    )
-
-    full_output = ""
-    current_agent_step = 1
-
-    try:
-        async for message in query(prompt=prompt, options=options):
-            if not isinstance(message, AssistantMessage):
-                continue
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    full_output += block.text + "\n"
-                    for line in block.text.split("\n"):
-                        line = line.strip()
-                        if not line:
-                            continue
-
-                        if line.startswith("DONE:") or line.startswith("SKIP:"):
-                            is_skip = line.startswith("SKIP:")
-                            rest = line[5:].strip()
-                            parts = rest.split(" ", 1)
-                            if parts[0].isdigit():
-                                agent_idx = int(parts[0])
-                                detail = parts[1] if len(parts) > 1 else ""
-                            else:
-                                agent_idx = current_agent_step
-                                detail = rest
-                            cl_idx = STEP_MAP.get(agent_idx)
-                            if cl_idx is not None:
-                                if is_skip:
-                                    await checklist.skip_step(cl_idx, detail[:50] or "skipped")
-                                else:
-                                    await checklist.complete_step(cl_idx, detail[:50] or "done")
-                            current_agent_step = agent_idx + 1
-                            next_cl = STEP_MAP.get(current_agent_step)
-                            if next_cl is not None:
-                                await checklist.start_step(next_cl)
-
-                        elif line.startswith("FAIL:"):
-                            rest = line[5:].strip()
-                            parts = rest.split(" ", 1)
-                            if parts[0].isdigit():
-                                agent_idx = int(parts[0])
-                                detail = parts[1] if len(parts) > 1 else "failed"
-                            else:
-                                agent_idx = current_agent_step
-                                detail = rest
-                            cl_idx = STEP_MAP.get(agent_idx)
-                            if cl_idx is not None:
-                                await checklist.fail_step(cl_idx, detail[:50])
-
-                        elif line.startswith("STATUS:"):
-                            detail = line[7:].strip()[:60]
-                            cl_idx = STEP_MAP.get(current_agent_step)
-                            if cl_idx is not None and detail:
-                                await checklist.update_step(cl_idx, detail)
-
-                elif isinstance(block, ToolUseBlock):
-                    cl_idx = STEP_MAP.get(current_agent_step)
-                    if cl_idx is not None:
-                        cmd = ""
-                        if hasattr(block, "input") and isinstance(block.input, dict):
-                            cmd = str(block.input.get("command", block.input.get("file_path", "")))[:60]
-                        if cmd:
-                            await checklist.update_step(cl_idx, cmd)
-
-    except Exception as e:
-        log.error("bootstrap.agent_failed", error=str(e))
-        cl_idx = STEP_MAP.get(current_agent_step)
-        if cl_idx is not None:
-            await checklist.fail_step(cl_idx, str(e)[:50])
-
-    has_fail = any(s["status"] == "failed" for s in checklist.steps[:4])
-    return not has_fail
-
-
-async def _agent_fix_docker_config(
-    workspace: str, compose: str, compose_project: str, project, error_output: str,
-    checklist: ChecklistReporter = None, step_idx: int = 4,
-) -> bool:
-    """Let the agent diagnose and fix ANY docker compose failure.
-
-    ⚠️ LEGACY FUNCTION — Use _run_master_agent() instead.
-    This function is kept for backward compatibility but is no longer called
-    directly in the main bootstrap flow. Docker fixes are now handled inline
-    by the master agent with unified reasoning across all steps.
-
-    Alternative: _run_master_agent(checklist, project, workspace, compose, compose_project, port)
-    """
-    log.warning("bootstrap.legacy_function_called", function="_agent_fix_docker_config",
-                message="This function is deprecated. Use _run_master_agent() instead.")
-    try:
-        from claude_agent_sdk import query, ClaudeAgentOptions
-        from claude_agent_sdk.types import AssistantMessage, TextBlock
-    except ImportError:
-        return False
-
-    import platform
-    arch = platform.machine()  # e.g. "arm64", "x86_64"
-
-    prompt = f"""Docker compose failed with this error:
-{error_output[-2000:]}
-
-Workspace: {workspace}
-Compose file: {compose}
-Host architecture: {arch}
-
-YOU ARE A DOCKER EXPERT. Diagnose the error above and fix it. Common issues:
-
-1. MISSING ENV VARS (e.g. "variable is not set", "invalid spec: :/path"):
-   - Read docker-compose.yml, find all ${{{{VAR}}}} references
-   - Read .env, find which are missing
-   - Add sensible defaults to .env
-   - Create directories for volume mounts if needed
-
-2. IMAGE NOT AVAILABLE FOR ARCHITECTURE (e.g. "no matching manifest for linux/arm64"):
-   - The service's image doesn't support {arch}
-   - Comment out or remove that service from docker-compose.yml using a profile
-   - OR add `platform: linux/amd64` to force emulation
-   - OR replace with a compatible image (e.g. seleniarm/standalone-chromium for ARM)
-
-3. BUILD FAILURES:
-   - Read the Dockerfile, check for syntax errors or missing files
-   - Fix the Dockerfile or add missing files
-
-4. PORT CONFLICTS:
-   - Change the host port in docker-compose.yml or .env
-
-5. ANY OTHER ERROR:
-   - Read the error carefully, diagnose the root cause, fix it
-
-Steps:
-1. Read docker-compose.yml fully
-2. Read .env if it exists
-3. Diagnose the specific error from the output above
-4. Apply the fix (edit .env, docker-compose.yml, Dockerfile, create dirs, etc.)
-5. Output FIXED: <what you did> or FAIL: <why you can't fix it>
-
-RULES:
-- You CAN modify docker-compose.yml, .env, Dockerfiles — whatever is needed
-- Be surgical — only change what's broken
-- Output STATUS: <what you're doing> BEFORE each action so the user sees live progress
-  Example: STATUS: reading docker-compose.yml
-  Example: STATUS: replacing selenium with seleniarm for ARM
-  Example: STATUS: adding missing NGINX_SSL_PATH to .env
-- Be fast
-"""
-
-    from openclow.providers.llm.claude import _mcp_docker
-
-    options = ClaudeAgentOptions(
-        cwd=workspace,
-        system_prompt=f"Docker expert. Diagnose and fix docker compose failures. Host arch: {arch}. Use docker MCP tools (compose_up, docker_exec, etc.) instead of Bash. Be fast and surgical.",
-        model="claude-sonnet-4-6",
-        allowed_tools=[
-            "Read", "Glob", "Grep", "Write", "Edit",
-            # Docker MCP tools — use instead of Bash
-            "mcp__docker__list_containers",
-            "mcp__docker__container_logs",
-            "mcp__docker__container_health",
-            "mcp__docker__docker_exec",
-            "mcp__docker__restart_container",
-            "mcp__docker__compose_build",
-            "mcp__docker__compose_up",
-            "mcp__docker__compose_down",
-            "mcp__docker__compose_ps",
-        ],
-        mcp_servers={
-            "docker": _mcp_docker(),
-        },
-        permission_mode="bypassPermissions",
-        max_turns=12,
-    )
-
-    try:
-        async for message in query(prompt=prompt, options=options):
-            if not isinstance(message, AssistantMessage):
-                continue
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    for line in block.text.split("\n"):
-                        line = line.strip()
-                        if not line:
-                            continue
-                        if line.startswith("STATUS:") and checklist:
-                            detail = line[7:].strip()[:60]
-                            if detail:
-                                await checklist.update_step(step_idx, detail)
-                        if "FIXED:" in line:
-                            detail = line.split("FIXED:", 1)[1].strip()[:60]
-                            if checklist and detail:
-                                await checklist.update_step(step_idx, f"fixed: {detail}")
-                            return True
-                        if "FAIL:" in line:
-                            detail = line.split("FAIL:", 1)[1].strip()[:60]
-                            if checklist and detail:
-                                await checklist.update_step(step_idx, f"cannot fix: {detail}")
-                            return False
-                elif isinstance(block, ToolUseBlock) and checklist:
-                    cmd = ""
-                    if hasattr(block, "input") and isinstance(block.input, dict):
-                        cmd = str(block.input.get("command", block.input.get("file_path", "")))[:60]
-                    if cmd:
-                        await checklist.update_step(step_idx, cmd)
-        return True  # Agent finished without explicit signal — assume it tried
-    except Exception as e:
-        log.error("bootstrap.agent_fix_docker_failed", error=str(e))
-        return False
-
-
-async def _step_agent_migrations(
-    checklist: ChecklistReporter, project, workspace: str, compose_project: str,
-) -> None:
-    """Step 5: Agent-driven database migrations.
-
-    The agent reads the project, identifies the framework, finds the right
-    container, and runs migrations + seeders. It handles edge cases like
-    working directories, waiting for DB readiness, and custom migration scripts.
-
-    ⚠️ LEGACY FUNCTION — Use _run_master_agent() instead.
-    This function is kept for backward compatibility but is no longer used
-    in the main bootstrap flow. Migrations are now handled by the master agent
-    as part of its unified setup process (Step 5).
-
-    Alternative: _run_master_agent(checklist, project, workspace, compose, compose_project, port)
-    """
-    log.warning("bootstrap.legacy_function_called", function="_step_agent_migrations",
-                message="This function is deprecated. Use _run_master_agent() instead.")
-    # Get running containers info for the agent
-    containers = await _get_compose_containers(compose_project, workspace, project.id)
-    running = [c for c in containers if c["state"] == "running"]
-    if not running:
-        await checklist.skip_step(5, "no running containers")
-        return
-
-    container_info = "\n".join(
-        f"  - {c['full_name']} (image: {c.get('image', '?')}, ports: {c.get('ports', '?')})"
-        for c in running
-    )
-
-    try:
-        from claude_agent_sdk import query, ClaudeAgentOptions
-        from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
-    except ImportError:
-        await checklist.skip_step(5, "no agent SDK")
-        return
-
-    prompt = f"""Project "{project.name}" is running in Docker (compose project: {compose_project}).
-Tech stack: {project.tech_stack or 'unknown'}.
-Workspace: {workspace}
-
-Running containers:
-{container_info}
-
-YOUR TASK: Run database migrations and seeders for this project.
-
-STEPS:
-1. Read the project to understand the framework:
-   - Check composer.json, package.json, requirements.txt, Makefile, Gemfile etc.
-   - Check for multi-domain/tenancy packages (gecche/laravel-multidomain, stancl/tenancy, etc.)
-   - Check for .env.* files (e.g. .env.abc.test) — these indicate multi-domain setup
-2. Identify which container has the app code (PHP/Python/Node — NOT mysql/redis/postgres)
-3. Find the correct working directory:
-   - docker inspect <container> --format '{{{{.Config.WorkingDir}}}}'
-   - If the entry file (artisan, manage.py) isn't there, use docker_exec MCP tool to search: find / -name "artisan" -maxdepth 4 2>/dev/null
-4. Run migrations using docker_exec MCP tool (specify the working directory):
-   - Read the project to determine the exact command — don't guess
-   - For multi-domain apps: include --domain=<domain> for each domain
-   - For tenancy apps: run both central and tenant migrations
-5. Run seeders if they exist (same domain flags apply)
-6. If DB isn't ready, wait a few seconds and retry (max 3 attempts)
-
-OUTPUT FORMAT:
-- When done: DONE: <what you did>
-- If no migrations needed: SKIP: <reason>
-- If failed after retries: FAIL: <error>
-
-RULES:
-- ALWAYS specify the working directory when using docker_exec MCP tool
-- READ the project first to understand what commands to run — don't hardcode
-- Do NOT modify code — only run migration/seed commands
-- Do NOT restart containers
-- Output STATUS: <what you're doing> BEFORE each action (e.g. STATUS: checking composer.json for framework)
-- Be fast — skip unnecessary checks
-"""
-
-    from openclow.providers.llm.claude import _mcp_docker
-
-    options = ClaudeAgentOptions(
-        cwd=workspace,
-        system_prompt="Database migration specialist. Run migrations via docker_exec MCP tool. Always specify the working directory. Be fast.",
-        model="claude-sonnet-4-6",
-        allowed_tools=[
-            "Read", "Glob", "Grep",
-            # Docker MCP tools — use instead of Bash
-            "mcp__docker__list_containers",
-            "mcp__docker__container_logs",
-            "mcp__docker__container_health",
-            "mcp__docker__docker_exec",
-            "mcp__docker__restart_container",
-            "mcp__docker__compose_build",
-            "mcp__docker__compose_up",
-            "mcp__docker__compose_down",
-            "mcp__docker__compose_ps",
-        ],
-        mcp_servers={
-            "docker": _mcp_docker(),
-        },
-        permission_mode="bypassPermissions",
-        max_turns=10,
-    )
-
-    try:
-        async for message in query(prompt=prompt, options=options):
-            if not isinstance(message, AssistantMessage):
-                continue
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    for line in block.text.split("\n"):
-                        line = line.strip()
-                        if line.startswith("DONE:"):
-                            detail = line[5:].strip()[:50] or "migrations complete"
-                            await checklist.complete_step(5, detail)
-                            return
-                        elif line.startswith("SKIP:"):
-                            detail = line[5:].strip()[:50] or "not needed"
-                            await checklist.skip_step(5, detail)
-                            return
-                        elif line.startswith("FAIL:"):
-                            detail = line[5:].strip()[:50] or "failed"
-                            await checklist.fail_step(5, detail)
-                            return
-                        elif line.startswith("STATUS:"):
-                            detail = line[7:].strip()[:60]
-                            if detail:
-                                await checklist.update_step(5, detail)
-                elif isinstance(block, ToolUseBlock):
-                    cmd = ""
-                    if hasattr(block, "input") and isinstance(block.input, dict):
-                        cmd = str(block.input.get("command", ""))[:60]
-                    if cmd:
-                        await checklist.update_step(5, cmd)
-
-        # Agent finished without explicit DONE/SKIP/FAIL
-        await checklist.complete_step(5, "agent finished")
-    except Exception as e:
-        log.error("bootstrap.agent_migration_failed", error=str(e))
-        await checklist.fail_step(5, str(e)[:50])
-
-
 async def _run_master_agent(
     checklist: ChecklistReporter, project, workspace: str,
     compose: str, compose_project: str, port: int,
@@ -1257,8 +780,15 @@ async def _run_master_agent(
     max_step: int = 6,
     complete_keyword: str = "BOOTSTRAP_COMPLETE",
     failed_keyword: str = "BOOTSTRAP_FAILED",
+    timeout: int = 1800,  # kept for signature compat — ignored, idle_timeout used instead
+    idle_timeout: int = 1800,  # 30 min — covers docker build (up to 30 min) + compose_build blocks
 ) -> bool:
     """Agentic master agent with ChecklistReporter streaming.
+
+    Uses an idle-based timeout instead of a flat wall-clock timeout.
+    The agent can run as long as it keeps making tool calls or producing text.
+    It is only killed if it goes `idle_timeout` seconds with zero activity
+    (i.e. it is truly stuck — hung MCP call, infinite wait, etc.).
 
     Reusable for bootstrap (steps 2-6) and repair (steps 0-4).
     Pass prompt_override + start_step + max_step to customize.
@@ -1267,12 +797,13 @@ async def _run_master_agent(
         from claude_agent_sdk import query, ClaudeAgentOptions
         from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
     except ImportError:
-        log.warning("bootstrap.master_agent_no_sdk")
-        await checklist.skip_step(2, "agent SDK unavailable")
-        await checklist.skip_step(3, "agent SDK unavailable")
-        await checklist.skip_step(4, "agent SDK unavailable")
-        await checklist.skip_step(5, "agent SDK unavailable")
-        await checklist.skip_step(6, "agent SDK unavailable")
+        # This is a fatal system error — the SDK must be installed. Never silently
+        # skip the core agentic steps of a bootstrap and pretend success.
+        log.error("bootstrap.master_agent_no_sdk")
+        await checklist.fail_step(2, "Claude SDK not installed — admin must reinstall worker image")
+        for _i in (3, 4, 5, 6):
+            await checklist.fail_step(_i, "blocked: SDK missing")
+        checklist._footer = "❌ Claude Agent SDK is missing from the worker container. Rebuild with `docker compose build --no-cache worker`."
         return False
     
     import platform
@@ -1311,8 +842,23 @@ async def _run_master_agent(
     options = ClaudeAgentOptions(
         cwd=workspace,
         system_prompt=(
-            f"Senior DevOps engineer setting up {project.name}. "
-            f"Host: {arch}. Be fast, be decisive, fix errors yourself."
+            f"You are a senior DevOps engineer. Your only job: get {project.name} running. Host: {arch}.\n\n"
+            f"DIAGNOSTIC MINDSET — before every action:\n"
+            f"1. Read the error literally. What exactly failed, and at what layer?\n"
+            f"2. Check actual state with compose_ps or container_logs — don't assume.\n"
+            f"3. Form one hypothesis. Act on it. Verify with a tool call.\n"
+            f"4. If it didn't work: new hypothesis, different approach. Never repeat a failed action.\n\n"
+            f"TOOL FAILURES ARE DATA, NOT DEAD ENDS:\n"
+            f"- 'connection closed' = MCP transport hiccup. Call compose_ps IMMEDIATELY — Docker "
+            f"may have succeeded before the connection dropped. If containers are up, continue.\n"
+            f"- 'BLOCKED' = security guard rejected the command. Read the reason, find an alternative.\n"
+            f"- 'TIMEOUT' = operation took too long. Check compose_ps — it may have finished anyway.\n"
+            f"- Any other error: read it. Understand it. Fix the root cause, not the symptom.\n\n"
+            f"NEVER GIVE UP: The only valid reason to output REPAIR_FAILED or BOOTSTRAP_FAILED is if "
+            f"you have genuinely tried multiple different approaches and each one has a specific, "
+            f"documented reason why it cannot work. 'The tool kept failing' is not a reason — "
+            f"that means you need to understand WHY the tool is failing and fix that first."
+            + _NO_DOCKER_SOCKET
         ),
         model="claude-sonnet-4-6",
         allowed_tools=[
@@ -1320,7 +866,8 @@ async def _run_master_agent(
             # gracefully instead of crashing the SDK on non-zero exit codes.
             "Read", "Write", "Edit", "Glob", "Grep",
             # Docker MCP — the agent's ONLY interface for containers & commands
-            "mcp__docker__compose_build",
+            "mcp__docker__compose_build",        # starts build; may return BUILDING after 30s
+            "mcp__docker__compose_build_status", # REQUIRED: poll every 30s when compose_build returns BUILDING
             "mcp__docker__compose_up",
             "mcp__docker__compose_down",
             "mcp__docker__compose_ps",
@@ -1329,11 +876,8 @@ async def _run_master_agent(
             "mcp__docker__container_health",
             "mcp__docker__docker_exec",
             "mcp__docker__restart_container",
-            # Tunnel MCP — agent manages tunnels directly
-            "mcp__docker__tunnel_start",
-            "mcp__docker__tunnel_stop",
-            "mcp__docker__tunnel_get_url",
-            "mcp__docker__tunnel_list",
+            # No tunnel tools — tunnels are step 7, handled by deterministic
+            # Python code after this agent finishes steps 2-6.
         ],
         mcp_servers={
             "docker": _mcp_docker(),
@@ -1347,17 +891,85 @@ async def _run_master_agent(
     docker_fix_attempts = 0
     max_docker_fixes = 3
     
-    try:
+    # Extract chat_id/session for web cancel checking
+    _cancel_chat_id = getattr(checklist, "_chat_id", "") or ""
+    _cancel_session_id = _cancel_chat_id.split(":")[2] if _cancel_chat_id.startswith("web:") and len(_cancel_chat_id.split(":")) == 3 else ""
+
+    async def _web_cancelled() -> bool:
+        """Check if web Stop was pressed for this session."""
+        if not _cancel_session_id:
+            return False
+        try:
+            import redis.asyncio as aioredis
+            from openclow.settings import settings
+            r = aioredis.from_url(settings.redis_url)
+            val = await r.get(f"openclow:cancel_session:{_cancel_session_id}")
+            await r.aclose()
+            return val is not None
+        except Exception:
+            return False
+
+    # Activity tracker: reset on every token/tool call — idle watchdog uses this
+    _last_activity: list[float] = [time.monotonic()]
+
+    def _bump_activity() -> None:
+        _last_activity[0] = time.monotonic()
+
+    # Heartbeat task: polls cancel flag every 5s and interrupts the stream
+    _stream_task: asyncio.Task | None = None
+
+    async def _cancel_heartbeat():
+        nonlocal _stream_task
+        while True:
+            await asyncio.sleep(5)
+            if await _web_cancelled():
+                log.info("bootstrap.cancelled_by_web", project=project.name)
+                if _stream_task and not _stream_task.done():
+                    _stream_task.cancel()
+
+    _hb_task = asyncio.create_task(_cancel_heartbeat())
+
+    # Idle watchdog: kills the stream only when the agent goes idle_timeout seconds
+    # with zero activity. An actively working agent is never killed by this.
+    async def _idle_watchdog():
+        nonlocal _stream_task
+        while True:
+            await asyncio.sleep(10)
+            idle_secs = time.monotonic() - _last_activity[0]
+            if idle_secs >= idle_timeout:
+                log.warning(
+                    "master_agent.idle_timeout",
+                    project=project.name,
+                    idle_secs=int(idle_secs),
+                    idle_timeout=idle_timeout,
+                )
+                if _stream_task and not _stream_task.done():
+                    _stream_task.cancel()
+                return
+
+    _wd_task = asyncio.create_task(_idle_watchdog())
+
+    async def _run_stream():
+        nonlocal success, current_step, docker_fix_attempts
         async for message in query(prompt=prompt, options=options):
             if not isinstance(message, AssistantMessage):
                 continue
             for block in message.content:
                 if isinstance(block, TextBlock):
+                    _bump_activity()
+                    # Stream raw agent text to web frontend in real-time
+                    if block.text.strip() and hasattr(checklist._chat, "send_agent_token"):
+                        try:
+                            await checklist._chat.send_agent_token(
+                                checklist._chat_id, checklist._message_id, block.text
+                            )
+                        except Exception:
+                            pass
                     for line in block.text.split("\n"):
                         line = line.strip()
                         if not line:
                             continue
-                        
+
                         # STATUS: Show what agent is doing
                         if line.startswith("STATUS:"):
                             detail = line[7:].strip()[:60]
@@ -1375,13 +987,15 @@ async def _run_master_agent(
                             detail = line[7:].strip()[:60]
                             if current_step <= max_step:
                                 await checklist.update_step(current_step, f"🔧 {detail}")
-                            # Track Docker fix attempts
+                            # Track Docker fix attempts — break agent loop if exhausted
                             if current_step == 4:
                                 docker_fix_attempts += 1
                                 if docker_fix_attempts > max_docker_fixes:
-                                    log.warning("bootstrap.docker_fixes_exhausted", 
-                                                project=project.name, 
+                                    log.warning("bootstrap.docker_fixes_exhausted",
+                                                project=project.name,
                                                 attempts=docker_fix_attempts)
+                                    success = False
+                                    break
                         
                         # STEP_DONE: Complete a step and move to next
                         elif line.startswith("STEP_DONE:"):
@@ -1435,294 +1049,45 @@ async def _run_master_agent(
                             success = False
                 
                 elif isinstance(block, ToolUseBlock):
+                    _bump_activity()
                     # Show tool usage in checklist for transparency
                     if current_step <= max_step:
-                        cmd = ""
-                        if hasattr(block, "input") and isinstance(block.input, dict):
-                            cmd = str(block.input.get("command",
-                                       block.input.get("file_path",
-                                       block.name)))[:60]
-                        if cmd:
-                            await checklist.update_step(current_step, cmd)
-    
+                        from openclow.worker.tasks._agent_base import describe_tool
+                        desc = describe_tool(block)
+                        await checklist.update_step(current_step, desc)
+
+    # Run the stream as a Task so heartbeat/watchdog can cancel it mid-MCP-call.
+    # No flat wall-clock timeout — the idle watchdog handles stuck agents instead.
+    _stream_task = asyncio.create_task(_run_stream())
+    try:
+        await _stream_task
     except asyncio.CancelledError:
-        raise
+        idle_secs = int(time.monotonic() - _last_activity[0])
+        if idle_secs >= idle_timeout:
+            # Killed by idle watchdog — report as timeout
+            log.warning("master_agent.idle_timeout_fired", project=project.name,
+                        idle_secs=idle_secs)
+            if current_step <= max_step:
+                await checklist.fail_step(
+                    current_step,
+                    f"agent stuck (no activity for {idle_secs}s)",
+                )
+        else:
+            # Cancelled by web Stop button or worker shutdown — propagate
+            raise
     except Exception as e:
         log.error("bootstrap.master_agent_failed", error=str(e))
-        return False
-    
-    return success
-
-
-async def _step_health_check(
-    status: StatusReporter, workspace: str, compose: str, compose_project: str,
-) -> bool:
-    """Step 4: Check container health with agentic repair loop.
-
-    Returns True if all containers healthy.
-    """
-    from openclow.agents.doctor import repair_container, _is_container_healthy
-
-    await status.section("Container Health Check")
-    await status.add("🔄", "Waiting for containers to initialize...")
-
-    await asyncio.sleep(12)
-
-    # Get container statuses
-    rc, ps_output = await _run(
-        "docker", "compose", "-p", compose_project, "ps", "--format", "json",
-        cwd=workspace,
-    )
-
-    if rc != 0 or not ps_output.strip():
-        await status.add("❌", "No containers found after compose up")
-        return False
-
-    import json
-    containers = []
-    for line in ps_output.strip().split("\n"):
-        if not line.strip():
-            continue
+        if current_step <= max_step:
+            await checklist.fail_step(current_step, str(e)[:60])
+    finally:
+        _hb_task.cancel()
+        _wd_task.cancel()
         try:
-            data = json.loads(line)
-            containers.append({
-                "name": data.get("Name", ""),
-                "state": data.get("State", "unknown"),
-                "health": data.get("Health", ""),
-                "service": data.get("Service", ""),
-            })
-        except (json.JSONDecodeError, KeyError):
-            continue
+            await asyncio.gather(_hb_task, _wd_task, return_exceptions=True)
+        except Exception:
+            pass
 
-    if not containers:
-        await status.add("❌", "Could not parse container statuses")
-        return False
-
-    # Show container list
-    for c in containers:
-        icon = "✅" if c["state"] == "running" else "❌"
-        health_str = f" ({c['health']})" if c.get("health") else ""
-        short = c["name"].split("-")[-1] if "-" in c["name"] else c["name"]
-        await status.add(icon, f"{short}: {c['state']}{health_str}")
-
-    # Find unhealthy ones
-    unhealthy = [
-        c for c in containers
-        if c["state"] != "running" or c.get("health", "").lower() == "unhealthy"
-    ]
-
-    if not unhealthy:
-        await status.add("✅", f"All {len(containers)} containers healthy!")
-        return True
-
-    # ── Repair unhealthy containers ──
-    await status.section(f"Repairing {len(unhealthy)} Container(s)")
-
-    all_fixed = True
-    for c in unhealthy:
-        container_name = c["name"]
-        service = c.get("service", "")
-
-        async def on_progress(icon, msg, _name=container_name):
-            short = _name.split("-")[-1] if "-" in _name else _name
-            await status.add(icon, f"[{short}] {msg}")
-
-        repair = await repair_container(
-            container=container_name,
-            workspace=workspace,
-            compose_file=compose,
-            compose_project=compose_project,
-            service_name=service,
-            max_attempts=3,
-            on_progress=on_progress,
-        )
-
-        if repair.fixed:
-            short = container_name.split("-")[-1]
-            await status.add("✅", f"{short} repaired: {repair.final_status[:60]}")
-        else:
-            all_fixed = False
-            short = container_name.split("-")[-1]
-            await status.add("❌", f"{short}: {repair.suggestion[:80]}")
-
-    return all_fixed
-
-
-async def _step_app_health(status: StatusReporter, port: int) -> bool:
-    """Step 5: Check if the app is responding on its port."""
-    await status.add("🔄", f"Checking app at port {port}...")
-
-    # Try multiple times — app might be slow to start
-    for attempt in range(3):
-        rc, output = await _run_shell(
-            f'curl -sf http://localhost:{port}/health 2>&1 || '
-            f'curl -sf http://localhost:{port}/ 2>&1 || '
-            f'echo NOT_RESPONDING',
-            timeout=10,
-        )
-        if "NOT_RESPONDING" not in output:
-            await status.add("✅", f"App responding on port {port}", replace_last=True)
-            return True
-        if attempt < 2:
-            await status.add("⏳", f"App not responding yet, retrying in 10s... ({attempt+1}/3)", replace_last=True)
-            await asyncio.sleep(10)
-
-    log.warning("bootstrap.app_not_responding", port=port,
-                suggestion="Check container logs: docker compose logs <service>")
-    await status.add("⚠️", f"App not responding on port {port} (may still be starting)", replace_last=True)
-    return False
-
-
-async def _step_tunnel(status: StatusReporter, port: int, project_name: str) -> str:
-    """Step 6: Start cloudflared tunnel (persisted via tunnel_service)."""
-    from openclow.services.tunnel_service import start_tunnel
-
-    await status.add("🔄", "Creating public URL...")
-
-    try:
-        url = await start_tunnel(project_name, f"http://localhost:{port}")
-        if url:
-            await status.add("✅", f"Public URL: {url}", replace_last=True)
-            return url
-        else:
-            await status.add("⚠️", "Tunnel failed to start (local access only)", replace_last=True)
-            return ""
-    except Exception as e:
-        await status.add("⚠️", f"Tunnel failed: {str(e)[:60]} (local access only)", replace_last=True)
-        return ""
-
-
-# ---------------------------------------------------------------------------
-# Playwright verification
-# ---------------------------------------------------------------------------
-
-async def _step_verify_app(
-    status: StatusReporter, tunnel_url: str, port: int, project_name: str, workspace: str,
-) -> tuple[bool, str]:
-    """Step 7: Playwright verification — visit app, check it works.
-
-    Uses Claude Agent SDK + Playwright MCP to:
-    1. Navigate to the app URL
-    2. Wait for page load
-    3. Take a screenshot
-    4. Check for errors (500s, blank pages, JS errors)
-
-    Returns (ok: bool, detail: str).
-    """
-    await status.section("App Verification")
-    await status.add("🔄", "Launching Playwright to verify app...")
-
-    url = tunnel_url or f"http://localhost:{port}"
-
-    try:
-        from claude_agent_sdk import query, ClaudeAgentOptions
-
-        options = ClaudeAgentOptions(
-            cwd=workspace,
-            system_prompt=(
-                "You are a QA engineer verifying a newly deployed application. "
-                "Your job is to open the app in a browser, check it loads correctly, "
-                "and report what you see. Be concise."
-            ),
-            model="claude-sonnet-4-6",
-            allowed_tools=[
-                "mcp__playwright__browser_navigate",
-                "mcp__playwright__browser_snapshot",
-                "mcp__playwright__browser_take_screenshot",
-            ],
-            mcp_servers={
-                "playwright": {
-                    "command": "npx",
-                    "args": ["@playwright/mcp@0.0.28", "--headless"],
-                },
-            },
-            permission_mode="bypassPermissions",
-            max_turns=4,  # Navigate + screenshot + report = 3-4 turns max
-        )
-
-        prompt = (
-            f"Navigate to {url} and verify the app is working.\n\n"
-            "Steps:\n"
-            "1. Navigate to the URL\n"
-            "2. Wait for page to fully load\n"
-            "3. Take a screenshot\n"
-            "4. Check for errors (500 pages, blank screens, connection refused)\n"
-            "5. Describe what you see (login page, dashboard, API docs, error, etc.)\n\n"
-            "At the end, output EXACTLY one of these lines:\n"
-            "VERIFY_STATUS: OK\n"
-            "VERIFY_STATUS: FAIL\n\n"
-            "And then:\n"
-            "VERIFY_DETAIL: [what you see in 1 sentence]\n"
-        )
-
-        last_text = ""
-        screenshot_path = ""
-
-        async for message in query(prompt=prompt, options=options):
-            if hasattr(message, "content"):
-                for block in (message.content if isinstance(message.content, list) else [message.content]):
-                    if hasattr(block, "text"):
-                        last_text += block.text + "\n"
-                    # Capture screenshot path if the agent saved one
-                    if hasattr(block, "type") and block.type == "tool_result":
-                        text_content = str(block)
-                        if "screenshot" in text_content.lower() and ".png" in text_content.lower():
-                            import re as _re
-                            match = _re.search(r"(/[\w/.-]+\.png)", text_content)
-                            if match:
-                                screenshot_path = match.group(1)
-
-        # Parse result — first try text markers from the Playwright agent
-        verify_ok = "VERIFY_STATUS: OK" in last_text
-        detail = ""
-        for line in last_text.split("\n"):
-            if line.strip().startswith("VERIFY_DETAIL:"):
-                detail = line.split(":", 1)[1].strip()
-                break
-
-        if not detail:
-            # Extract something useful from the output
-            detail = last_text.strip().split("\n")[-1][:120] if last_text.strip() else "no response"
-
-        # Fallback: if Playwright text parsing is ambiguous, do a real HTTP check
-        if not verify_ok:
-            try:
-                from openclow.services.docker_guard import run_docker
-                compose_project = f"openclow-{project_name}"
-                app_info = await _find_app_container(compose_project, workspace, None)
-                if app_info:
-                    container_name, internal_port = app_info
-                    rc_curl, curl_out = await run_docker(
-                        "docker", "exec", container_name,
-                        "curl", "-sf", "-o", "/dev/null", "-w", "%{http_code}",
-                        f"http://localhost:{internal_port}/", "--max-time", "5",
-                        actor="verify_fallback", timeout=10,
-                    )
-                    http_code = curl_out.strip()
-                    if http_code.startswith("2") or http_code.startswith("3"):
-                        verify_ok = True
-                        detail = detail or f"HTTP {http_code} (verified via curl fallback)"
-                        log.info("bootstrap.verify_curl_fallback_ok", http_code=http_code)
-            except Exception as curl_err:
-                log.warning("bootstrap.verify_curl_fallback_failed", error=str(curl_err))
-
-        if verify_ok:
-            await status.add("✅", f"App verified: {detail[:80]}", replace_last=True)
-        else:
-            await status.add("❌", f"App issues: {detail[:80]}", replace_last=True)
-
-        log.info("bootstrap.playwright_verify",
-                 project=project_name, ok=verify_ok, detail=detail[:200])
-
-        return verify_ok, detail
-
-    except ImportError:
-        await status.add("⚠️", "Claude Agent SDK not available — skipping Playwright verification", replace_last=True)
-        return False, "sdk_unavailable"
-    except Exception as e:
-        await status.add("⚠️", f"Playwright verification failed: {str(e)[:60]}", replace_last=True)
-        log.warning("bootstrap.playwright_failed", error=str(e))
-        return False, f"error: {str(e)[:100]}"
+    return success
 
 
 # ---------------------------------------------------------------------------
@@ -1734,6 +1099,10 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
 
     Uses ChecklistReporter for UX and Claude Agent for smart setup.
     The LLM reads the project, plans steps, executes them, fixes errors.
+
+    For mode="host" projects, dispatches to `_bootstrap_project_host` which
+    works against an already-on-disk directory on the VPS host instead of
+    spinning up Docker containers.
     """
     chat = await factory.get_chat_by_type(chat_provider_type)
 
@@ -1744,6 +1113,61 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
     if not project:
         await chat.send_error(chat_id, message_id, "Project not found")
         return
+
+    # T088: bootstrap router flip — go-live for per-chat instances.
+    # mode='container' projects don't use the legacy project-wide
+    # bootstrap at all. Provisioning is per-chat via
+    # InstanceService.get_or_resume (wired in assistant_endpoint).
+    # The legacy host/docker code paths below remain UNCHANGED per
+    # FR-034 (no edits to the legacy path).
+    project_mode = getattr(project, "mode", "docker") or "docker"
+    if project_mode == "container":
+        # For web chats, chat_id shape is "web:<user_id>:<session_id>";
+        # the session_id is the authoritative WebChatSession row and
+        # lets InstanceService.get_or_resume pick up the thread.
+        chat_session_id: int | None = None
+        if chat_id.startswith("web:"):
+            parts = chat_id.split(":")
+            if len(parts) == 3 and parts[2].isdigit():
+                chat_session_id = int(parts[2])
+        if chat_session_id is None:
+            await chat.edit_message(
+                chat_id, message_id,
+                "Container-mode projects are provisioned per-chat. Start "
+                "a chat and send any message — your environment will come "
+                "up automatically.",
+            )
+            return
+        from openclow.services.instance_service import (
+            InstanceService, PerUserCapExceeded, PlatformAtCapacity,
+        )
+        try:
+            inst = await InstanceService().get_or_resume(
+                chat_session_id=chat_session_id
+            )
+            await chat.edit_message(
+                chat_id, message_id,
+                f"Your environment is {inst.status}. It will be ready in "
+                "about 90 seconds.",
+            )
+        except PerUserCapExceeded as e:
+            await chat.edit_message(
+                chat_id, message_id,
+                f"You already have {len(e.active_chat_ids)} active chats "
+                f"(cap={e.cap}). End one to start another.",
+            )
+        except PlatformAtCapacity:
+            await chat.edit_message(
+                chat_id, message_id,
+                "The platform is at capacity right now. Please try again "
+                "in a few minutes.",
+            )
+        return
+
+    if project_mode == "host":
+        return await _bootstrap_project_host(
+            ctx, project, chat, chat_id, message_id,
+        )
 
     from openclow.services.project_lock import acquire_project_lock, get_lock_holder
     lock = await acquire_project_lock(project_id, task_id=f"bootstrap-{project.name}", wait=5)
@@ -1757,6 +1181,21 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
 
     await _set_project_status(project_id, "bootstrapping")
 
+    # Clear any stale cancel flag — a previous Stop click sets this key (600s TTL) and the
+    # cancel heartbeat inside _run_master_agent would kill this bootstrap within 5 seconds.
+    # Telegram/Slack don't have this mechanism; web does, so we must wipe it on fresh starts.
+    if chat_id.startswith("web:"):
+        try:
+            _parts = chat_id.split(":")
+            if len(_parts) == 3:
+                import redis.asyncio as _aioredis
+                _rc = _aioredis.from_url(settings.redis_url)
+                await _rc.delete(f"openclow:cancel_session:{_parts[2]}")
+                await _rc.aclose()
+                log.info("bootstrap.cleared_cancel_flag", session=_parts[2])
+        except Exception:
+            pass
+
     workspace = os.path.join(settings.workspace_base_path, "_cache", project.name)
     compose = project.docker_compose_file or "docker-compose.yml"
     compose_project = f"openclow-{project.name}"
@@ -1764,6 +1203,7 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
     # Use allocated port for this project (deterministic, unique per project)
     from openclow.services.port_allocator import get_app_port
     port = get_app_port(project_id)
+    await _save_project_port(project_id, port)  # persist so tunnel health loop can find this project
 
     if not message_id or message_id == "0":
         message_id = await chat.send_message(chat_id, f"Setting up {project.name}...")
@@ -1843,6 +1283,29 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
         await checklist.start_step(2)
         master_success = False
         max_agent_attempts = 2
+
+        # Background heartbeat — sends elapsed time every 30s during agent run
+        # so the UI progress bar never looks frozen during long Docker tool calls
+        _heartbeat_stop = asyncio.Event()
+        async def _heartbeat():
+            elapsed = 0
+            while not _heartbeat_stop.is_set():
+                await asyncio.sleep(30)
+                elapsed += 30
+                # Find the current running step
+                current = next(
+                    (s["name"] for s in checklist.steps if s["status"] == "running"),
+                    "working...",
+                )
+                try:
+                    running_idx = next(
+                        i for i, s in enumerate(checklist.steps) if s["status"] == "running"
+                    )
+                    await checklist.update_step(running_idx, f"{current} — {elapsed}s elapsed...")
+                except Exception:
+                    pass
+        _heartbeat_task = asyncio.ensure_future(_heartbeat())
+
         for attempt in range(1, max_agent_attempts + 1):
             try:
                 master_success = await _run_master_agent(
@@ -1850,6 +1313,8 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
                 )
                 break  # Success or graceful failure — don't retry
             except asyncio.CancelledError:
+                _heartbeat_stop.set()
+                _heartbeat_task.cancel()
                 log.info("bootstrap.cancelled_by_user", project=project.name)
                 await _bail("Bootstrap cancelled by user")
                 return
@@ -1865,9 +1330,14 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
                             break
                     await checklist.update_step(resume_step, f"retrying (attempt {attempt + 1})...")
                 else:
+                    _heartbeat_stop.set()
+                    _heartbeat_task.cancel()
                     await _bail(f"Agent error after {attempt} attempts: {str(e)[:150]}")
                     return
-        
+
+        _heartbeat_stop.set()
+        _heartbeat_task.cancel()
+
         # Validate results — trust the agent, verify with real checks
         if master_success:
             # Agent said BOOTSTRAP_COMPLETE — trust it.
@@ -1959,53 +1429,70 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
             await checklist.update_step(7, f"creating tunnel...")
             url = await start_tunnel(project.name, tunnel_target, host_header=host_header)
             if url:
-                tunnel_url = url
-                # Configure app .env to use tunnel URL (fix mixed content, CORS, etc.)
-                await _configure_app_for_tunnel(workspace, url, compose_project)
-                await checklist.update_step(7, "rebuilding assets with tunnel URL...")
-                # Agent rebuilds frontend + clears caches via MCP docker_exec
-                try:
-                    from claude_agent_sdk import query, ClaudeAgentOptions
-                    from openclow.providers.llm.claude import _mcp_docker
-                    post_opts = ClaudeAgentOptions(
-                        cwd=workspace,
-                        system_prompt="DevOps engineer. Rebuild frontend assets and clear caches after tunnel URL change. Use Docker MCP tools only.",
-                        model="claude-sonnet-4-6",
-                        allowed_tools=[
-                            "Read", "Glob", "Grep",
-                            "mcp__docker__docker_exec",
-                            "mcp__docker__compose_ps",
-                            "mcp__docker__list_containers",
-                            "mcp__docker__container_logs",
-                        ],
-                        mcp_servers={"docker": _mcp_docker()},
-                        permission_mode="bypassPermissions",
-                        max_turns=10,
-                    )
-                    post_prompt = (
-                        f"The tunnel URL for project '{project.name}' was just set to: {url}\n"
-                        f"The .env at {workspace}/.env has been updated. ASSET_URL is empty (relative paths)\n"
-                        f"so assets load correctly from both localhost and the tunnel URL (no CORS issues).\n"
-                        f"Compose project: {compose_project}\n\n"
-                        f"DO THIS:\n"
-                        f"1. compose_ps(\"{compose_project}\") — find the app container\n"
-                        f"2. docker_exec into the app container to rebuild frontend assets:\n"
-                        f"   - Find workdir: docker_exec(container, 'pwd') then docker_exec(container, 'ls')\n"
-                        f"   - Try in order: npm run build, npx vite build, ./node_modules/.bin/vite build\n"
-                        f"   - If node/npm not in PATH, look for it: find / -name node -type f 2>/dev/null | head -3\n"
-                        f"   - If no node at all in the container, skip frontend rebuild\n"
-                        f"3. Clear framework caches via docker_exec:\n"
-                        f"   - Laravel: php artisan config:clear && php artisan cache:clear && php artisan view:clear\n"
-                        f"   - Django: python manage.py clear_cache\n"
-                        f"   - Skip if no framework detected\n"
-                        f"4. NEVER modify project source code (*.php, *.js, etc). Only .env and infra config.\n"
-                        f"5. Output DONE when finished\n"
-                    )
-                    async for msg in query(prompt=post_prompt, options=post_opts):
-                        pass
-                except Exception as e:
-                    log.warning("bootstrap.post_tunnel_agent_failed", error=str(e))
-                await checklist.complete_step(7, url[:50])
+                # Verify the tunnel URL is actually reachable before proceeding
+                from openclow.services.tunnel_service import verify_tunnel_url, stop_tunnel
+                await checklist.update_step(7, "verifying tunnel...")
+                if not await verify_tunnel_url(url):
+                    # First attempt failed — stop, wait, retry once
+                    log.warning("bootstrap.tunnel_verify_failed", url=url)
+                    await stop_tunnel(project.name)
+                    await asyncio.sleep(3)
+                    url = await start_tunnel(project.name, tunnel_target, host_header=host_header)
+                    if url and not await verify_tunnel_url(url):
+                        log.warning("bootstrap.tunnel_verify_failed_retry", url=url)
+                        url = None  # give up — report tunnel as failed
+
+                if not url:
+                    await checklist.fail_step(7, "tunnel not reachable after retry")
+                    # Continue to final summary — tunnel failure shouldn't block the rest
+                else:
+                    tunnel_url = url
+                    # Configure app .env to use tunnel URL (fix mixed content, CORS, etc.)
+                    await _configure_app_for_tunnel(workspace, url, compose_project)
+                    await checklist.update_step(7, "rebuilding assets with tunnel URL...")
+                    # Agent rebuilds frontend + clears caches via MCP docker_exec
+                    try:
+                        from claude_agent_sdk import query, ClaudeAgentOptions
+                        from openclow.providers.llm.claude import _mcp_docker
+                        post_opts = ClaudeAgentOptions(
+                            cwd=workspace,
+                            system_prompt="DevOps engineer. Rebuild frontend assets and clear caches after tunnel URL change. Use Docker MCP tools only." + _NO_DOCKER_SOCKET,
+                            model="claude-sonnet-4-6",
+                            allowed_tools=[
+                                "Read", "Glob", "Grep",
+                                "mcp__docker__docker_exec",
+                                "mcp__docker__compose_ps",
+                                "mcp__docker__list_containers",
+                                "mcp__docker__container_logs",
+                            ],
+                            mcp_servers={"docker": _mcp_docker()},
+                            permission_mode="bypassPermissions",
+                            max_turns=10,
+                        )
+                        post_prompt = (
+                            f"The tunnel URL for project '{project.name}' was just set to: {url}\n"
+                            f"The .env at {workspace}/.env has been updated. ASSET_URL is empty (relative paths)\n"
+                            f"so assets load correctly from both localhost and the tunnel URL (no CORS issues).\n"
+                            f"Compose project: {compose_project}\n\n"
+                            f"DO THIS:\n"
+                            f"1. compose_ps(\"{compose_project}\") — find the app container\n"
+                            f"2. docker_exec into the app container to rebuild frontend assets:\n"
+                            f"   - Find workdir: docker_exec(container, 'pwd') then docker_exec(container, 'ls')\n"
+                            f"   - Try in order: npm run build, npx vite build, ./node_modules/.bin/vite build\n"
+                            f"   - If node/npm not in PATH, look for it: find / -name node -type f 2>/dev/null | head -3\n"
+                            f"   - If no node at all in the container, skip frontend rebuild\n"
+                            f"3. Clear framework caches via docker_exec:\n"
+                            f"   - Laravel: php artisan config:clear && php artisan cache:clear && php artisan view:clear\n"
+                            f"   - Django: python manage.py clear_cache\n"
+                            f"   - Skip if no framework detected\n"
+                            f"4. NEVER modify project source code (*.php, *.js, etc). Only .env and infra config.\n"
+                            f"5. Output DONE when finished\n"
+                        )
+                        async for msg in query(prompt=post_prompt, options=post_opts):
+                            pass
+                    except Exception as e:
+                        log.warning("bootstrap.post_tunnel_agent_failed", error=str(e))
+                    await checklist.complete_step(7, url[:50])
             else:
                 await checklist.fail_step(7, "tunnel failed to start")
         except Exception as e:
@@ -2076,6 +1563,361 @@ async def bootstrap_project(ctx: dict, project_id: int, chat_id: str, message_id
                     ActionButton("🔗 Unlink", f"project_unlink:{project.id}"),
                     ActionButton("🗑 Remove", f"project_remove:{project.id}", style="danger"),
                 ]),
+                ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+            ]))
+        except Exception:
+            pass
+    finally:
+        if lock:
+            await lock.release()
+        from openclow.services.audit_service import flush
+        await flush()
+        await chat.close()
+
+
+# ===========================================================================
+# Host-mode bootstrap: mode="host" projects (already-running app on VPS host)
+# ===========================================================================
+
+HOST_MASTER_BOOTSTRAP_PROMPT = """You are a senior DevOps engineer bringing up a project on a VPS host.
+
+PROJECT: {project_name}
+TECH STACK: {tech_stack}
+PROJECT DIR: {project_dir}
+INSTALL GUIDE: {install_guide_path}
+START COMMAND: {start_command}
+APP PORT: {app_port}
+HEALTH URL: {health_url}
+PROCESS MANAGER: {process_manager}
+
+INSTALL GUIDE CONTENTS (first 4KB):
+---
+{install_guide_body}
+---
+
+MISSION — execute the steps below IN ORDER. Stream narration with STATUS:, DIAGNOSIS:,
+ACTION: and STEP_DONE: N <summary> lines so the user can follow what you're doing.
+
+RULES:
+- MCP-first: always attempt with the host_* tools before reasoning alone. Available host
+  tools: host_cd, host_git_pull, host_read_install_guide, host_run_command (allowlisted
+  shell), host_check_port, host_curl, host_process_status, host_tail_log, host_start_app,
+  host_stop_app, host_service_status.
+- Work INSIDE the project dir. Every host_run_command call takes project_dir as its cwd.
+- Read the install guide carefully and follow the commands it specifies — do not invent
+  a different install path unless the guide's commands fail.
+- Narrate before AND after each tool call. Before: one sentence on what you're about to
+  do. After: 2-3 sentences on what actually happened.
+- NEVER GIVE UP. If a command fails, read the output, form a concrete hypothesis, try a
+  DIFFERENT approach. "The tool kept failing" is not a reason — understand WHY and fix
+  THAT first. Document at least three concretely-different attempts before marking
+  STEP_FAIL.
+
+STEPS:
+
+STEP 1 — Sync code
+  host_git_pull("{project_dir}")
+  STEP_DONE: 1 <short git log line>
+
+STEP 2 — Read the install guide
+  host_read_install_guide("{project_dir}")
+  STEP_DONE: 2 <guide summary in ~20 words>
+
+STEP 3 — Run setup commands (install deps, migrate, etc.)
+  Use host_run_command for each command from the guide in order.
+  If a command fails, diagnose (missing binary? wrong dir? permissions?) and try a
+  different approach.
+  STEP_DONE: 3 <what you installed / configured>
+
+STEP 4 — Ensure the app is running
+  host_process_status("{project_name}") — see if it's already up.
+  If not: host_start_app("{project_dir}", "{start_command}")
+  STEP_DONE: 4 <PID + what you started>
+
+STEP 5 — Health check
+  host_curl("{health_url}") — expect 2xx/3xx.
+  If failed: host_tail_log (check .openclow-start.log and any app log), diagnose, fix,
+  restart via host_stop_app + host_start_app, re-verify.
+  STEP_DONE: 5 HTTP <code>
+
+STEP 6 — Done
+  Output the marker: BOOTSTRAP_COMPLETE
+
+If you cannot get past a step after three concrete attempts, output:
+  BOOTSTRAP_FAILED: <step number> — <exact reason + what each attempt returned>
+"""
+
+
+async def _bootstrap_project_host(
+    ctx: dict, project, chat, chat_id: str, message_id: str,
+):
+    """Host-mode bootstrap. Uses host_* MCP tools instead of Docker compose.
+    Tunnel still runs via tunnel_service (targets http://host.docker.internal:PORT
+    from inside the worker container — the same address works both in the local
+    simulation and on a production VPS where docker-compose adds the
+    host-gateway extra_host)."""
+    import asyncio
+    import os
+
+    from openclow.services.checklist_reporter import ChecklistReporter
+    from openclow.services.host_guard import run_host
+    from openclow.services.project_lock import acquire_project_lock, get_lock_holder
+
+    project_id = project.id
+    lock = await acquire_project_lock(project_id, task_id=f"bootstrap-{project.name}", wait=5)
+    if lock is None:
+        holder = await get_lock_holder(project_id)
+        await chat.edit_message(
+            chat_id, message_id,
+            f"Cannot bootstrap — project is locked by task {holder}.",
+        )
+        await chat.close()
+        return
+
+    await _set_project_status(project_id, "bootstrapping")
+
+    if not project.project_dir:
+        await chat.edit_message(chat_id, message_id,
+                                f"Project {project.name} has no project_dir set.")
+        await _set_project_status(project_id, "failed")
+        if lock:
+            await lock.release()
+        return
+
+    if not os.path.isdir(project.project_dir):
+        await chat.edit_message(chat_id, message_id,
+                                f"Project dir {project.project_dir} does not exist on the host.")
+        await _set_project_status(project_id, "failed")
+        if lock:
+            await lock.release()
+        return
+
+    if not message_id or message_id == "0":
+        message_id = await chat.send_message(chat_id, f"Setting up {project.name}...")
+        message_id = str(message_id)
+
+    checklist = ChecklistReporter(
+        chat, chat_id, message_id,
+        title=f"Setting up {project.name} (host mode)",
+        subtitle=project.tech_stack or "",
+    )
+    HOST_STEPS = [
+        "Sync code",
+        "Read install guide",
+        "Install dependencies",
+        "Start app",
+        "Health check",
+        "Create public URL",
+    ]
+    checklist.set_steps(HOST_STEPS)
+    await checklist._force_render()
+    await checklist.start()
+
+    tunnel_url = ""
+    master_success = False
+
+    try:
+        from claude_agent_sdk import query, ClaudeAgentOptions
+        from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
+        from openclow.providers.llm.claude import _mcp_host
+
+        # Load install guide contents for the prompt
+        install_body = ""
+        if project.install_guide_path:
+            guide_full = os.path.join(project.project_dir, project.install_guide_path)
+            if os.path.isfile(guide_full):
+                try:
+                    with open(guide_full, encoding="utf-8", errors="replace") as f:
+                        install_body = f.read(4096)
+                except Exception:
+                    install_body = ""
+
+        health_url = project.health_url or (
+            f"http://localhost:{project.app_port}/" if project.app_port else ""
+        )
+
+        prompt = HOST_MASTER_BOOTSTRAP_PROMPT.format(
+            project_name=project.name,
+            tech_stack=project.tech_stack or "unknown",
+            project_dir=project.project_dir,
+            install_guide_path=project.install_guide_path or "(none)",
+            start_command=project.start_command or "(not set — infer from the install guide)",
+            app_port=project.app_port or "(not set)",
+            health_url=health_url or "(not set)",
+            process_manager=project.process_manager or "manual",
+            install_guide_body=install_body or "(install guide not found)",
+        )
+
+        # Optional Redis stream channel for tool-output streaming to the web UI.
+        env = dict(os.environ)
+        if chat_id.startswith("web:"):
+            _parts = chat_id.split(":")
+            if len(_parts) == 3:
+                env["HOST_STREAM_CHANNEL"] = f"wc:{_parts[1]}:{_parts[2]}"
+
+        mcp_host_def = _mcp_host()
+        mcp_host_def["env"] = env  # propagate HOST_STREAM_CHANNEL to the MCP subprocess
+
+        options = ClaudeAgentOptions(
+            cwd=project.project_dir,
+            system_prompt=(
+                "You are a Senior DevOps Engineer and AI Chat Support Engineer. "
+                "Use the host_* MCP tools to install and run an already-on-disk project. "
+                "Stream narration before and after every tool call. Never give up."
+            ),
+            model="claude-sonnet-4-6",
+            allowed_tools=[
+                "Read", "Glob", "Grep",
+                "mcp__host__host_cd",
+                "mcp__host__host_git_pull",
+                "mcp__host__host_read_install_guide",
+                "mcp__host__host_run_command",
+                "mcp__host__host_check_port",
+                "mcp__host__host_curl",
+                "mcp__host__host_process_status",
+                "mcp__host__host_tail_log",
+                "mcp__host__host_start_app",
+                "mcp__host__host_stop_app",
+                "mcp__host__host_service_status",
+            ],
+            mcp_servers={"host": mcp_host_def},
+            permission_mode="bypassPermissions",
+            max_turns=40,
+        )
+
+        await checklist.start_step(0)
+
+        full_output = ""
+        last_step = -1
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        full_output += block.text
+                        # Advance checklist on STEP_DONE: N markers
+                        for m in re.finditer(r"STEP_DONE:\s*(\d+)\s*(.*)", block.text):
+                            n = int(m.group(1))
+                            detail = m.group(2).strip()[:60]
+                            if 1 <= n <= 5 and n - 1 > last_step:
+                                # Fill in any skipped steps as completed too
+                                for i in range(last_step + 1, n):
+                                    if checklist.steps[i]["status"] != "done":
+                                        await checklist.complete_step(i, "ok")
+                                await checklist.complete_step(n - 1, detail or "ok")
+                                last_step = n - 1
+                                if n < 5:
+                                    await checklist.start_step(n)
+                    elif isinstance(block, ToolUseBlock):
+                        try:
+                            from openclow.worker.tasks._agent_base import describe_tool
+                            desc = describe_tool(block)
+                            running_idx = next(
+                                (i for i, s in enumerate(checklist.steps)
+                                 if s["status"] == "running"),
+                                last_step + 1,
+                            )
+                            await checklist.update_step(
+                                max(0, min(running_idx, 4)), desc[:80],
+                            )
+                        except Exception:
+                            pass
+
+        if "BOOTSTRAP_COMPLETE" in full_output:
+            master_success = True
+            for i in range(5):
+                if checklist.steps[i]["status"] != "done":
+                    await checklist.complete_step(i, "completed")
+        elif "BOOTSTRAP_FAILED" in full_output:
+            # find running and mark as failed with extracted reason
+            reason_m = re.search(r"BOOTSTRAP_FAILED:\s*\d+\s*[—-]\s*(.+)", full_output)
+            reason = (reason_m.group(1) if reason_m else "agent reported failure").strip()[:150]
+            for i in range(5):
+                if checklist.steps[i]["status"] == "running":
+                    await checklist.fail_step(i, reason[:40])
+            checklist._footer = f"❌ {reason}"
+        else:
+            # Verify by curl regardless — agent may have stopped emitting markers
+            if health_url:
+                rc, out = await run_host(
+                    f"curl -sS -o /dev/null -w '%{{http_code}}' --max-time 5 {health_url}",
+                    cwd=project.project_dir, actor="bootstrap", timeout=8,
+                    project_name=project.name, project_id=project.id,
+                )
+                if rc == 0 and out.strip() and out.strip()[0] in "23":
+                    master_success = True
+                    for i in range(5):
+                        if checklist.steps[i]["status"] != "done":
+                            await checklist.complete_step(i, "verified running")
+
+        if not master_success:
+            await _set_project_status(project_id, "failed")
+            from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+            await checklist.stop()
+            await checklist._force_render(keyboard=ActionKeyboard(rows=[
+                ActionRow([ActionButton("🔄 Retry", f"project_bootstrap:{project.id}")]),
+                ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
+            ]))
+            log.warning("bootstrap.host_failed", project=project.name)
+            return
+
+        # ── Step 6 (index 5): public URL ──
+        # If the project has its own domain (nginx + owned domain on the VPS),
+        # skip cloudflared entirely — just return the configured public_url.
+        # Otherwise fall back to spinning up a cloudflared tunnel.
+        await checklist.start_step(5)
+        tunnel_enabled = getattr(project, "tunnel_enabled", True)
+        configured_url = getattr(project, "public_url", None)
+        if configured_url and not tunnel_enabled:
+            tunnel_url = configured_url
+            await checklist.complete_step(5, f"domain: {configured_url[:48]}")
+        elif project.app_port:
+            tunnel_target = f"http://host.docker.internal:{project.app_port}"
+            try:
+                from openclow.services.tunnel_service import start_tunnel, stop_tunnel, verify_tunnel_url
+                url = await start_tunnel(project.name, tunnel_target)
+                if url:
+                    if not await verify_tunnel_url(url):
+                        await stop_tunnel(project.name)
+                        await asyncio.sleep(3)
+                        url = await start_tunnel(project.name, tunnel_target)
+                if url:
+                    tunnel_url = url
+                    await checklist.complete_step(5, url[:50])
+                else:
+                    await checklist.fail_step(5, "tunnel failed")
+            except Exception as e:
+                await checklist.fail_step(5, str(e)[:40])
+        else:
+            await checklist.fail_step(5, "no app_port set")
+
+        await _set_project_status(project_id, "active")
+
+        checklist._footer = "🚀 Host-mode project ready!"
+        if tunnel_url:
+            checklist._footer += f"\n🌐 {tunnel_url}"
+
+        from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow, open_app_btns
+        rows = [
+            ActionRow(open_app_btns(project.id, tunnel_url=tunnel_url)),
+            ActionRow([
+                ActionButton("🚀 New Task", "menu:task"),
+                ActionButton("💚 Health", f"health:{project.id}"),
+            ]),
+        ]
+        await checklist.stop()
+        await checklist._force_render(keyboard=ActionKeyboard(rows=rows))
+        log.info("bootstrap.host_complete", project=project.name, tunnel=tunnel_url)
+
+    except (Exception, asyncio.CancelledError, TimeoutError) as e:
+        await _set_project_status(project_id, "failed")
+        await checklist.stop()
+        error_msg = "Cancelled" if isinstance(e, (asyncio.CancelledError, TimeoutError)) else str(e)[:150]
+        checklist._footer = f"❌ {error_msg}"
+        log.error("bootstrap.host_failed", project=project.name, error=error_msg)
+        try:
+            from openclow.providers.actions import ActionButton, ActionKeyboard, ActionRow
+            await checklist._force_render(keyboard=ActionKeyboard(rows=[
+                ActionRow([ActionButton("🔄 Retry", f"project_bootstrap:{project.id}")]),
                 ActionRow([ActionButton("◀️ Main Menu", "menu:main")]),
             ]))
         except Exception:

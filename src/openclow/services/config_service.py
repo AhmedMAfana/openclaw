@@ -203,6 +203,43 @@ async def get_config_with_meta(category: str, key: str) -> dict | None:
         }
 
 
+# ---------------------------------------------------------------------------
+# Host-mode settings (category="host")
+# ---------------------------------------------------------------------------
+# Keys:
+#   projects_base   — absolute host path where user apps live (simulate or prod)
+#   mode_default    — "docker" | "host" — fallback when onboarding picks a mode
+#   auto_clone      — whether the agent should clone missing repos on first setup
+
+import os
+
+
+_HOST_DEFAULTS = {
+    "projects_base": os.environ.get("HOST_PROJECTS_BASE", "/srv/projects"),
+    "mode_default": os.environ.get("PROJECT_MODE_DEFAULT", "docker"),
+    "auto_clone": True,
+}
+
+
+async def get_host_setting(key: str):
+    """Read a host.<key> setting from DB; fall back to env/default on miss."""
+    row = await get_config("host", key)
+    if row is None:
+        return _HOST_DEFAULTS.get(key)
+    # PlatformConfig stores dicts; unwrap {"value": ...} if present
+    if isinstance(row, dict) and "value" in row and len(row) == 1:
+        return row["value"]
+    return row
+
+
+async def set_host_setting(key: str, value) -> None:
+    await set_config("host", key, {"value": value})
+
+
+async def get_all_host_settings() -> dict:
+    return {k: await get_host_setting(k) for k in _HOST_DEFAULTS}
+
+
 async def delete_config(category: str, key: str) -> bool:
     """Soft-delete a config entry by setting is_active = False."""
     async with async_session() as session:

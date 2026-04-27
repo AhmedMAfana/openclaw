@@ -1,0 +1,58 @@
+name: Nightly load tests
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # 03:00 UTC daily
+  workflow_dispatch: {}    # allow manual runs
+
+jobs:
+  load:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      TAGH_DEV_E2E_CF_ZONE: ${{ secrets.NIGHTLY_CF_ZONE }}
+      TAGH_DEV_E2E_CF_TOKEN: ${{ secrets.NIGHTLY_CF_TOKEN }}
+      TAGH_DEV_E2E_GITHUB_APP_ID: ${{ secrets.NIGHTLY_GH_APP_ID }}
+      TAGH_DEV_E2E_GITHUB_APP_KEY: ${{ secrets.NIGHTLY_GH_APP_KEY }}
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/taghdev_nightly
+      REDIS_URL: redis://localhost:6379/0
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: taghdev_nightly
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s --health-timeout=5s --health-retries=10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s --health-timeout=5s --health-retries=10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: pip install uv
+      - name: Sync deps
+        run: uv sync --frozen
+      - name: Run migrations
+        run: uv run alembic upgrade head
+      - name: Run load suite
+        run: uv run pytest -m load --run-load-tests -q
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-load-logs
+          path: |
+            .pytest_cache/
+            artifacts/load/
+          if-no-files-found: ignore

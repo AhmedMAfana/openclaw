@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tagh.co.uk/schemas/instance-overlay/v1.json",
+  "title": "TAGH Instance Overlay (compose.override.yml shape)",
+  "description": "Shape of the platform-generated docker-compose.override.yml written under <per-instance-root>/_platform/. This schema is for static contract testing — it describes what the overlay generator MUST emit and what the layered-merge fitness check verifies. It is not a docker-compose schema replacement; only the platform-owned portions are constrained.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["services", "networks"],
+  "properties": {
+    "name": {
+      "description": "Compose project name. Must equal the per-instance compose_project (tagh-inst-<slug>).",
+      "type": "string",
+      "pattern": "^tagh-inst-[a-f0-9]{14}$"
+    },
+    "services": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/ServiceOverride" },
+      "required": ["cloudflared", "projctl"],
+      "properties": {
+        "cloudflared": { "$ref": "#/$defs/CloudflaredService" },
+        "projctl": { "$ref": "#/$defs/ProjctlService" }
+      }
+    },
+    "networks": {
+      "type": "object",
+      "required": ["instance"],
+      "properties": {
+        "instance": {
+          "type": "object",
+          "properties": {
+            "driver": { "type": "string", "enum": ["bridge"] }
+          }
+        }
+      }
+    },
+    "volumes": {
+      "type": "object",
+      "properties": {
+        "cloudflared-creds": { "type": "object" },
+        "projctl-state": { "type": "object" }
+      }
+    }
+  },
+  "$defs": {
+    "ServiceOverride": {
+      "description": "Override declaration for a service that exists in the substrate compose. Empty `ports` is the substrate-port-strip mechanism (Principle V).",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "ports": {
+          "type": "array",
+          "maxItems": 0,
+          "description": "MUST be empty for every non-cloudflared service so the merged compose has no host-port bindings outside the tunnel sidecar."
+        },
+        "networks": {
+          "type": "array",
+          "items": { "type": "string" },
+          "contains": { "const": "instance" },
+          "description": "MUST include `instance` so the service joins the per-instance network the cloudflared sidecar uses for ingress."
+        },
+        "environment": {
+          "description": "MUST be list-form `- NAME` references only (inherits from compose-up parent env). Mapping form `NAME: value` is forbidden because the value would land on disk (Principle IV).",
+          "anyOf": [
+            { "type": "array", "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" } },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "CloudflaredService": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["image", "command", "networks"],
+      "properties": {
+        "image": { "type": "string", "pattern": "^cloudflare/cloudflared(:|$)" },
+        "command": { "description": "MUST run `tunnel … run` against the bind-mounted config." },
+        "volumes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "MUST bind-mount the platform-generated cloudflared.yml read-only into /etc/cloudflared/config.yml."
+        },
+        "environment": {
+          "anyOf": [
+            { "type": "array", "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" } },
+            { "type": "null" }
+          ],
+          "description": "Carries TUNNEL_TOKEN as a list-form reference."
+        },
+        "networks": {
+          "type": "array",
+          "contains": { "const": "instance" }
+        },
+        "ports": {
+          "description": "Cloudflared MAY expose nothing to the host. (No platform service publishes host ports either; ingress is via the named tunnel.)",
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "ProjctlService": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["image", "volumes", "networks"],
+      "properties": {
+        "image": { "type": "string", "pattern": "^tagh/projctl(:|$)" },
+        "volumes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "MUST bind-mount _platform/projctl-config.yml read-only into /projctl/config.yml."
+        },
+        "environment": {
+          "anyOf": [
+            { "type": "array", "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" } },
+            { "type": "null" }
+          ],
+          "description": "Carries HEARTBEAT_SECRET, HEARTBEAT_URL, and any manifest.spec.env.inherit names as list-form references."
+        },
+        "networks": {
+          "type": "array",
+          "contains": { "const": "instance" }
+        },
+        "depends_on": {
+          "type": "object",
+          "description": "MUST declare a depends_on for the manifest's primary_service with condition service_healthy or service_started."
+        }
+      }
+    }
+  }
+}

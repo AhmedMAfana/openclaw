@@ -1,0 +1,107 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Tailwind v4's auto-scanner was skipping src/components/assistant-ui/** (path
+   matches a package-like name), so utilities used only in thread.tsx — h-1.5,
+   min-h-7, max-h-40/44, min-h-12/14 — were never emitted. Force-scan it. */
+@source "./components/assistant-ui/**/*.{ts,tsx,js,jsx}";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --animate-shimmer: shimmer-sweep var(--shimmer-duration, 1000ms) linear infinite both;
+  @keyframes shimmer-sweep {
+    from { background-position: 150% 0; }
+    to { background-position: -100% 0; }
+  }
+}
+
+/* Dark theme (default) */
+:root {
+  --radius: 0.75rem;
+  --background: oklch(0.09 0.008 265);
+  --foreground: oklch(0.94 0.006 265);
+  --card: oklch(0.12 0.008 265);
+  --card-foreground: oklch(0.94 0.006 265);
+  --popover: oklch(0.13 0.008 265);
+  --popover-foreground: oklch(0.94 0.006 265);
+  /* Primary is a near-white neutral, matching the login page — the purple
+     indigo lives only in background atmospherics (radial washes in the
+     welcome / login). Keeps CTAs monochrome and classy. */
+  --primary: oklch(0.97 0 0);
+  --primary-foreground: oklch(0.14 0.005 265);
+  --secondary: oklch(0.16 0.008 265);
+  --secondary-foreground: oklch(0.94 0.006 265);
+  --muted: oklch(0.17 0.008 265);
+  --muted-foreground: oklch(0.58 0.012 265);
+  --accent: oklch(0.17 0.008 265);
+  --accent-foreground: oklch(0.94 0.006 265);
+  --destructive: oklch(0.56 0.22 27);
+  --border: oklch(0.23 0.008 265);
+  --input: oklch(0.23 0.008 265);
+  --ring: oklch(0.70 0.02 265);
+  --sidebar: oklch(0.07 0.008 265);
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    border-color: var(--border);
+  }
+  body {
+    margin: 0;
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  #root {
+    width: 100%;
+    height: 100vh;
+  }
+}
+
+/* Screen-reader-only: Tailwind v4 wasn't emitting this utility for us,
+   causing aria-label spans (e.g. the Scroll-to-bottom button) to render
+   as visible text under the composer. Define it explicitly. */
+.sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+/* Subtle scrollbar styling */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: oklch(0.28 0.008 265); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: oklch(0.35 0.008 265); }

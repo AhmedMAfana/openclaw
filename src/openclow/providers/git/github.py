@@ -44,6 +44,19 @@ class GitHubProvider(GitProvider):
             ignore_errors=True,
         )
 
+    async def get_pr_for_branch(self, repo: str, branch: str) -> tuple[str | None, int | None]:
+        """Check if a PR already exists for this branch. Returns (pr_url, pr_number) or (None, None)."""
+        try:
+            result = await run_exec(
+                "gh", "pr", "view", branch, "--repo", repo,
+                "--json", "number,url", "-q", "[.number, .url] | @tsv",
+                ignore_errors=False,
+            )
+            pr_number_str, pr_url = result.strip().split("\t")
+            return pr_url, int(pr_number_str)
+        except Exception:
+            return None, None
+
     def generate_pr_body(self, task: Any) -> str:
         return (
             f"## Task\n{task.description}\n\n"

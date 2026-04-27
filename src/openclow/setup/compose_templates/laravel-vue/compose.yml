@@ -1,0 +1,173 @@
+name: ${COMPOSE_PROJECT}
+
+# Per-instance Laravel 11 + Vue 3 (Vite) + MySQL stack.
+#
+# Principle V: NO `ports:` on any service other than `cloudflared`.
+# All ingress arrives via the Cloudflare tunnel sidecar; services
+# communicate over the per-instance compose network only.
+#
+# Two kinds of variables appear in this file:
+#   ${INSTANCE_*}, ${COMPOSE_PROJECT}, ${CF_TUNNEL_ID}
+#     → baked in at render time by instance_compose_renderer.py.
+#   List-form `environment: - KEY`
+#     → inherited from the parent process env at compose-up time.
+#       The ARQ provision_instance job exports DB_PASSWORD,
+#       GITHUB_TOKEN, HEARTBEAT_SECRET, HEARTBEAT_URL, and
+#       CF_TUNNEL_TOKEN before invoking `docker compose up`.
+
+services:
+  app:
+    image: tagh/laravel-vue-app:latest
+    restart: unless-stopped
+    working_dir: /var/www/html
+    environment:
+      - INSTANCE_SLUG=${INSTANCE_SLUG}
+      - INSTANCE_HOST=${INSTANCE_HOST}
+      - INSTANCE_HMR_HOST=${INSTANCE_HMR_HOST}
+      - APP_ENV=local
+      - APP_DEBUG=true
+      - APP_URL=https://${INSTANCE_HOST}
+      # APP_KEY is generated per-instance by provision_instance and
+      # exported as an env var (no .env file on disk). Laravel reads it
+      # via env('APP_KEY') at config-load time. Each chat gets its own
+      # session encryption keyspace; terminate invalidates this key.
+      - APP_KEY
+      - DB_CONNECTION=mysql
+      - DB_HOST=db
+      - DB_PORT=3306
+      - DB_DATABASE=app
+      - DB_USERNAME=app
+      - DB_PASSWORD
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - GITHUB_TOKEN
+      - HEARTBEAT_SECRET
+      - HEARTBEAT_URL
+      # COMPOSER_AUTH is the standard env-var form of auth.json content
+      # (https://getcomposer.org/doc/03-cli.md#composer-auth). The
+      # orchestrator's worker has /app/auth.json mounted from the host;
+      # provision_instance reads it and exports the JSON string under
+      # this name so private VCS deps (gitlab.com, private GitHub repos)
+      # can clone without writing auth.json to the per-instance disk.
+      - COMPOSER_AUTH
+    volumes:
+      - ${WORKSPACE_HOST_DIR}/${INSTANCE_SLUG}:/var/www/html
+      - projctl-state:/var/lib/projctl
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - instance
+
+  node:
+    image: node:20-alpine
+    restart: unless-stopped
+    working_dir: /var/www/html
+    # Install front-end deps + start the Vite dev server. projctl runs
+    # inside `app` and can't docker-exec into other services, so the
+    # node service does its own bootstrap. The container restarts if
+    # `npm run dev` exits, giving the user a self-healing dev server.
+    command:
+      - sh
+      - -c
+      - |
+        if [ ! -d /var/www/html/node_modules ]; then
+          (cd /var/www/html && npm ci);
+        fi
+        # Use the platform's Vite overlay config (vite.config.tagh.mjs)
+        # so server.origin points at the cloudflared HMR hostname and
+        # laravel-vite-plugin writes the public URL to public/hot —
+        # otherwise the browser tries 0.0.0.0:5173 and fails.
+        cd /var/www/html && exec npx vite --config vite.config.tagh.mjs --host 0.0.0.0
+    environment:
+      - INSTANCE_HOST=${INSTANCE_HOST}
+      - INSTANCE_HMR_HOST=${INSTANCE_HMR_HOST}
+      - NODE_ENV=development
+    volumes:
+      - ${WORKSPACE_HOST_DIR}/${INSTANCE_SLUG}:/var/www/html
+    networks:
+      - instance
+
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      - MYSQL_DATABASE=app
+      - MYSQL_USER=app
+      - MYSQL_PASSWORD
+      - MYSQL_ROOT_PASSWORD
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - instance
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - instance
+
+  # Common Laravel-ecosystem sidecars. Always boot — projects that
+  # don't use them via `.env` (SCOUT_DRIVER=database, MAIL_MAILER=log)
+  # ignore them at near-zero runtime cost. Adding them here covers the
+  # majority of Sail-shaped projects without forcing every project to
+  # ship its own compose.
+  meilisearch:
+    image: getmeili/meilisearch:v1.10
+    restart: unless-stopped
+    environment:
+      - MEILI_NO_ANALYTICS=true
+      - MEILI_ENV=development
+    volumes:
+      - meili-data:/meili_data
+    networks:
+      - instance
+
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    environment:
+      - MP_DATA_FILE=/data/mailpit.db
+    volumes:
+      - mailpit-data:/data
+    networks:
+      - instance
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yml", "run"]
+    environment:
+      - TUNNEL_TOKEN
+    volumes:
+      - ${WORKSPACE_HOST_DIR}/${INSTANCE_SLUG}/_cloudflared.yml:/etc/cloudflared/config.yml:ro
+    depends_on:
+      - app
+      - node
+    networks:
+      - instance
+
+networks:
+  instance:
+    driver: bridge
+
+volumes:
+  # `workspace` is a host bind mount (see each service's `volumes:`
+  # block). Keeping a named volume definition out of this file avoids
+  # the legacy anonymous-volume that docker would otherwise mount in
+  # place of the bind when compose parses references from older state.
+  db-data:
+    name: ${COMPOSE_PROJECT}-db
+  projctl-state:
+    name: ${COMPOSE_PROJECT}-projctl-state
+  meili-data:
+    name: ${COMPOSE_PROJECT}-meili
+  mailpit-data:
+    name: ${COMPOSE_PROJECT}-mailpit

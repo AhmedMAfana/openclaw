@@ -1,11 +1,13 @@
 """AI-powered logs — Docker MCP fetches raw logs, Groq LLM summarizes."""
 import asyncio
 
+from openclow.utils.docker_path import get_docker_env
+
 from openclow.utils.logging import get_logger
 
 log = get_logger()
 
-ANALYSIS_PROMPT = """Analyze these Docker container logs from an OpenClow platform.
+ANALYSIS_PROMPT = """Analyze these Docker container logs from an TAGH Dev platform.
 Extract and categorize into:
 
 1. ERRORS — crashes, exceptions, failed operations (most important)
@@ -35,11 +37,13 @@ RAW LOGS:
 
 
 async def _fetch_container_logs() -> str:
-    """Fetch recent logs from all OpenClow containers."""
+    """Fetch recent logs from all TAGH Dev containers."""
     # Get container names
+    _denv = get_docker_env()
     proc = await asyncio.create_subprocess_exec(
         "docker", "ps", "--format", "{{.Names}}",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env=_denv,
     )
     stdout, _ = await proc.communicate()
     containers = [c.strip() for c in stdout.decode().strip().split("\n") if c.strip()]
@@ -52,6 +56,7 @@ async def _fetch_container_logs() -> str:
         proc = await asyncio.create_subprocess_exec(
             "docker", "logs", name, "--tail", "80", "--timestamps",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=_denv,
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)

@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tagh-devops/contracts/stream-events.schema.json",
+  "title": "Chat assistant stream-event envelopes",
+  "description": "Authoritative schema for every payload the orchestrator emits via `controller.add_data(...)` on the assistant_stream `2:`-prefixed channel. This file is the SINGLE source of truth: the backend Python validator imports it, the frontend TypeScript types are generated from it, and the pipeline-fitness audit cross-checks every emit/handle site against it. A new event type without a schema entry is a build-time error; an emitted payload that fails schema validation is a 500 in DEBUG and a `stream_event_invalid` telemetry span in prod.\n\nMaps to Constitution Principle VII (Verified Work) — every emit point must be checkable from a written contract — and Principle IV (Credential Scoping & Log Redaction) for the redactor-coverage assertion on `tool_result`. Each event lists the FRs / tasks that govern it so a reader can navigate from contract to spec to implementation.",
+  "type": "object",
+  "required": ["type"],
+  "properties": {
+    "type": {
+      "description": "Discriminator. The closed enum is the contract — the audit fails if a backend emit site uses a value not listed here OR if the frontend handles a value not listed here.",
+      "type": "string",
+      "enum": [
+        "message_id",
+        "tool_use",
+        "tool_result",
+        "instance_provisioning",
+        "instance_failed",
+        "instance_limit_exceeded",
+        "instance_upstream_degraded",
+        "instance_busy",
+        "instance_terminating",
+        "instance_retry_started",
+        "confirm",
+        "error"
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "title": "MessageId",
+      "description": "Persistence anchor. Emitted exactly once at the start of every assistant turn so the frontend can tie streamed deltas to the saved message row.",
+      "required": ["type", "id"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "message_id" },
+        "id": { "type": "string", "minLength": 1, "description": "WebChatMessage.id, stringified." }
+      }
+    },
+    {
+      "title": "ToolUse",
+      "description": "Agent invoked an MCP tool. Frontend surfaces these as a thinking-step chip.",
+      "required": ["type", "id", "tool"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "tool_use" },
+        "id": { "type": "string", "minLength": 1, "description": "Anthropic tool_use_id." },
+        "tool": { "type": "string", "minLength": 1, "description": "Human-readable tool name (e.g. `git_status`)." },
+        "input": { "type": "string", "description": "Optional truncated input preview." },
+        "status": { "type": "string", "enum": ["running", "complete", "error"] }
+      }
+    },
+    {
+      "title": "ToolResult",
+      "description": "Tool returned. Principle IV: `content` MUST run through `audit_service.redact()` before this event is emitted; the redactor-coverage fitness function asserts this.",
+      "required": ["type", "tool_use_id", "content"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "tool_result" },
+        "tool_use_id": { "type": "string", "minLength": 1 },
+        "content": { "type": "string", "maxLength": 1500, "description": "Redacted tool output, truncated to 1500 chars." },
+        "is_error": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["complete", "error"] }
+      }
+    },
+    {
+      "title": "InstanceProvisioning",
+      "description": "T070 — Container-mode chat is bringing up its instance. Frontend renders a non-blocking starting-up banner. ETA is the SC-002 cold-path budget.",
+      "required": ["type", "slug", "estimated_seconds"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "instance_provisioning" },
+        "slug": { "type": "string", "pattern": "^inst-[0-9a-f]{14}$" },
+        "estimated_seconds": { "type": "integer", "minimum": 1, "maximum": 600 }
+      }
+    },
+    {
+      "title": "InstanceFailed",
+      "description": "T080 — Instance reached terminal `failed` state. Frontend renders a card with Retry + Main Menu actions per CLAUDE.md No Dead Ends. The optional `message` carries the per-failure-code prose `_failure_chat_copy` previously injected into the LLM's text channel — now structured so the UI owns the rendering.",
+      "required": ["type", "slug", "failure_code", "actions"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "instance_failed" },
+        "slug": { "type": "string", "pattern": "^inst-[0-9a-f]{14}$" },
+        "failure_code": {
+          "type": "string",
+          "enum": [
+            "image_build", "compose_up", "projctl_up", "tunnel_provision",
+            "dns", "health_check", "oom", "storage_full",
+            "orchestrator_crash", "unknown"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000, "description": "Human-readable failure copy from `_failure_chat_copy(failure_code, failure_message)`. Frontend renders this as the card body." },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/CardAction" }
+        }
+      }
+    },
+    {
+      "title": "InstanceLimitExceeded",
+      "description": "T044 — Either the user is at their per-user cap (`per_user_cap` variant; FR-030a) or the platform is at capacity (`platform_capacity` variant; FR-030). The two MUST stay distinct so the UI can render different copy.",
+      "required": ["type", "variant"],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "title": "PerUserCapVariant",
+          "required": ["type", "variant", "cap", "active_chat_ids", "instances_endpoint", "actions"],
+          "properties": {
+            "type": { "const": "instance_limit_exceeded" },
+            "variant": { "const": "per_user_cap" },
+            "cap": { "type": "integer", "minimum": 1 },
+            "active_chat_ids": { "type": "array", "items": { "type": "integer" }, "minItems": 1 },
+            "instances_endpoint": { "type": "string", "pattern": "^/api/users/\\d+/instances$" },
+            "actions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/CardAction" } }
+          },
+          "additionalProperties": false
+        },
+        {
+          "title": "PlatformCapacityVariant",
+          "required": ["type", "variant", "retry_after_s"],
+          "properties": {
+            "type": { "const": "instance_limit_exceeded" },
+            "variant": { "const": "platform_capacity" },
+            "retry_after_s": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    {
+      "title": "InstanceUpstreamDegraded",
+      "description": "T084 — Per-message poll of the Redis upstream-state cache. Renders a non-blocking pill in the chat. FR-027a strict: instance status NEVER flipped to `failed` regardless.",
+      "required": ["type", "slug", "capabilities"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "instance_upstream_degraded" },
+        "slug": { "type": "string", "pattern": "^inst-[0-9a-f]{14}$" },
+        "capabilities": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "string", "minLength": 1 },
+          "description": "Map of capability name (e.g. preview_url) to upstream identifier (e.g. cloudflare)."
+        }
+      }
+    },
+    {
+      "title": "InstanceBusy",
+      "description": "T037a — A second concurrent message hit the per-instance lock and could not acquire it within the patience window. Frontend shows an amber pill, no destructive UX.",
+      "required": ["type", "slug"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "instance_busy" },
+        "slug": { "type": "string", "pattern": "^inst-[0-9a-f]{14}$" }
+      }
+    },
+    {
+      "title": "InstanceTerminating",
+      "description": "T073 — User confirmed end-session. Frontend shows a teardown indicator; instance row will flip to `destroyed` on the worker job's completion.",
+      "required": ["type", "slug"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "instance_terminating" },
+        "slug": { "type": "string", "pattern": "^inst-[0-9a-f]{14}$" }
+      }
+    },
+    {
+      "title": "InstanceRetryStarted",
+      "description": "T080 — User tapped Retry on a failed-provision card. Frontend shows a green pill while the new provision is in-flight.",
+      "required": ["type", "failed_instance_id"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "instance_retry_started" },
+        "failed_instance_id": { "type": "string", "format": "uuid" }
+      }
+    },
+    {
+      "title": "Confirm",
+      "description": "Generic two-step destructive-confirm prompt. Frontend renders ConfirmCard with Cancel mandatory (CLAUDE.md No Dead Ends).",
+      "required": ["type", "prompt", "actions"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "confirm" },
+        "prompt": { "type": "string", "minLength": 1 },
+        "actions": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/CardAction" }
+        }
+      }
+    },
+    {
+      "title": "OrchestratorError",
+      "description": "Short orchestrator-level error surfaced to the chat — empty message, invalid retry target, no-active-instance, unhandled exception, etc. The frontend renders this as a small inline error card with proper styling rather than letting the orchestrator inject prose into the LLM's text channel (Principle II: deterministic infra status flows through structured events, not impersonated LLM voice).",
+      "required": ["type", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "error" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 500 }
+      }
+    }
+  ],
+  "$defs": {
+    "CardAction": {
+      "title": "CardAction",
+      "description": "A single button on a card. `action_id` either looks like `<verb>:<id>` (the chat-text protocol the assistant_endpoint switch matches on) OR an internal `link` URL the frontend follows directly.",
+      "type": "object",
+      "required": ["label"],
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "action_id": { "type": "string" },
+        "link": { "type": "string" },
+        "style": { "type": "string", "enum": ["primary", "danger", "secondary"] }
+      }
+    }
+  }
+}

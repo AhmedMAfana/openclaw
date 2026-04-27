@@ -134,6 +134,7 @@ async def _create_and_dispatch_task(callback: CallbackQuery, state: FSMContext, 
             status="pending",
             chat_id=str(callback.message.chat.id),
             chat_provider_type="telegram",
+            git_mode="branch_per_task",
         )
         session.add(task)
         await session.commit()

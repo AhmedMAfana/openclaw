@@ -134,64 +134,82 @@ async def _is_container_healthy(container: str) -> bool:
 # Claude agent for diagnosis + fix
 # ---------------------------------------------------------------------------
 
-DIAGNOSE_PROMPT = """You are a DevOps repair agent. A Docker container is failing.
+DIAGNOSE_PROMPT = """You are a DevOps repair specialist. A Docker container is failing and needs fixing.
 
 Container: {container}
-Status: {status}
-Exit Code: {exit_code}
+Status: {status} (exit code: {exit_code})
+Service: {service_name}
+Workspace: {workspace}
+Compose file: {compose_file}
+Compose project: {compose_project}
+
+Image: {image}
+Command: {command}
+Working dir: {workdir}
+Env vars present (non-secret): {env_summary}
 
 Recent logs (last {log_lines} lines):
 ```
 {logs}
 ```
 
-Docker inspect (key fields):
-- Image: {image}
-- Command: {command}
-- Working Dir: {workdir}
-- Environment: {env_summary}
-
-Project workspace: {workspace}
-Compose file: {compose_file}
-
 {extra_context}
 
-## Your task:
-1. Diagnose the ROOT CAUSE from the logs
-2. Fix it by editing files in the workspace (Dockerfile, requirements.txt, .env, config files, etc.)
-3. After fixing, rebuild and restart using the compose_up MCP tool with project={compose_project}, compose_file={compose_file}, service={service_name}, build=true
-4. Check if it's now healthy using container_health MCP tool
+## Task
 
-## Rules:
-- Be specific. Don't guess — read the error carefully.
-- If a package fails to install, pin a working version or remove it.
-- If a config file is wrong, fix the specific line.
-- If a port is in use, find what's using it.
-- If you CANNOT fix it (e.g., needs API key, external service down), say UNFIXABLE: reason
-- End your response with either:
-  FIXED: <what you did>
-  or
-  UNFIXABLE: <what the user needs to do>
+1. DIAGNOSE: Identify the specific root cause from the logs. Be precise — not "config issue" but "PHP extension `redis` not installed".
+
+2. FIX: Edit workspace files (Dockerfile, requirements.txt, .env, config files, etc.)
+
+3. REBUILD: compose_up(project={compose_project}, compose_file={compose_file}, service={service_name}, build=True)
+
+4. VERIFY: Wait 8s, then container_health("{container}") to confirm recovery
+
+## Fix Strategy by Error Type
+
+- "Module not found" / missing import → check package install, run pip/composer/npm inside container
+- "Connection refused" on DB/Redis → dependency container may not be ready; add healthcheck dependency or wait loop
+- "Permission denied" → fix ownership via docker_exec chown, or correct the path
+- "exec format error" → wrong architecture base image; add platform: linux/amd64
+- Package install failure → pin to a working version or remove if non-critical
+- Port already allocated → find conflicting container with list_containers, stop it first
+
+End with:
+FIXED: [what you changed and why it worked]
+or
+UNFIXABLE: [specific reason] — User must: [exact action the user needs to take]
 """
 
-RETRY_PROMPT = """Previous fix attempt failed. The container is still unhealthy.
+RETRY_PROMPT = """Previous repair attempt did not work. The container is still failing.
 
 Container: {container}
-Previous attempt: {previous_attempt}
+Workspace: {workspace}
+Compose file: {compose_file}
+Compose project: {compose_project}
+Service: {service_name}
 
-New logs after the fix:
+## Previous Attempts — DO NOT REPEAT THESE
+
+{previous_attempts_with_errors}
+
+## Current Logs (after last fix attempt)
+
 ```
 {new_logs}
 ```
 
-Try a DIFFERENT approach. Don't repeat what didn't work.
-Common alternatives:
-- If a dependency failed → try a different version, or remove it
-- If a build step failed → try a different base image or build approach
-- If config is wrong → look for .env.example or default configs
-- If migration failed → check if DB is ready, add a wait/retry
+## Instructions
 
-End with FIXED: or UNFIXABLE:
+1. Read the CURRENT logs — the error may have changed after the last fix
+2. Do NOT try any approach listed in Previous Attempts
+3. Identify a different root cause or a completely different fix strategy
+
+Alternative approaches when initial fix fails:
+- Fixed a missing package but still fails → the real issue may be config, permissions, or an env var
+- Fixed config but still fails → verify the process is actually reading that config file
+- Rebuild keeps failing on same step → try a different base image or remove the failing dependency
+
+End with FIXED: or UNFIXABLE: [reason] — User must: [exact action]
 """
 
 
@@ -218,6 +236,7 @@ async def _run_claude_diagnosis(
                 "You are a DevOps repair agent. Fix Docker container issues. "
                 "Use the docker MCP tools (docker_exec, container_logs, etc.) instead of Bash. "
                 "Be precise and surgical — fix only what's broken."
+                " NEVER run 'curl --unix-socket /run/docker.sock' or any raw Docker API call via docker_exec inside a project container — the socket is NOT mounted there and will hang forever. Use ONLY MCP tools for all Docker operations."
             ),
             model="claude-sonnet-4-6",  # Error diagnosis is procedural — Sonnet is faster
             allowed_tools=[
@@ -252,15 +271,9 @@ async def _run_claude_diagnosis(
                             if snippet:
                                 await on_progress("🤖", f"[{turn_count}] {snippet}")
                     elif isinstance(block, ToolUseBlock):
-                        # Show what tool the Doctor is using
                         if on_progress:
-                            tool_name = block.name if hasattr(block, "name") else "tool"
-                            tool_input = ""
-                            if hasattr(block, "input") and isinstance(block.input, dict):
-                                cmd = block.input.get("command", block.input.get("file_path", ""))
-                                if cmd:
-                                    tool_input = f": {str(cmd)[:60]}"
-                            await on_progress("🔧", f"[{turn_count}] {tool_name}{tool_input}")
+                            from openclow.worker.tasks._agent_base import describe_tool
+                            await on_progress("🔧", f"[{turn_count}] {describe_tool(block)}")
 
         return full_output.strip()
 
@@ -278,6 +291,7 @@ async def _run_claude_cli(prompt: str, workspace: str, max_turns: int = 12) -> s
         "claude", "-p", prompt,
         "--output-format", "json",
         "--max-turns", str(max_turns),
+        "--disallowedTools", "Bash",
         "--allowedTools", "Read,Write,Edit,Glob,Grep,mcp__docker__list_containers,mcp__docker__container_logs,mcp__docker__container_health,mcp__docker__docker_exec,mcp__docker__restart_container,mcp__docker__compose_up,mcp__docker__compose_ps",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -350,7 +364,8 @@ async def repair_container(
     await progress("🔍", f"Status: {status} | Exit: {exit_code}")
 
     # ── Repair attempts ──
-    previous_attempts = []
+    # Each entry: "Attempt N: <summary>\n  Error after this fix:\n<logs>"
+    previous_attempts_detail: list[str] = []
 
     for attempt in range(1, max_attempts + 1):
         await progress("🔧", f"Repair attempt {attempt}/{max_attempts}...")
@@ -375,9 +390,13 @@ async def repair_container(
         else:
             prompt = RETRY_PROMPT.format(
                 container=container,
-                previous_attempt="\n".join(f"- {a}" for a in previous_attempts),
+                workspace=workspace,
+                compose_file=compose_file,
+                compose_project=compose_project,
+                service_name=service_name,
+                previous_attempts_with_errors="\n".join(f"- {a}" for a in previous_attempts_detail),
                 new_logs=logs[-2000:],
-            ) + f"\n\nWorkspace: {workspace}\nCompose: {compose_file}\nProject: {compose_project}\nService: {service_name}"
+            )
 
         # Run Claude (with live progress to Telegram)
         result = await _run_claude_diagnosis(prompt, workspace, max_turns=12, on_progress=on_progress)
@@ -428,8 +447,11 @@ async def repair_container(
         # Not fixed yet — get new logs for next attempt
         await progress("⚠️", f"Attempt {attempt} didn't work. {summary[:60]}")
         report.steps.append(step)
-        previous_attempts.append(summary[:200])
         logs = await _get_logs(container, tail=80)
+        # Store attempt summary AND the resulting error so the retry prompt has full context
+        previous_attempts_detail.append(
+            f"Attempt {attempt}: {summary[:200]}\n  Error after this fix:\n{logs[-400:]}"
+        )
 
     # All attempts exhausted
     if not report.fixed:

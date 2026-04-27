@@ -1,6 +1,6 @@
 """Abstract base classes for all providers.
 
-OpenClow is provider-agnostic. The core engine never imports
+TAGH Dev is provider-agnostic. The core engine never imports
 aiogram, claude_agent_sdk, or gh CLI directly. It uses these abstractions.
 """
 from __future__ import annotations
@@ -80,14 +80,15 @@ class LLMProvider(ABC):
         ...
 
     @abstractmethod
-    async def run_reviewer(
+    def run_reviewer(
         self,
         workspace_path: str,
         task_description: str,
         project_name: str,
         tech_stack: str,
         max_turns: int,
-    ) -> ReviewResult:
+        on_stream: "Callable | None" = None,
+    ) -> "AsyncIterator[Any]":
         ...
 
     @abstractmethod
@@ -120,7 +121,7 @@ class ChatProvider(ABC):
         ...
 
     @abstractmethod
-    async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
+    async def edit_message(self, chat_id: str, message_id: str, text: str, is_final: bool = False) -> None:
         ...
 
     @abstractmethod
@@ -142,6 +143,7 @@ class ChatProvider(ABC):
         text: str,
         keyboard: ActionKeyboard | None = None,
         parse_mode: str | None = None,
+        is_final: bool = False,
     ) -> None:
         """Edit a message with optional action buttons."""
         ...
@@ -232,6 +234,10 @@ class GitProvider(ABC):
     @abstractmethod
     async def delete_branch(self, repo: str, branch: str) -> None:
         ...
+
+    async def get_pr_for_branch(self, repo: str, branch: str) -> tuple[str | None, int | None]:
+        """Check if a PR already exists for this branch. Returns (pr_url, pr_number) or (None, None)."""
+        return None, None
 
     @abstractmethod
     def generate_pr_body(self, task: Any) -> str:

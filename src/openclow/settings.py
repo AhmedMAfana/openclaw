@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     claude_coder_max_turns: int = 50
     claude_reviewer_max_turns: int = 20
 
+    # Retry behavior — never give up
+    coder_max_retries: int = 3
+    coder_retry_enabled: bool = True
+
+    # Pipeline cache — skip health check if recently verified (seconds)
+    health_cache_ttl: int = 120
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

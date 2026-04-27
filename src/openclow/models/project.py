@@ -23,6 +23,25 @@ class Project(Base):
     docker_compose_file: Mapped[str | None] = mapped_column(String(255), default="docker-compose.yml")
     app_container_name: Mapped[str | None] = mapped_column(String(255))  # e.g. "app" or "php"
     app_port: Mapped[int | None] = mapped_column(Integer)  # e.g. 8000
+    # Mode routes bootstrap between the three code paths:
+    #   - "container": per-chat isolated instance (default, FR-035)
+    #   - "docker":    shared dockerized project (legacy, FR-034)
+    #   - "host":      already-running VPS app (legacy, FR-034)
+    # DB-level CHECK constraint (migration 012) closes the enum.
+    mode: Mapped[str] = mapped_column(
+        String(10), default="container", server_default="container"
+    )
+    project_dir: Mapped[str | None] = mapped_column(String(500))
+    install_guide_path: Mapped[str | None] = mapped_column(String(255))
+    start_command: Mapped[str | None] = mapped_column(String(500))
+    stop_command: Mapped[str | None] = mapped_column(String(500))
+    health_url: Mapped[str | None] = mapped_column(String(255))
+    process_manager: Mapped[str | None] = mapped_column(String(50))  # pm2|systemd|supervisor|manual
+    auto_clone: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # Public URL: if set and tunnel_enabled=False, the system uses this URL (e.g. nginx +
+    # owned domain on the VPS) as the app's public address — no cloudflared tunnel needed.
+    public_url: Mapped[str | None] = mapped_column(String(500))
+    tunnel_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     # Lifecycle: bootstrapping → active (success) or failed (error); inactive = unlinked
     status: Mapped[str] = mapped_column(String(20), default="active", server_default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

@@ -4,7 +4,7 @@ Usage:
     from openclow.services.audit_service import audit
 
     # Log a command
-    await audit.log("doctor", "bash", "docker logs my-container", workspace="/workspaces/trade-bot")
+    await audit.log("doctor", "bash", "docker logs my-container", workspace="/path/to/workspace/trade-bot")
 
     # Log a blocked command
     await audit.log_blocked("coder", "docker", "docker system prune -af")
@@ -13,13 +13,105 @@ Usage:
     if not audit.is_docker_allowed("docker rm -f postgres"):
         await audit.log_blocked(...)
         raise PermissionError(...)
+
+Secret redaction (Constitution Principle IV):
+    from openclow.services.audit_service import redact
+    safe = redact(raw_stdout)
+
+    Used by BOTH the chat-UI log path AND the LLM-fallback envelope path.
+    FR-033 requires a SINGLE shared redactor so a secret the chat hides
+    cannot leak through the LLM path (or vice versa).
 """
 import asyncio
+import re
 from typing import Any
 
 from openclow.utils.logging import get_logger
 
 log = get_logger()
+
+
+# ---------------------------------------------------------------------------
+# Redactor (Constitution Principle IV; FR-032, FR-033)
+# ---------------------------------------------------------------------------
+#
+# Runs on stdout/stderr before it reaches EITHER the chat UI or the LLM
+# fallback envelope. Idempotent: redact(redact(x)) == redact(x).
+#
+# Masks:
+#   1. HTTP bearer tokens ("Authorization: Bearer <x>")
+#   2. AWS access keys / secret access keys
+#   3. GCP / PEM-encoded private keys (whole block)
+#   4. Cloudflare API tokens (CF_API_TOKEN=<x>, cf-token=<x>)
+#   5. SSH private-key blocks
+#   6. `.env`-style KEY=VALUE where key matches /SECRET|TOKEN|PASSWORD|KEY|AUTH/i
+#   7. GitHub App installation tokens (ghs_... / ghp_...)
+#
+# Deliberate non-goals:
+#   * Not a general-purpose DLP — focus is on categories we actually generate.
+#   * Not reversible — replacement is a stable marker, not an encrypted form.
+
+_REDACT_MARK = "[REDACTED]"
+
+# Order matters: more-specific patterns first. Each produces the same marker.
+_REDACT_PATTERNS: tuple[re.Pattern, ...] = (
+    # 1. Bearer tokens in headers, curl, log lines.
+    re.compile(r"(?i)(authorization\s*:\s*bearer\s+)([A-Za-z0-9._\-+/=]+)"),
+    # 2. AWS
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"(?i)(aws[_-]?secret[_-]?access[_-]?key\s*[=:]\s*)[A-Za-z0-9/+=]{40}"),
+    # 3. PEM private-key blocks (GCP, SSH, generic).
+    re.compile(
+        r"-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED |)PRIVATE KEY-----"
+        r".*?"
+        r"-----END (?:RSA |EC |OPENSSH |ENCRYPTED |)PRIVATE KEY-----",
+        re.DOTALL,
+    ),
+    # 4. Cloudflare tokens (common env-var and CLI-flag shapes).
+    re.compile(r"(?i)(cf[_-]?api[_-]?token\s*[=:]\s*)[A-Za-z0-9_\-]{20,}"),
+    re.compile(r"(?i)(cf[_-]?token\s*=\s*)[A-Za-z0-9_\-]{20,}"),
+    # 5. GitHub App installation tokens (ghs_) and PATs (ghp_/github_pat_).
+    re.compile(r"\bgh[osup]_[A-Za-z0-9]{30,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{30,}\b"),
+    # 6. Generic KEY=VALUE where key matches the env-var name pattern.
+    #    Matches both shell (KEY=value) and YAML (KEY: value) forms.
+    re.compile(
+        r"\b([A-Z][A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|KEY|AUTH)[A-Z0-9_]*)\s*[=:]\s*"
+        r"([^\s\"']+)"
+    ),
+)
+
+
+def redact(text: str) -> str:
+    """Mask known secret shapes. Safe for non-secret text (byte-for-byte pass-through)."""
+    if not text:
+        return text
+
+    def _mask_kv(m: re.Match) -> str:
+        return f"{m.group(1)}={_REDACT_MARK}"
+
+    # Pattern 1 (Bearer): keep the prefix "Authorization: Bearer " and mask the rest.
+    out = _REDACT_PATTERNS[0].sub(rf"\1{_REDACT_MARK}", text)
+    # Pattern 2 (AWS AKIA) — bare match, replace whole thing.
+    out = _REDACT_PATTERNS[1].sub(_REDACT_MARK, out)
+    # Pattern 3 (aws_secret_access_key=...) — preserve the key prefix.
+    out = _REDACT_PATTERNS[2].sub(rf"\1{_REDACT_MARK}", out)
+    # Pattern 4 (PEM blocks) — wholesale.
+    out = _REDACT_PATTERNS[3].sub(_REDACT_MARK, out)
+    # Patterns 5/6 (CF tokens) — preserve key prefix.
+    out = _REDACT_PATTERNS[4].sub(rf"\1{_REDACT_MARK}", out)
+    out = _REDACT_PATTERNS[5].sub(rf"\1{_REDACT_MARK}", out)
+    # Pattern 7/8 (GitHub tokens) — wholesale.
+    out = _REDACT_PATTERNS[6].sub(_REDACT_MARK, out)
+    out = _REDACT_PATTERNS[7].sub(_REDACT_MARK, out)
+    # Pattern 9 (generic KEY=VALUE with secret-like name) — keep key, mask value.
+    out = _REDACT_PATTERNS[8].sub(_mask_kv, out)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Audit-log buffered writes
+# ---------------------------------------------------------------------------
 
 # Singleton buffer — flush to DB in batches to avoid per-command DB overhead
 _buffer: list[dict] = []

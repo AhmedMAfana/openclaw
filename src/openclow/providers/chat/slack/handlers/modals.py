@@ -25,6 +25,7 @@ async def _create_and_dispatch_task(client, db_user, project_id: int, descriptio
             description=description,
             chat_id=channel_id,
             chat_provider_type="slack",
+            git_mode="branch_per_task",
         )
 
         mode_label = ":zap: Quick" if skip_planning else ":clipboard: Full"

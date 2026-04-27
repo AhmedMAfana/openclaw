@@ -104,9 +104,43 @@ class WorkspaceService:
                 shutil.copy2(src_auth, dest_auth)
                 log.info("workspace.auth_json_copied", workspace=workspace)
 
+        import shlex
         for lock_file, install_cmd in self._LOCK_FILE_COMMANDS:
             if os.path.exists(os.path.join(workspace, lock_file)):
-                await git_ops.run_cmd(install_cmd, cwd=workspace)
+                await git_ops.run_exec(*shlex.split(install_cmd), cwd=workspace)
+
+    async def prepare_host(self, project: Project) -> Workspace:
+        """Host-mode prep: project_dir IS the workspace. No cache, no clone.
+
+        Verifies the dir exists inside the worker container (so /srv/projects
+        must be mounted), then best-effort git pull to pick up any external
+        commits. Skipping the docker workspace cache machinery entirely is the
+        whole point — these projects already live on the host filesystem.
+        """
+        if not project.project_dir:
+            raise RuntimeError(
+                f"Project {project.name!r} mode=host but project_dir is empty — "
+                f"set it via Settings → Projects."
+            )
+        if not os.path.isdir(project.project_dir):
+            raise RuntimeError(
+                f"Project dir {project.project_dir!r} not found inside this container. "
+                f"Mount it via docker-compose.prod.yml (worker.volumes + api.volumes)."
+            )
+        if os.path.isdir(os.path.join(project.project_dir, ".git")):
+            try:
+                # run_exec returns stdout as a str; raises on non-zero unless
+                # ignore_errors=True. We want best-effort: log on failure, never
+                # block the task — staging often has dirty working trees.
+                await git_ops.run_exec(
+                    "git", "pull", "--ff-only", "--quiet",
+                    cwd=project.project_dir, ignore_errors=True,
+                )
+            except Exception as e:
+                log.warning("workspace.host_pull_failed",
+                            project=project.name, error=str(e)[:200])
+        log.info("workspace.host_ready", path=project.project_dir, project=project.name)
+        return Workspace(path=project.project_dir, from_cache=True, deps_changed=False)
 
     async def prepare(self, project: Project, task_id: str) -> Workspace:
         """Prepare a workspace for a task. Uses cache + git worktree for speed."""
@@ -118,7 +152,8 @@ class WorkspaceService:
 
             os.makedirs(self.cache_path, exist_ok=True)
 
-            if os.path.exists(cache):
+            cache_is_git_repo = os.path.isdir(os.path.join(cache, ".git"))
+            if cache_is_git_repo:
                 log.info("workspace.cache_hit", project=project.name)
 
                 # Update cache
@@ -151,6 +186,12 @@ class WorkspaceService:
             else:
                 log.info("workspace.first_clone", project=project.name, repo=project.github_repo)
 
+                # An empty/half-cloned dir would defeat clone_repo (it
+                # refuses non-empty targets). Wipe it so the clone is
+                # idempotent on retry after a previous failed provision.
+                if os.path.exists(cache):
+                    shutil.rmtree(cache, ignore_errors=True)
+
                 # First time: full clone (uses configured git provider)
                 from openclow.providers import factory
                 git = await factory.get_git()
@@ -173,10 +214,11 @@ class WorkspaceService:
 
             # Run project-specific setup commands
             if project.setup_commands:
+                import shlex as _shlex
                 for cmd in project.setup_commands.strip().split("\n"):
                     cmd = cmd.strip()
                     if cmd:
-                        await git_ops.run_cmd(cmd, cwd=work, ignore_errors=True)
+                        await git_ops.run_exec(*_shlex.split(cmd), cwd=work, ignore_errors=True)
 
             # Docker: DON'T start containers per-task.
             # Containers are already running from bootstrap/Open App.
@@ -191,6 +233,139 @@ class WorkspaceService:
     def get_path(self, task_id: str) -> str:
         """Get workspace path for a task."""
         return self._task_work_path(task_id)
+
+    async def reattach_session_branch(
+        self,
+        project,
+        session_branch: str,
+        instance_workspace_path: str,
+    ) -> None:
+        """T068: attach a chat's session branch as a worktree under ``<path>``.
+
+        Called by ``InstanceService.get_or_resume`` (T069) when a chat
+        reconnects after its prior instance was destroyed. The same
+        cache+worktree pattern used by ``prepare()`` — just re-scoped
+        to the per-instance path instead of the per-task path
+        (constitution: "re-use the cache, re-scope the worktree").
+
+        Behaviour:
+          1. Ensure the per-project cache exists (first-time chats
+             clone the repo here; returning chats hit cache).
+          2. ``git fetch`` so the branch ref is current.
+          3. If the cache has ``<session_branch>`` locally, worktree-add
+             from that branch into the instance workspace. If not,
+             create the branch off ``origin/<session_branch>`` if the
+             remote has it, otherwise branch from the project default.
+          4. If an old worktree is already mounted at ``instance_workspace_path``,
+             prune it first so the attach is idempotent on retry.
+
+        No-op shortcut: if ``instance_workspace_path`` already contains
+        a ``.git`` whose HEAD is on ``session_branch``, return directly —
+        a previous provision already attached it.
+        """
+        cache = self._project_cache_path(project.name)
+        await self._get_lock(project.name)
+        try:
+            os.makedirs(self.cache_path, exist_ok=True)
+
+            # 1. Ensure cache is a real git repo. An empty placeholder
+            # directory (left behind by a previously-failed provision)
+            # would otherwise defeat `os.path.exists` and skip the clone,
+            # making the subsequent `git fetch` blow up with
+            # "fatal: not a git repository".
+            if not os.path.isdir(os.path.join(cache, ".git")):
+                if os.path.exists(cache):
+                    shutil.rmtree(cache, ignore_errors=True)
+                log.info(
+                    "workspace.instance_first_clone",
+                    project=project.name,
+                    repo=project.github_repo,
+                )
+                from openclow.providers import factory
+                git = await factory.get_git()
+                await git.clone_repo(project.github_repo, cache)
+
+            # 2. Refresh so we see new remote refs.
+            await git_ops.fetch_and_reset(cache, project.default_branch)
+
+            # 3. Idempotent short-circuit.
+            dot_git = os.path.join(instance_workspace_path, ".git")
+            if os.path.exists(dot_git):
+                try:
+                    head_name = (await git_ops.run_exec(
+                        "git", "rev-parse", "--abbrev-ref", "HEAD",
+                        cwd=instance_workspace_path,
+                    )).strip()
+                except Exception:
+                    head_name = ""
+                if head_name == session_branch:
+                    log.info(
+                        "workspace.session_branch_already_attached",
+                        branch=session_branch,
+                        path=instance_workspace_path,
+                    )
+                    return
+                # Stale worktree — prune before re-attaching.
+                try:
+                    await git_ops.worktree_remove(cache, instance_workspace_path)
+                except Exception:
+                    # If git refuses (detached, missing), remove the dir
+                    # and let git forget its own state via `worktree prune`.
+                    shutil.rmtree(instance_workspace_path, ignore_errors=True)
+                    await git_ops.run_exec(
+                        "git", "worktree", "prune", cwd=cache,
+                        ignore_errors=True,
+                    )
+
+            # 4. Decide where <session_branch> comes from.
+            # Prefer a local branch in cache → remote origin branch →
+            # fall back to branching from project default.
+            branch_source = None
+            try:
+                await git_ops.run_exec(
+                    "git", "show-ref", "--verify", "--quiet",
+                    f"refs/heads/{session_branch}",
+                    cwd=cache,
+                )
+                branch_source = session_branch
+            except Exception:
+                try:
+                    await git_ops.run_exec(
+                        "git", "show-ref", "--verify", "--quiet",
+                        f"refs/remotes/origin/{session_branch}",
+                        cwd=cache,
+                    )
+                    branch_source = f"origin/{session_branch}"
+                except Exception:
+                    branch_source = project.default_branch
+
+            os.makedirs(os.path.dirname(instance_workspace_path) or "/", exist_ok=True)
+            if branch_source == session_branch:
+                # Local branch already exists — worktree_add checks it out.
+                await git_ops.worktree_add(
+                    cache, instance_workspace_path, session_branch
+                )
+            else:
+                # Create a new worktree with a fresh branch tracking
+                # `branch_source`. -b creates the local branch atomically
+                # with the worktree; safer than a two-step.
+                await git_ops.run_exec(
+                    "git", "worktree", "add",
+                    "-b", session_branch,
+                    instance_workspace_path,
+                    branch_source,
+                    cwd=cache,
+                )
+
+            log.info(
+                "workspace.session_branch_attached",
+                project=project.name,
+                branch=session_branch,
+                source=branch_source,
+                path=instance_workspace_path,
+            )
+        finally:
+            await self._release_lock(project.name)
 
     async def cleanup(self, task_id: str, project_name: str | None = None):
         """Stop project Docker stack and remove workspace (keep cache)."""

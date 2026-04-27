@@ -41,7 +41,8 @@ log = get_logger()
 _PREFIX = "openclow:project_lock"
 
 # How long a lock lives before auto-expiring (safety net for crashed workers)
-_DEFAULT_TTL = 900  # 15 minutes
+# Must be >= arq job_timeout (3600s) so the lock doesn't expire mid-run
+_DEFAULT_TTL = 3900  # 65 minutes — slightly above the 3600s arq job timeout
 
 # How long to wait when trying to acquire a busy lock
 _DEFAULT_WAIT = 5  # seconds

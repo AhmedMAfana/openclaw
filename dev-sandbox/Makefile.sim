@@ -1,0 +1,48 @@
+# Make targets for the host-mode local simulation harness.
+# Included from the repo-root Makefile via `-include dev-sandbox/Makefile.sim`.
+
+SANDBOX_DIR := dev-sandbox
+SAMPLE_DIR  := $(SANDBOX_DIR)/sample-apps
+
+.PHONY: sim-install sim-up sim-down sim-status sim-logs sim-seed sim-doctor sim-admin
+
+sim-install:
+	@mkdir -p $(SAMPLE_DIR)/sim-fastapi/app
+	@# Minimal skeleton — written only if files are missing so re-runs don't clobber edits.
+	@[ -f $(SAMPLE_DIR)/sim-fastapi/requirements.txt ] || \
+		printf 'fastapi>=0.110\nuvicorn[standard]>=0.27\n' > $(SAMPLE_DIR)/sim-fastapi/requirements.txt
+	@[ -f $(SAMPLE_DIR)/sim-fastapi/app/__init__.py ] || touch $(SAMPLE_DIR)/sim-fastapi/app/__init__.py
+	@[ -f $(SAMPLE_DIR)/sim-fastapi/app/main.py ] || \
+		printf 'from fastapi import FastAPI\n\napp = FastAPI(title="sim-fastapi")\n\n\n@app.get("/")\ndef root():\n    return {"status": "ok", "app": "sim-fastapi"}\n' > $(SAMPLE_DIR)/sim-fastapi/app/main.py
+	@[ -f $(SAMPLE_DIR)/sim-fastapi/README.md ] || \
+		printf '# sim-fastapi\n\nInstall:\n```sh\npython3 -m venv .venv && .venv/bin/pip install -r requirements.txt\n```\n\nRun:\n```sh\n.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8101\n```\n' > $(SAMPLE_DIR)/sim-fastapi/README.md
+	@echo ">> installing sim-fastapi deps"
+	@cd $(SAMPLE_DIR)/sim-fastapi && \
+		python3 -m venv .venv && \
+		.venv/bin/pip install --quiet -r requirements.txt
+	@cd $(SAMPLE_DIR)/sim-fastapi && \
+		([ -d .git ] || (git init -q && git add -A && git -c user.email=dev@local -c user.name=dev commit -q -m "sim-fastapi init" || true))
+	@echo ">> done. run: make sim-up"
+
+sim-up:
+	@python3 $(SANDBOX_DIR)/local_vps.py up
+
+sim-down:
+	@python3 $(SANDBOX_DIR)/local_vps.py down
+
+sim-status:
+	@python3 $(SANDBOX_DIR)/local_vps.py status
+
+sim-logs:
+	@python3 $(SANDBOX_DIR)/local_vps.py logs $(NAME) $(if $(FOLLOW),-f,)
+
+sim-seed:
+	@python3 $(SANDBOX_DIR)/seed_sim_projects.py
+
+sim-admin:
+	@python3 $(SANDBOX_DIR)/local_vps.py admin
+
+sim-doctor:
+	@echo "python3:      $$(which python3 || echo MISSING)"
+	@echo "port 8101:    $$(lsof -iTCP:8101 -sTCP:LISTEN -nP 2>/dev/null | tail -n +2 | head -1 || echo FREE)"
+	@echo "port 8120:    $$(lsof -iTCP:8120 -sTCP:LISTEN -nP 2>/dev/null | tail -n +2 | head -1 || echo FREE)"

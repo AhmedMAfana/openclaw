@@ -12,30 +12,28 @@ from mcp.server.fastmcp import FastMCP
 mcp = FastMCP("github-openclow")
 
 
-async def _get_github_env() -> dict:
-    """Get environment with GitHub token from DB config."""
-    env = {**os.environ}
-    try:
-        from openclow.services.config_service import get_config
-        config = await get_config("git", "provider")
-        if config and config.get("token"):
-            env["GH_TOKEN"] = config["token"]
-            env["GITHUB_TOKEN"] = config["token"]
-    except Exception:
-        pass
-    return env
-
-
 async def _get_github_token() -> str:
-    """Get GitHub token from DB or environment."""
+    """Get GitHub token from DB (tries both key formats) or environment."""
     try:
         from openclow.services.config_service import get_config
-        config = await get_config("git", "provider")
-        if config and config.get("token"):
-            return config["token"]
+        # Try new format first (provider.github), then legacy (provider)
+        for key in ("provider.github", "provider"):
+            config = await get_config("git", key)
+            if config and config.get("token"):
+                return config["token"]
     except Exception:
         pass
     return os.environ.get("GITHUB_TOKEN", os.environ.get("GH_TOKEN", ""))
+
+
+async def _get_github_env() -> dict:
+    """Get environment with GitHub token from DB config."""
+    env = {**os.environ}
+    token = await _get_github_token()
+    if token:
+        env["GH_TOKEN"] = token
+        env["GITHUB_TOKEN"] = token
+    return env
 
 
 async def _gh_cmd(*args: str, timeout: int = 15) -> tuple[int, str, str]:

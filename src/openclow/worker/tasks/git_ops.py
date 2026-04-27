@@ -1,7 +1,6 @@
 """Git operations via subprocess — clone, branch, push, PR."""
 import asyncio
 import os
-import shlex
 
 from openclow.utils.logging import get_logger
 
@@ -9,14 +8,32 @@ log = get_logger()
 
 
 async def _get_git_env() -> dict:
-    """Get environment with GitHub token from DB."""
+    """Get environment with GitHub token from DB.
+
+    Also injects an `insteadOf` URL rewrite via GIT_CONFIG_* env vars so
+    SSH remotes (git@github.com:owner/repo.git) transparently route through
+    HTTPS using the token. This is critical on staging/host-mode where the
+    container's user has no SSH key — the token is the only way to push.
+    """
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     try:
-        from openclow.services.config_service import get_config
-        config = await get_config("git", "provider")
+        from openclow.services.config_service import get_config, get_provider_config
+        # Try the new per-type format first (provider.github / provider.gitlab),
+        # fall back to legacy single "provider" key.
+        config = None
+        try:
+            _ptype, config = await get_provider_config("git")
+        except Exception:
+            config = await get_config("git", "provider")
         if config and config.get("token"):
-            env["GH_TOKEN"] = config["token"]
-            env["GITHUB_TOKEN"] = config["token"]
+            token = config["token"]
+            env["GH_TOKEN"] = token
+            env["GITHUB_TOKEN"] = token
+            # Rewrite git@github.com:owner/repo → https://...@github.com/owner/repo
+            # so push works without an SSH key in the container.
+            env["GIT_CONFIG_COUNT"] = "1"
+            env["GIT_CONFIG_KEY_0"] = f"url.https://x-access-token:{token}@github.com/.insteadOf"
+            env["GIT_CONFIG_VALUE_0"] = "git@github.com:"
     except Exception:
         pass
     return env
@@ -47,33 +64,6 @@ async def run_exec(
     return stdout_str
 
 
-# DEPRECATED: Prefer run_exec() for new code. This function uses shell=True
-# and is only kept for backward compatibility with callers that need shell
-# features (pipes, redirects, globbing). All arguments interpolated into `cmd`
-# MUST be escaped with shlex.quote() to prevent command injection.
-async def run_cmd(cmd: str, cwd: str | None = None, ignore_errors: bool = False) -> str:
-    """Run a shell command and return stdout.
-
-    DEPRECATED: Use run_exec() instead for safety against command injection.
-    """
-    env = await _get_git_env()
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-    stdout, stderr = await proc.communicate()
-    stdout_str = stdout.decode().strip()
-    stderr_str = stderr.decode().strip()
-
-    if proc.returncode != 0 and not ignore_errors:
-        log.error("cmd.failed", cmd=cmd, stderr=stderr_str, returncode=proc.returncode)
-        raise RuntimeError(f"Command failed: {cmd}\n{stderr_str}")
-
-    return stdout_str
-
 
 async def clone(repo: str, dest: str):
     """Clone a GitHub repo."""
@@ -88,8 +78,12 @@ async def fetch_and_reset(workspace: str, branch: str):
 
 
 async def create_branch(workspace: str, branch_name: str):
-    """Create and checkout a new branch."""
-    await run_exec("git", "checkout", "-b", branch_name, cwd=workspace)
+    """Create and checkout a branch. If it already exists, just check it out."""
+    try:
+        await run_exec("git", "checkout", "-b", branch_name, cwd=workspace)
+    except Exception:
+        # Branch already exists — check it out instead
+        await run_exec("git", "checkout", branch_name, cwd=workspace)
 
 
 async def add_all(workspace: str):
@@ -170,9 +164,24 @@ async def diff_stat(workspace: str) -> str:
 
 
 async def changed_files(workspace: str) -> list[str]:
-    """Get list of changed file paths."""
+    """Get list of changed file paths — uncommitted OR last commit (coder commits before deploy)."""
+    files: set[str] = set()
+
+    # Uncommitted changes
     output = await run_exec("git", "diff", "--name-only", "HEAD", cwd=workspace, ignore_errors=True)
-    return [f.strip() for f in output.splitlines() if f.strip()]
+    files.update(f.strip() for f in output.splitlines() if f.strip())
+
+    # Latest commit — coder typically commits before deploy runs, so HEAD is clean.
+    # Include the last commit's files so the deploy step knows to rebuild.
+    output = await run_exec("git", "log", "-1", "--name-only", "--pretty=format:", cwd=workspace, ignore_errors=True)
+    files.update(f.strip() for f in output.splitlines() if f.strip())
+
+    return list(files)
+
+
+async def reset_hard(workspace: str):
+    """Reset working tree to HEAD (used for empty-diff retry path)."""
+    await run_exec("git", "reset", "--hard", "HEAD", cwd=workspace)
 
 
 async def diff_size(workspace: str) -> int:

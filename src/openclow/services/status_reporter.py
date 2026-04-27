@@ -124,6 +124,64 @@ class StatusReporter(BaseReporter):
             self._last_text = text
             await super()._render(self._cancel_keyboard())
 
+    # -- Web chat progress card ------------------------------------------------
+
+    async def _force_render(self, keyboard=None):
+        """Web chat gets a structured progress card; other platforms get text."""
+        if hasattr(self._chat, "send_progress_card"):
+            await self._emit_card()
+            return
+        await super()._force_render(keyboard)
+
+    def _build_card(self) -> dict:
+        """Convert current StatusReporter state to a WebProgressCard dict."""
+        total = max(self._total_steps, 1)
+        current = max(self._current_step, 1)
+        steps = []
+        for i in range(1, total + 1):
+            if i < current:
+                status = "done"
+            elif i == current:
+                status = "running"
+            else:
+                status = "pending"
+            name = (self._current_stage or f"Step {i}") if i == current else f"Step {i}"
+            detail = self._logs[-1][:80] if (status == "running" and self._logs) else ""
+            steps.append({"name": name, "status": status, "detail": detail})
+        return {
+            "title": self._title,
+            "elapsed": self.elapsed,
+            "overall_status": "running",
+            "steps": steps,
+            "footer": "",
+        }
+
+    async def _emit_card(self):
+        try:
+            await self._chat.send_progress_card(
+                self._chat_id, self._message_id, self._build_card()
+            )
+        except Exception:
+            pass
+
+    async def complete_card(self, summary: str = ""):
+        """Emit a final green 'done' card for web chat, then stop heartbeat."""
+        if hasattr(self._chat, "send_progress_card"):
+            total = max(self._total_steps, 1)
+            steps = [{"name": f"Step {i+1}", "status": "done", "detail": ""}
+                     for i in range(total)]
+            try:
+                await self._chat.send_progress_card(self._chat_id, self._message_id, {
+                    "title": self._title,
+                    "elapsed": self.elapsed,
+                    "overall_status": "done",
+                    "steps": steps,
+                    "footer": summary,
+                })
+            except Exception:
+                pass
+        await self.stop()
+
 
 class LineReporter(BaseReporter):
     """Simple line-accumulator reporter.

@@ -79,17 +79,65 @@ def describe_tool(block: ToolUseBlock) -> str:
         action = name.split("__")[-1].replace("git_", "")
         return f"📦 Git: {action}"
 
+    # Host MCP (mode="host" projects — apps already running on the VPS host)
+    if "host_git_clone" in name:
+        return "📥 Cloning repo"
+    if "host_git_pull" in name:
+        return "📥 git pull"
+    if "host_read_install_guide" in name:
+        return "📖 Reading install guide"
+    if "host_run_command" in name:
+        cmd = inp.get("command", "")[:50]
+        return f"🖥 {cmd}" if cmd else "🖥 Running command"
+    if "host_check_port" in name:
+        return f"🔌 Port {inp.get('port', '?')}"
+    if "host_curl" in name:
+        url = inp.get("url", "")[:40]
+        return f"🌐 curl {url}" if url else "🌐 HTTP check"
+    if "host_process_status" in name:
+        return f"🔎 Process: {inp.get('match', '')[:30]}"
+    if "host_tail_log" in name:
+        p = inp.get("path", "")
+        return f"📜 tail {p.split('/')[-1]}"
+    if "host_start_app" in name:
+        return "▶️ Starting app"
+    if "host_stop_app" in name:
+        return "⏹ Stopping app"
+    if "host_service_status" in name:
+        return f"💡 {inp.get('unit', '')[:30]}"
+    if "host_cd" in name:
+        return "📂 Entering project dir"
+
     # Fallback
     return f"🔧 {name.replace('mcp__', '').replace('__', ': ')}"
 
 
-_AUTH_KEYWORDS = [
-    "auth", "unauthorized", "logged in", "credential",
-    "token expired", "not authenticated", "sign in",
-    "login", "authentication failed", "invalid token",
+# Phrases that unambiguously indicate Claude auth failure. Bare "auth" was
+# too loose — it false-positives on debug-to-stderr lines like
+# "[API:auth] OAuth token check complete" or "has Authorization header: false"
+# that show up whenever stderr is appended to an exception message.
+_AUTH_PHRASES = [
+    "claudeautherror",
+    "401 unauthorized",
+    "403 forbidden",
+    "authentication required",
+    "authentication failed",
+    "not authenticated",
+    "oauth token expired",
+    "token expired",
+    "invalid token",
+    "credentials missing",
+    "please run 'claude login'",
+    "please log in",
+    "you must be logged in",
 ]
 
 
 def is_auth_error(error: Exception) -> bool:
-    """Check if an exception is a Claude authentication error."""
-    return any(kw in str(error).lower() for kw in _AUTH_KEYWORDS)
+    """Check if an exception is genuinely a Claude authentication error.
+
+    Whitelist specific phrases — substring 'auth' triggers false positives
+    on debug logs that happen to mention OAuth, Authorization headers, etc.
+    """
+    s = str(error).lower()
+    return any(p in s for p in _AUTH_PHRASES)

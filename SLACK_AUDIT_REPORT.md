@@ -182,7 +182,7 @@ oauth_config:
       - users:read.email
 features:
   bot_user:
-    display_name: OpenClow
+    display_name: TAGH Dev
   slash_commands:
     - command: /oc-task
     - command: /oc-status

@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0a0a0a">
+    <title>TAGH Dev — Sign in</title>
+    <link rel="icon" type="image/svg+xml" href="/chat/favicon.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+    <style>
+      :root {
+        --bg: #0a0a0a;
+        --surface: rgba(255, 255, 255, 0.035);
+        --surface-hover: rgba(255, 255, 255, 0.055);
+        --border: rgba(255, 255, 255, 0.08);
+        --border-strong: rgba(255, 255, 255, 0.14);
+        --text: #f5f5f5;
+        --text-muted: #9a9a9a;
+        --text-faint: #6b6b6b;
+        --accent: #ffffff;
+        --accent-fg: #0a0a0a;
+        --danger-bg: rgba(239, 68, 68, 0.12);
+        --danger-border: rgba(239, 68, 68, 0.35);
+        --danger-text: #fecaca;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0; min-height: 100vh;
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: var(--bg); color: var(--text);
+        -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+        font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+      }
+      /* Subtle animated gradient wash — background never competes with the card */
+      body::before {
+        content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+        background:
+          radial-gradient(60% 45% at 20% 10%, rgba(99, 102, 241, 0.18), transparent 60%),
+          radial-gradient(50% 40% at 85% 90%, rgba(236, 72, 153, 0.13), transparent 60%),
+          radial-gradient(40% 35% at 50% 60%, rgba(59, 130, 246, 0.12), transparent 60%);
+        filter: blur(40px) saturate(120%);
+        animation: drift 18s ease-in-out infinite alternate;
+      }
+      @keyframes drift {
+        0%   { transform: translate3d(0, 0, 0) scale(1); }
+        100% { transform: translate3d(-20px, 10px, 0) scale(1.05); }
+      }
+      .wrap {
+        position: relative; z-index: 1;
+        min-height: 100vh; display: flex; align-items: center; justify-content: center;
+        padding: 24px;
+      }
+      .card {
+        width: 100%; max-width: 400px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 32px 28px 28px;
+        backdrop-filter: blur(12px) saturate(140%);
+        -webkit-backdrop-filter: blur(12px) saturate(140%);
+        box-shadow:
+          0 1px 0 rgba(255, 255, 255, 0.04) inset,
+          0 24px 48px -12px rgba(0, 0, 0, 0.6);
+        animation: card-in 260ms cubic-bezier(0.2, 0.8, 0.25, 1);
+      }
+      @keyframes card-in {
+        from { opacity: 0; transform: translateY(8px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+      .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }
+      .brand-mark {
+        width: 32px; height: 32px; border-radius: 8px;
+        background: linear-gradient(135deg, #ffffff 0%, #c7c7c7 100%);
+        color: var(--accent-fg);
+        display: grid; place-items: center;
+        font-weight: 700; font-size: 15px; letter-spacing: -0.02em;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+      }
+      .brand-text {
+        font-size: 15px; font-weight: 600; letter-spacing: -0.01em;
+      }
+      .brand-sub {
+        font-size: 12px; color: var(--text-faint); margin-left: auto;
+      }
+      h1 { margin: 0 0 4px; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
+      .sub { margin: 0 0 22px; color: var(--text-muted); font-size: 13.5px; }
+
+      .error {
+        display: flex; align-items: flex-start; gap: 10px;
+        margin-bottom: 16px; padding: 10px 12px;
+        background: var(--danger-bg); border: 1px solid var(--danger-border);
+        color: var(--danger-text); border-radius: 10px; font-size: 13px;
+      }
+      .error svg { flex: 0 0 auto; margin-top: 1px; }
+
+      form { display: flex; flex-direction: column; gap: 14px; }
+      .field { display: flex; flex-direction: column; gap: 6px; }
+      label {
+        font-size: 12px; font-weight: 500; color: var(--text-muted);
+        letter-spacing: 0.01em;
+      }
+      input[type="text"], input[type="password"] {
+        width: 100%; padding: 11px 13px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        color: var(--text); font: inherit; font-size: 14px;
+        transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+        outline: none;
+      }
+      input::placeholder { color: var(--text-faint); }
+      input:hover { border-color: var(--border-strong); }
+      input:focus {
+        border-color: rgba(255, 255, 255, 0.35);
+        background: rgba(255, 255, 255, 0.05);
+        box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+      }
+      button[type="submit"] {
+        margin-top: 6px; padding: 11px 14px;
+        background: var(--accent); color: var(--accent-fg);
+        border: 0; border-radius: 10px;
+        font: inherit; font-size: 14px; font-weight: 600; letter-spacing: -0.005em;
+        cursor: pointer;
+        display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+        transition: transform 120ms ease, opacity 160ms ease, box-shadow 160ms ease;
+        box-shadow: 0 1px 0 rgba(255, 255, 255, 0.2) inset, 0 4px 12px rgba(0, 0, 0, 0.35);
+      }
+      button[type="submit"]:hover { opacity: 0.92; }
+      button[type="submit"]:active { transform: translateY(1px); }
+      button[type="submit"][data-loading="true"] { pointer-events: none; opacity: 0.7; }
+      .spinner {
+        width: 14px; height: 14px; border-radius: 50%;
+        border: 2px solid rgba(0, 0, 0, 0.2); border-top-color: rgba(0, 0, 0, 0.85);
+        animation: spin 700ms linear infinite;
+        display: none;
+      }
+      button[type="submit"][data-loading="true"] .spinner { display: inline-block; }
+      button[type="submit"][data-loading="true"] .btn-label { opacity: 0.7; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      .footer {
+        margin-top: 22px; text-align: center;
+        font-size: 11.5px; color: var(--text-faint);
+      }
+      .footer .ask { display: block; color: var(--text-muted); margin-bottom: 6px; font-size: 12.5px; }
+
+      @media (prefers-reduced-motion: reduce) {
+        body::before, .card { animation: none !important; }
+      }
+    </style>
+</head>
+<body>
+    <div class="wrap">
+      <div class="card">
+        <div class="brand">
+          <div class="brand-mark">T</div>
+          <div class="brand-text">TAGH Dev</div>
+          <div class="brand-sub">AI Dev Chat</div>
+        </div>
+
+        <h1>Sign in</h1>
+        <p class="sub">Welcome back. Enter your credentials to continue.</p>
+
+        {% if error %}
+        <div class="error">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+          <span>{{ error }}</span>
+        </div>
+        {% endif %}
+
+        <form method="POST" id="login-form" autocomplete="on">
+          <div class="field">
+            <label for="username">Username</label>
+            <input id="username" type="text" name="username" placeholder="admin" autocomplete="username" required autofocus />
+          </div>
+
+          <div class="field">
+            <label for="password">Password</label>
+            <input id="password" type="password" name="password" placeholder="••••••••" autocomplete="current-password" required />
+          </div>
+
+          <button type="submit" id="submit-btn">
+            <span class="spinner" aria-hidden="true"></span>
+            <span class="btn-label">Sign in</span>
+          </button>
+        </form>
+
+        <div class="footer">
+          <span class="ask">No account? Ask your admin.</span>
+          TAGH Dev © 2026
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // Give the button a loading state on submit so the user sees the click register
+      // — avoids the "did it even do anything?" feeling on a slow network.
+      (function () {
+        var form = document.getElementById('login-form');
+        var btn = document.getElementById('submit-btn');
+        if (!form || !btn) return;
+        form.addEventListener('submit', function () {
+          btn.setAttribute('data-loading', 'true');
+          btn.setAttribute('aria-busy', 'true');
+        });
+      })();
+    </script>
+</body>
+</html>

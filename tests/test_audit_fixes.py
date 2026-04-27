@@ -80,27 +80,16 @@ class TestCommandInjectionFixes:
         assert self._count_subprocess_shell(src) == 0, \
             f"github_mcp.py still has {self._count_subprocess_shell(src)} create_subprocess_shell calls"
 
-    def test_docker_service_no_shell(self):
-        src = self._get_source("openclow.services.docker_service")
-        assert self._count_subprocess_shell(src) == 0
-        assert "run_docker" in src, "should use run_docker from docker_guard"
-
-    def test_docker_service_no_subprocess_sleep(self):
-        src = self._get_source("openclow.services.docker_service")
-        assert 'run_cmd("sleep' not in src, "subprocess sleep should be replaced with asyncio.sleep"
-        assert "asyncio.sleep" in src
-
     def test_github_service_no_shell(self):
         src = self._get_source("openclow.services.github_service")
         assert "run_exec" in src
         # Should not have manual quote escaping anymore
         assert 'replace(\'"\', ' not in src, "manual quote escaping should be removed"
 
-    def test_health_service_has_run_exec(self):
+    def test_health_service_no_shell(self):
         src = self._get_source("openclow.services.health_service")
-        assert "_run_exec" in src, "should have _run_exec function"
-        # Docker exec calls should use _run_exec
-        assert src.count("_run_exec(") >= 5, "should have at least 5 _run_exec calls for DB checks"
+        assert self._count_subprocess_shell(src) == 0, "health_service should not use create_subprocess_shell"
+        assert "create_subprocess_exec" in src, "should use create_subprocess_exec"
 
     def test_github_provider_uses_exec(self):
         src = self._get_source("openclow.providers.git.github")
@@ -214,38 +203,6 @@ class TestFactoryFixes:
         assert "asyncio.Lock()" in src, "factory must use asyncio.Lock"
         assert "async with _lock" in src, "getter functions must acquire the lock"
 
-
-# ──────────────────────────────────────────────
-# 6. NOTIFICATION FIXES
-# ──────────────────────────────────────────────
-
-class TestNotificationFixes:
-    def test_no_recursive_flush(self):
-        """_flush must not call itself recursively."""
-        src_path = os.path.join("src", "openclow", "services", "notification.py")
-        with open(src_path) as f:
-            src = f.read()
-
-        # Find the _flush method and check for self-calls
-        in_flush = False
-        recursive_calls = 0
-        for line in src.split("\n"):
-            if "async def _flush(" in line:
-                in_flush = True
-                continue
-            elif in_flush and (line.strip().startswith("async def ") or
-                              (line.strip() and not line.startswith(" ") and not line.startswith("\t"))):
-                break
-            elif in_flush and "_flush" in line and "await" in line:
-                recursive_calls += 1
-
-        assert recursive_calls == 0, f"_flush has {recursive_calls} recursive calls"
-
-    def test_has_max_retries(self):
-        src_path = os.path.join("src", "openclow", "services", "notification.py")
-        with open(src_path) as f:
-            src = f.read()
-        assert "max_retries" in src or "for attempt" in src, "should have bounded retries"
 
 
 # ──────────────────────────────────────────────

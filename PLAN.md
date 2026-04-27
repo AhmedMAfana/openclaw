@@ -1,4 +1,4 @@
-# OpenClow — AI-Powered Development Orchestration Platform
+# TAGH Dev — AI-Powered Development Orchestration Platform
 
 ## Confirmed Decisions
 - **Language**: Python 3.12 (asyncio)
@@ -17,7 +17,7 @@
 
 **Problem:** Managing multiple Laravel + Vue projects requires manual coding, branch management, deployments, and PR workflows.
 
-**Solution:** OpenClow — developers send tasks via Telegram, Claude Code agent implements changes, and the system handles the full PR lifecycle automatically.
+**Solution:** TAGH Dev — developers send tasks via Telegram, Claude Code agent implements changes, and the system handles the full PR lifecycle automatically.
 
 ---
 
@@ -27,7 +27,7 @@
 ```bash
 # 1. Open Telegram, search for @BotFather
 # 2. Send /newbot
-# 3. Choose a name: "OpenClow Bot"
+# 3. Choose a name: "TAGH Dev Bot"
 # 4. Choose a username: "openclow_bot"
 # 5. BotFather gives you a token like: 7123456789:AAF1234567890abcdef
 # 6. Put it in .env as TELEGRAM_BOT_TOKEN
@@ -376,7 +376,7 @@ RUN curl -fsSL https://github.com/github/github-mcp-server/releases/latest/downl
 
 # Git identity
 RUN git config --system user.email "openclow@bot.local" \
-    && git config --system user.name "OpenClow Bot"
+    && git config --system user.name "TAGH Dev Bot"
 
 # Python app
 WORKDIR /app
@@ -679,7 +679,7 @@ async def approve_task(task_id: str):
         repo=task.project.github_repo,
         branch=task.branch_name,
         base=task.project.default_branch,
-        title=f"[OpenClow] {task.description[:60]}",
+        title=f"[TAGH Dev] {task.description[:60]}",
         body=generate_pr_body(task),
     )
 

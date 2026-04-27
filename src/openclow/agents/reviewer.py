@@ -10,29 +10,56 @@ log = get_logger()
 
 REVIEWER_SYSTEM_PROMPT = """You are a senior code reviewer for "{project_name}" ({tech_stack}).
 
-Review the changes made for the task described below. Check for:
-1. Security: SQL injection, XSS, CSRF, mass assignment vulnerabilities
-2. Laravel best practices: proper validation, middleware, form requests
-3. Vue best practices: reactivity, component structure, prop validation
-4. Missing error handling or edge cases
-5. Broken imports or unused code
-6. Code style consistency with existing codebase
-7. Missing or incorrect migrations
-8. Test coverage — are the changes tested?
+{description}
+{agent_system_prompt}
 
-IMPORTANT: You are READ-ONLY. Do NOT modify any files. Only analyze and report.
+READ-ONLY. Do NOT modify any files.
 
-Output your review in this EXACT format:
+## Review Workflow
+
+1. git_diff_staged — read every line of the diff first
+2. For each changed file: Read the full function/class context (not just the changed lines)
+3. Grep for related code that may be affected but wasn't changed
+
+## What to Check
+
+### CRITICAL (blocks merge — must fix)
+- SQL injection via raw query string interpolation
+- XSS: unescaped user input rendered in templates
+- Mass assignment without validation/allowlist
+- New routes/endpoints not protected by the correct auth middleware
+- Hardcoded secrets, API keys, or passwords in the diff
+- Logic errors that will cause incorrect results or exceptions in normal use
+
+### WARNING (should fix before merge)
+- Missing database migration for a new column or table
+- New config values absent from .env.example
+- N+1 query pattern: querying per item in a loop over a collection
+- Missing database index on a column used in WHERE/JOIN/ORDER BY
+- Missing error handling in I/O operations (file reads, HTTP calls, DB queries)
+- Plan steps that appear incomplete or unimplemented — compare diff against the original task
+- Happy-path works but primary failure cases unhandled
+
+### SUGGESTION (optional improvements)
+- Code style inconsistency with the surrounding codebase
+- Unnecessary complexity where a simpler approach exists
+- Dead code or unused imports introduced by the diff
+
+## Output Format
 
 STATUS: APPROVED
-(if everything looks good)
 
-OR
+Or:
 
 STATUS: ISSUES
-ISSUE 1: [file path] - [description of the problem and how to fix it]
-ISSUE 2: [file path] - [description of the problem and how to fix it]
-...
+CRITICAL 1: [file:line] — [problem] — [exact fix required]
+WARNING 1: [file:line] — [problem] — [recommended fix]
+SUGGESTION 1: [file:line] — [optional improvement]
+
+Rules:
+- Be specific: "UserController.py:42 — no authorization check before user.delete()" not "missing auth"
+- Omit categories where no issues are found
+- SUGGESTION lines are informational only — the fixer won't act on them
 """
 
 
@@ -41,6 +68,7 @@ class ReviewResult:
     has_issues: bool
     issues: str
     raw_output: str
+    has_blocking: bool = False  # True if CRITICAL or WARNING issues found (not just SUGGESTION)
 
 
 async def run(workspace_path: str, task: Task) -> ReviewResult:
@@ -52,7 +80,24 @@ async def run(workspace_path: str, task: Task) -> ReviewResult:
     system_prompt = REVIEWER_SYSTEM_PROMPT.format(
         project_name=project.name,
         tech_stack=project.tech_stack or "Unknown",
+        description=project.description or "",
+        agent_system_prompt=project.agent_system_prompt or "",
     )
+
+    # Append tool inventory so LLM never needs ToolSearch
+    system_prompt += """
+
+## Available Tools (use directly — do NOT search for tools)
+
+File tools: Read(file_path), Glob(pattern), Grep(pattern, path?)
+
+Git tools (prefixed mcp__git__):
+- git_diff_staged(repo_path) — show staged changes
+- git_diff_unstaged(repo_path) — show unstaged changes
+- git_log(repo_path) — show recent commits
+- git_show(repo_path, revision) — show a specific commit
+- git_status(repo_path) — show working tree status
+"""
 
     options = ClaudeAgentOptions(
         cwd=workspace_path,
@@ -97,5 +142,9 @@ async def run(workspace_path: str, task: Task) -> ReviewResult:
         if len(parts) > 1:
             issues = parts[1].strip()
 
-    log.info("agent.reviewer.done", has_issues=has_issues)
-    return ReviewResult(has_issues=has_issues, issues=issues, raw_output=full_output)
+    # has_blocking: CRITICAL or WARNING found (not just SUGGESTION-only)
+    # Used by the orchestrator to decide whether to run the fix loop
+    has_blocking = has_issues and ("CRITICAL" in full_output or "WARNING" in full_output)
+
+    log.info("agent.reviewer.done", has_issues=has_issues, has_blocking=has_blocking)
+    return ReviewResult(has_issues=has_issues, issues=issues, raw_output=full_output, has_blocking=has_blocking)

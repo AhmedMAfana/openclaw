@@ -1,4 +1,4 @@
-"""Slack Block Kit builders — rich UI components for the OpenClow Slack app.
+"""Slack Block Kit builders — rich UI components for the TAGH Dev Slack app.
 
 All block construction is centralized here. Handlers never build raw block
 dicts inline — they call these builders instead.

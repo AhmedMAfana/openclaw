@@ -1,6 +1,7 @@
 """Settings API — config CRUD, connection tests, project/user management."""
 from __future__ import annotations
 
+import html as _html
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -516,14 +517,56 @@ async def claude_auth_status():
 
 @router.post("/claude-auth-login")
 async def claude_auth_login():
-    """Start Claude login on the worker — returns the OAuth URL."""
+    """Start Claude login — fires long-running worker task, polls Redis for URL."""
+    import asyncio
+    import redis.asyncio as aioredis
+
+    SESSION = "claude_auth:web"
+    r = aioredis.from_url(settings.redis_url, decode_responses=True)
+
+    # Clear stale session keys so the new task starts fresh
+    await r.delete(f"{SESSION}:url", f"{SESSION}:code", f"{SESSION}:status")
+
+    # Fire the long-running task without waiting for its final result
     try:
-        from openclow.services import bot_actions
-        job = await bot_actions.enqueue_job("claude_auth_get_url")
-        result = await job.result(timeout=20)
-        return result or {"status": "error", "message": "No response from worker"}
+        from openclow.worker.arq_app import get_arq_pool
+        pool = await get_arq_pool()
+        await pool.enqueue_job("claude_auth_login_web")
     except Exception as e:
         return {"status": "error", "message": str(e)[:200]}
+
+    # Poll Redis until the subprocess publishes the URL (up to 15 s)
+    for _ in range(30):
+        url = await r.get(f"{SESSION}:url")
+        if url:
+            return {"status": "pending", "url": url}
+        await asyncio.sleep(0.5)
+
+    return {"status": "error", "message": "Failed to get auth URL — check worker logs"}
+
+
+@router.post("/claude-auth-submit-code")
+async def claude_auth_submit_code(request: Request):
+    """Store the auth code in Redis so the worker task can forward it to the CLI.
+
+    The CLI's HTTP callback server runs inside the worker container — only the
+    worker can reach it.  The API just drops the code into Redis; the waiting
+    claude_auth_login_web task picks it up and makes the callback locally.
+    """
+    import redis.asyncio as aioredis
+
+    body = await request.json()
+    code = (body.get("code") or "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="Authorization code is required")
+
+    SESSION = "claude_auth:web"
+    r = aioredis.from_url(settings.redis_url, decode_responses=True)
+    if not await r.get(f"{SESSION}:port"):
+        raise HTTPException(status_code=400, detail="No active auth session — click 'Authenticate with Claude' first")
+
+    await r.setex(f"{SESSION}:code", 120, code)
+    return {"status": "ok"}
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +600,43 @@ async def setup_status():
         "project_count": project_count,
         "user_count": user_count,
     }
+
+
+# ---------------------------------------------------------------------------
+# Host-mode settings (where user apps live on the VPS host)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/host")
+async def get_host_settings():
+    """Return all host-mode settings: projects_base, mode_default, auto_clone."""
+    from openclow.services import config_service as _cs
+    return await _cs.get_all_host_settings()
+
+
+@router.put("/host")
+async def update_host_settings(body: dict):
+    """Update host-mode settings. Accepts any subset of:
+    projects_base (str), mode_default ("docker"|"host"), auto_clone (bool)."""
+    from openclow.services import config_service as _cs
+
+    allowed = {"projects_base", "mode_default", "auto_clone"}
+    bad = set(body) - allowed
+    if bad:
+        raise HTTPException(400, f"Unknown keys: {sorted(bad)}")
+
+    if "mode_default" in body and body["mode_default"] not in ("docker", "host"):
+        raise HTTPException(400, "mode_default must be 'docker' or 'host'")
+
+    if "projects_base" in body:
+        path = (body["projects_base"] or "").strip()
+        if not path or not path.startswith("/"):
+            raise HTTPException(400, "projects_base must be an absolute path")
+
+    for k, v in body.items():
+        await _cs.set_host_setting(k, v)
+
+    return {"status": "ok", **await _cs.get_all_host_settings()}
 
 
 # ---------------------------------------------------------------------------
@@ -650,6 +730,18 @@ async def delete_user(user_id: int):
         await session.delete(user)
         await session.commit()
     return {"status": "ok", "message": "User deleted"}
+
+
+@router.patch("/users/{user_id}/allow")
+async def toggle_user_allowed(user_id: int, body: dict):
+    """Set is_allowed flag for a user."""
+    async with async_session() as session:
+        user = await session.get(User, user_id)
+        if not user:
+            raise HTTPException(404, "User not found")
+        user.is_allowed = bool(body.get("is_allowed", False))
+        await session.commit()
+    return {"status": "ok", "is_allowed": user.is_allowed}
 
 
 # ---------------------------------------------------------------------------
@@ -787,7 +879,7 @@ async def slack_channels_select():
             )
             return HTMLResponse(html)
     except Exception as e:
-        return HTMLResponse(f'<p class="text-xs text-red-500">Error: {str(e)[:100]}</p>')
+        return HTMLResponse(f'<p class="text-xs text-red-500">Error: {_html.escape(str(e)[:100])}</p>')
 
 
 @router.post("/channels")
@@ -816,7 +908,20 @@ async def link_channel(body: dict):
     channel_name = body.get("channel_name", channel_id)
     await set_channel_project(channel_id, project_id, project.name, provider_type=provider_type, channel_name=channel_name)
 
-    # Return HTML row for HTMX swap
+    # JSON response for React frontend
+    if not request.headers.get("HX-Request"):
+        return {
+            "status": "ok",
+            "binding": {
+                "channel_id": channel_id,
+                "channel_name": channel_name or channel_id,
+                "project_id": project_id,
+                "project_name": project.name,
+                "provider_type": provider_type,
+            },
+        }
+
+    # HTML row for HTMX swap (legacy dashboard)
     display_name = channel_name or channel_id
     prefix = "#" if provider_type == "slack" else "@"
     html = (
@@ -854,6 +959,36 @@ async def active_task_count():
         )
         counts = {row[0]: row[1] for row in result.all()}
     return counts
+
+
+# ---------------------------------------------------------------------------
+# New JSON-only endpoints for React settings panel
+# ---------------------------------------------------------------------------
+
+@router.get("/system-info")
+async def system_info():
+    """Return masked system configuration values for display."""
+    def mask_url(url: str) -> str:
+        if url and "@" in url:
+            scheme, rest = (url.split("://", 1) + [""])[:2]
+            host_part = rest.rsplit("@", 1)[-1]
+            return f"{scheme}://****@{host_part}"
+        return url or ""
+
+    return {
+        "database_url": mask_url(settings.database_url or ""),
+        "redis_url": mask_url(settings.redis_url or ""),
+        "workspace_base_path": settings.workspace_base_path or "",
+        "log_level": settings.log_level or "INFO",
+        "activity_log": settings.activity_log if hasattr(settings, "activity_log") else False,
+    }
+
+
+@router.get("/channel-bindings")
+async def list_channel_bindings():
+    """Return all channel-to-project bindings as JSON."""
+    from openclow.services.channel_service import get_all_channel_bindings
+    return await get_all_channel_bindings()
 
 
 # ---------------------------------------------------------------------------

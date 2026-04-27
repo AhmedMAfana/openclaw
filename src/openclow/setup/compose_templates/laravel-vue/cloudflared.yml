@@ -1,0 +1,25 @@
+tunnel: ${CF_TUNNEL_ID}
+
+# Ingress rules per arch doc §5.3. The first match wins; the trailing
+# http_status:404 is mandatory so unknown hostnames do not silently
+# proxy to any service.
+#
+# noTLSVerify is safe because cloudflared speaks plain HTTP to targets
+# that live inside the per-instance compose network — the network is
+# egress-only so the only traffic reaching ${INSTANCE_HMR_HOST} has
+# already been decrypted at the Cloudflare edge.
+
+ingress:
+  - hostname: ${INSTANCE_HMR_HOST}
+    service: http://node:5173
+    originRequest:
+      noTLSVerify: true
+  - hostname: ${INSTANCE_HOST}
+    # APP_HTTP_PORT is baked in at render time from
+    # InstanceRenderContext.app_http_port. Per-template default; for
+    # this laravel-vue template it's 8080 (serversideup nginx-fpm
+    # variant's NGINX_HTTP_PORT). No host port is published; only the
+    # cloudflared sidecar reaches this port, via the instance's
+    # internal compose network (Principle V — egress-only).
+    service: http://app:${APP_HTTP_PORT}
+  - service: http_status:404

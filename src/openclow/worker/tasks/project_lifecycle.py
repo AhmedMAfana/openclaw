@@ -24,118 +24,15 @@ async def _load_project(project_id: int):
 
 
 async def docker_up_task(ctx: dict, project_id: int, chat_id: str, message_id: str, chat_provider_type: str = "telegram"):
-    """Start Docker containers + health check + tunnel + Playwright verify."""
-    from openclow.services.docker_guard import run_docker
-    from openclow.services.tunnel_service import start_tunnel
-    from openclow.services.status_reporter import LineReporter as StatusReporter
-    from openclow.worker.tasks.bootstrap import _step_verify_app
+    """Start Docker containers + health check + tunnel + Playwright verify.
 
-    chat = await factory.get_chat_by_type(chat_provider_type)
-    try:
-        project = await _load_project(project_id)
-        if not project:
-            from openclow.providers.actions import nav_keyboard
-            await _notify(chat, chat_id, message_id, "Project not found.", keyboard=nav_keyboard())
-            return
-
-        workspace = os.path.join(settings.workspace_base_path, "_cache", project.name)
-        compose = project.docker_compose_file or "docker-compose.yml"
-        compose_project = f"openclow-{project.name}"
-        from openclow.services.port_allocator import get_app_port
-        port = get_app_port(project_id)
-
-        if not os.path.exists(workspace):
-            from openclow.providers.actions import ActionButton, project_nav_keyboard
-            kb = project_nav_keyboard(project_id, ActionButton("Bootstrap", f"project_bootstrap:{project_id}", style="primary"))
-            await _notify(chat, chat_id, message_id,
-                          f"Workspace not found for {project.name}.\nRun bootstrap first.", keyboard=kb)
-            return
-
-        # Agentic: LLM agent with Docker MCP tools handles everything
-        from openclow.worker.tasks._agent_helper import run_repair_agent, RepairCard
-
-        card = RepairCard(project.name, chat, chat_id, message_id)
-        await card.set_phase("repairing", "Starting Docker...")
-
-        # Read compose + env for rich context (same as bootstrap)
-        import platform
-        compose_path = os.path.join(workspace, compose)
-        compose_contents = ""
-        if os.path.exists(compose_path):
-            with open(compose_path) as f:
-                compose_contents = f.read()[:4000]
-        env_path = os.path.join(workspace, ".env")
-        env_contents = ""
-        if os.path.exists(env_path):
-            with open(env_path) as f:
-                env_contents = f.read()[:2000]
-
-        prompt = (
-            f"Start Docker containers and get the app running. You have FULL CONTROL.\n\n"
-            f"PROJECT: {project.name}\n"
-            f"WORKSPACE: {workspace}\n"
-            f"COMPOSE FILE: {compose}\n"
-            f"COMPOSE PROJECT: {compose_project}\n"
-            f"HOST ARCHITECTURE: {platform.machine()}\n"
-            f"PORT: {port}\n\n"
-            f"DOCKER-COMPOSE CONTENTS:\n```yaml\n{compose_contents}\n```\n\n"
-            f".ENV CONTENTS:\n```\n{env_contents}\n```\n\n"
-            f"ARCHITECTURE — READ CAREFULLY:\n"
-            f"- Project apps run inside Docker containers (managed by docker-compose)\n"
-            f"- Cloudflare tunnels run on the WORKER HOST, NOT inside containers\n"
-            f"- NEVER run 'which cloudflared' or 'cloudflared' inside containers — it does not exist there\n"
-            f"- Use tunnel_start/tunnel_get_url MCP tools for tunnel management\n"
-            f"- The app listens on port {port} INSIDE the container\n"
-            f"- Always read container_logs BEFORE attempting fixes\n\n"
-            f"STEPS:\n"
-            f'1. compose_up("{compose}", "{compose_project}", "{workspace}")\n'
-            f'2. compose_ps("{compose_project}") — verify all containers running\n'
-            f"3. If any container down: container_logs(\"<name>\", 50) → read error → diagnose → fix → retry\n"
-            f'4. docker_exec("<app_container>", "curl -sf http://localhost:{port}/ -o /dev/null -w %{{http_code}}")\n'
-            f'5. tunnel_get_url("{project.name}") — if empty, tunnel_start("{project.name}", "http://<app_container_ip>:{port}")\n\n'
-            f"TOOL CALLS — USE EXACT NAMES:\n"
-            f'- compose_up(compose_file="{compose}", project_name="{compose_project}", working_dir="{workspace}")\n'
-            f'- compose_ps(project_name="{compose_project}")\n'
-            f"- container_logs(container_name=\"<name>\", tail=50)\n"
-            f"- docker_exec(container_name=\"<name>\", command=\"<cmd>\")\n"
-            f"- restart_container(container_name=\"<name>\")\n"
-            f'- tunnel_get_url(service_name="{project.name}")\n'
-            f'- tunnel_start(service_name="{project.name}", target_url="http://<container>:{port}")\n\n'
-            f"DO NOT USE:\n"
-            f"- No Bash tool. No shell commands on the host.\n"
-            f"- No 'which cloudflared' — tunnels are NOT inside containers.\n"
-            f"- No 'apt-get install' for cloudflared — it's a host service.\n\n"
-            f"OUTPUT: STATUS: <step> | DIAGNOSIS: <issue> | ACTION: <fix> | FIXED: <tunnel_url>\n\n"
-            f"SELF-HEALING: Read errors carefully. Fix root cause. Never give up. Try 2+ approaches per issue."
-        )
-
-        status_lines = []
-        fixed = await run_repair_agent(prompt, workspace, chat, chat_id, message_id, status_lines, card=card)
-        card.result_url = None  # Will be set by buttons
-
-        # Final buttons
-        from openclow.providers.actions import ActionButton, project_nav_keyboard, open_app_btn
-        extra = [open_app_btn(project.id), ActionButton("Health", f"health:{project.id}")]
-        kb = project_nav_keyboard(project.id, *extra)
-        await chat.edit_message_with_actions(chat_id, message_id, "\n".join(status_lines)[:4000], kb)
-
-        log.info("lifecycle.docker_up", project=project.name, fixed=fixed)
-    except asyncio.CancelledError:
-        from openclow.providers.actions import ActionButton, project_nav_keyboard
-        kb = project_nav_keyboard(project_id, ActionButton("Retry", f"project_up:{project_id}"))
-        try:
-            await chat.edit_message_with_actions(chat_id, message_id, "⏹ Docker Up cancelled.", kb)
-        except Exception:
-            pass
-        raise
-    except Exception as e:
-        log.error("lifecycle.docker_up_failed", error=str(e))
-        from openclow.providers.actions import ActionButton, project_nav_keyboard
-        try:
-            kb = project_nav_keyboard(project_id, ActionButton("Retry", f"project_up:{project_id}"))
-            await chat.edit_message_with_actions(chat_id, message_id, f"❌ Error: {str(e)[:200]}", kb)
-        except Exception:
-            await _notify(chat, chat_id, message_id, f"❌ Error: {str(e)[:200]}")
+    Delegates to check_project_health which uses the full bootstrap-equivalent agent
+    (_run_master_agent with Write/Edit + all Docker tools) — same power as Telegram repair.
+    """
+    from openclow.worker.tasks.health_task import check_project_health
+    await check_project_health(
+        ctx, project_id, chat_id, message_id, chat_provider_type
+    )
 
 
 async def docker_down_task(ctx: dict, project_id: int, chat_id: str, message_id: str, chat_provider_type: str = "telegram"):
@@ -173,13 +70,24 @@ async def docker_down_task(ctx: dict, project_id: int, chat_id: str, message_id:
         else:
             await checklist.skip_step(0, "no workspace")
 
-        # Step 2: Stop tunnel
+        # Step 2: Stop tunnel — verify it's actually down afterward
         await checklist.start_step(1)
+        stop_err: Exception | None = None
         try:
             await stop_tunnel(project.name)
-            await checklist.complete_step(1, "tunnel stopped")
+        except Exception as e:
+            stop_err = e
+            log.warning("lifecycle.tunnel_stop_error", project=project.name, error=str(e))
+        # Verify no tunnel URL remains
+        try:
+            from openclow.services.tunnel_service import get_tunnel_url as _get_tunnel_url
+            still_up = await _get_tunnel_url(project.name)
         except Exception:
-            await checklist.complete_step(1, "no tunnel running")
+            still_up = None
+        if not still_up:
+            await checklist.complete_step(1, "tunnel stopped")
+        else:
+            await checklist.fail_step(1, f"still running: {still_up[:40]}")
 
         # Step 3: Verify
         await checklist.start_step(2)

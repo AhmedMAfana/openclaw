@@ -16,4 +16,5 @@ class User(Base):
     is_allowed: Mapped[bool] = mapped_column(Boolean, default=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     default_project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), nullable=True)
+    web_password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)  # bcrypt hash for web login
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

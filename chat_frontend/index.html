@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <meta name="description" content="TAGH Dev — AI Dev Orchestrator" />
+    <title>TAGH Dev — AI Dev Chat</title>
+    <style>
+      /* First-paint skeleton — rendered before React mounts so the login
+         redirect lands on something, not a white flash. */
+      html, body { background: #0a0a0a; color: #e5e5e5; margin: 0; height: 100%;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Roboto,
+        "Helvetica Neue", Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+      #root { min-height: 100vh; }
+      .app-skeleton {
+        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        background: #0a0a0a; transition: opacity .2s ease;
+      }
+      .app-skeleton.hidden { opacity: 0; pointer-events: none; }
+      .app-skeleton-spinner {
+        width: 36px; height: 36px; border-radius: 50%;
+        border: 2.5px solid rgba(255,255,255,.08);
+        border-top-color: rgba(255,255,255,.7);
+        animation: app-spin .8s linear infinite;
+      }
+      @keyframes app-spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="app-skeleton" id="app-skeleton"><div class="app-skeleton-spinner"></div></div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+</html>
