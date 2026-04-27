@@ -277,13 +277,15 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
             ),
         )
 
-        # 3.5. Chown the workspace to the app image's user uid (typically
-        # www-data uid 82). Without this, composer/npm in the app
-        # container can't write into a 1000-owned bind-mount and the
-        # whole bootstrap dies at "vendor does not exist". Dynamic — the
-        # uid comes from the image, not hardcoded — so swapping
-        # templates / images / hosts doesn't break this.
-        await _chown_workspace_for_app(
+        # 3.5. Make the workspace world-writable so BOTH the agent
+        # (worker container, uid 1000) AND the app container's composer/
+        # npm (www-data, uid 82) can write the same tree. Earlier
+        # version chowned to www-data; that fixed composer but broke
+        # the agent (surfaced as "workspace mounted as read-only"
+        # errors when the agent tried to edit a Vue component).
+        # See _make_workspace_shared_writable's docstring for the
+        # security argument.
+        await _make_workspace_shared_writable(
             host_workspace_dir=host_workspace_dir,
             slug=slug,
         )
@@ -591,67 +593,49 @@ class _ProvisionFailure(Exception):
         self.failure_code = failure_code
 
 
-async def _chown_workspace_for_app(
-    *, host_workspace_dir: str | None, slug: str, app_image: str = "tagh/laravel-vue-app:latest",
+async def _make_workspace_shared_writable(
+    *, host_workspace_dir: str | None, slug: str,
 ) -> None:
-    """Chown the per-instance workspace to whichever uid the app image runs
-    its app process as (typically ``www-data``).
+    """Make the per-instance workspace writable by ALL processes that
+    need to touch it.
 
-    The orchestrator's worker runs as openclow (uid 1000) and clones the
-    repo into ``/workspaces/<slug>/`` — so all files are 1000-owned. The
-    compose template's ``app`` service runs as ``www-data`` (uid 82 in
-    serversideup/php-alpine) and tries to ``composer install`` which
-    needs to create ``vendor/`` inside ``/var/www/html``. uid 82 can't
-    write into a 1000-owned dir → composer dies with
-    "/var/www/html/vendor does not exist and could not be created".
+    Two players write to the same files:
 
-    Two-step fix that's portable across servers AND images:
-      1. Query the actual app image for ``id -u www-data`` (don't hardcode 82).
-         Lets us swap to a debian-based image with a different uid without
-         breaking. Skips on lookup failure (warns + assumes 82).
-      2. Spawn a one-shot ``alpine`` container with the workspace bind-
-         mounted as root, chown -R to <uid>:<gid>. Worker has the docker
-         socket; one-shot is cheap (~1s).
+      * **Worker / agent** — runs as ``openclow`` (uid 1000) inside the
+        worker container. Uses MCP tools (workspace_mcp, git_mcp) to
+        clone, edit, and commit. Owns the original clone.
+      * **App container** — runs as ``www-data`` (uid 82 in
+        serversideup/php-alpine). Composer/npm need to create
+        ``vendor/`` and ``node_modules/`` inside ``/var/www/html``.
 
-    Idempotent — safe to re-run on an already-chowned workspace.
+    A previous version of this helper chowned to www-data — which
+    fixed composer but BROKE the agent (uid 1000 couldn't write to
+    a uid-82-owned tree, surfaced as the "workspace mounted as
+    read-only" error agents reported when asked to edit code).
+
+    Solution: ``chmod -R 0777``. Per-chat throwaway dev workspace,
+    security boundary is the container/host (Principle V — egress-only
+    network surface). World-writable inside the workspace dir is fine
+    because:
+      * nothing privileged lives in there (creds are env-vars, never
+        on disk per Principle IV);
+      * the dir tree is rm -rf'd on teardown;
+      * uid skew between agent (1000) and app (82, or whatever) is
+        unavoidable when the same files have to be written by both.
+
+    Idempotent — safe to re-run on an already-chmodded workspace.
     """
     if not host_workspace_dir:
-        log.warning("workspace_chown.no_host_path", slug=slug)
+        log.warning("workspace_perms.no_host_path", slug=slug)
         return
     src = f"{host_workspace_dir}/{slug}"
 
-    # 1. Detect the app user's uid:gid from the image (one docker-run).
-    target_uid = "82"
-    target_gid = "82"
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "run", "--rm", "--entrypoint=sh", app_image,
-            "-c", "id -u www-data; id -g www-data",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=15)
-        if proc.returncode == 0:
-            lines = out.decode().strip().splitlines()
-            if len(lines) >= 2 and lines[0].isdigit() and lines[1].isdigit():
-                target_uid, target_gid = lines[0], lines[1]
-        else:
-            log.warning(
-                "workspace_chown.uid_lookup_failed",
-                slug=slug, image=app_image, stderr=err.decode()[:200],
-                fallback=f"{target_uid}:{target_gid}",
-            )
-    except (asyncio.TimeoutError, Exception) as e:
-        log.warning(
-            "workspace_chown.uid_lookup_error",
-            slug=slug, error=str(e)[:200], fallback=f"{target_uid}:{target_gid}",
-        )
-
-    # 2. Chown via a one-shot alpine container (root inside, can chown to any uid).
+    # One-shot alpine as root, chmod the whole tree to 0777 so any uid
+    # in any sibling container can read+write+exec.
     proc = await asyncio.create_subprocess_exec(
         "docker", "run", "--rm",
         "-v", f"{src}:/w",
-        "alpine:latest", "chown", "-R", f"{target_uid}:{target_gid}", "/w",
+        "alpine:latest", "chmod", "-R", "0777", "/w",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -661,17 +645,14 @@ async def _chown_workspace_for_app(
         proc.kill()
         raise _ProvisionFailure(
             FailureCode.PROJCTL_UP,
-            f"workspace chown timed out (60s) for {src}",
+            f"workspace chmod timed out (60s) for {src}",
         )
     if proc.returncode != 0:
         raise _ProvisionFailure(
             FailureCode.PROJCTL_UP,
-            f"workspace chown failed (rc={proc.returncode}): {err.decode()[:300]}",
+            f"workspace chmod failed (rc={proc.returncode}): {err.decode()[:300]}",
         )
-    log.info(
-        "workspace_chown.ok",
-        slug=slug, host_path=src, uid=target_uid, gid=target_gid,
-    )
+    log.info("workspace_perms.shared_writable", slug=slug, host_path=src)
 
 
 async def _compose_up(
