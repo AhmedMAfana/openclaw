@@ -176,6 +176,14 @@ if [[ "$SKIP_BUILD" != "1" ]]; then
   # \`docker compose up\` with "pull access denied for tagh/...".
   # Idempotent: docker layer cache makes re-builds free if source unchanged.
   docker build -t tagh/projctl:dev "$REMOTE_DIR/app/projctl/"
+
+  # The laravel-vue-app Dockerfile does \`FROM ghcr.io/tagh/projctl:dev\`
+  # (full GHCR path), so docker tries to pull from GHCR even when we
+  # have the image locally as \`tagh/projctl:dev\`. Tag-as-alias trick:
+  # docker checks the local cache first, so this satisfies the FROM
+  # without needing GHCR auth (which the org doesn't have on staging).
+  docker tag tagh/projctl:dev ghcr.io/tagh/projctl:dev
+
   docker build --build-arg PROJCTL_TAG=dev \\
                -t tagh/laravel-vue-app:latest \\
                "$REMOTE_DIR/app/src/openclow/setup/compose_templates/laravel-vue/"
