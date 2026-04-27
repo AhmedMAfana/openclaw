@@ -33,6 +33,21 @@ for f in .env auth.json; do
   [[ -f $f ]] || { echo "error: $HERE/$f is required (source of truth for secrets)"; exit 1; }
 done
 
+# Sanity: built frontend bundle present on laptop. The prod compose
+# bind-mounts ./chat_frontend/dist into the api container read-only
+# (docker-compose.prod.yml:46), so an empty / missing host dir would mask
+# the image's baked bundle and 404 every /chat/ asset. We build locally
+# (or in the worker container — see README) and rsync the result up in
+# step 3.5 below.
+if ! [[ -f chat_frontend/dist/index.html ]]; then
+  echo "error: chat_frontend/dist/index.html missing — build the React frontend first."
+  echo "  if your laptop has Node:    (cd chat_frontend && npm ci && npm run build)"
+  echo "  if your laptop has no Node: build inside the worker container, e.g."
+  echo "    docker compose exec worker bash -c 'cd /app/chat_frontend && npm install && npm run build'"
+  echo "    docker cp tagh-devops-worker-1:/app/chat_frontend/dist/. chat_frontend/dist/"
+  exit 1
+fi
+
 # Sanity: server reachable as root
 ssh -o BatchMode=yes -o ConnectTimeout=5 "root@$SERVER" 'true' \
   || { echo "error: cannot SSH root@$SERVER — add your key first"; exit 1; }
@@ -103,18 +118,31 @@ sudo -u web bash <<EOSU
   set -euo pipefail
   if [[ -d "$REMOTE_DIR/app/.git" ]]; then
     cd "$REMOTE_DIR/app"
-    git fetch --depth=1 origin "$BRANCH"
+    # Explicit refspec so the remote-tracking ref exists after a shallow
+    # fetch — without ":refs/remotes/origin/<branch>" only FETCH_HEAD is
+    # set and "git reset --hard origin/<branch>" fails for new branches.
+    git fetch --depth=1 origin "+$BRANCH:refs/remotes/origin/$BRANCH"
     git reset --hard "origin/$BRANCH"
   else
     git clone --depth=1 --branch "$BRANCH" "$REPO_URL" "$REMOTE_DIR/app"
   fi
   cd "$REMOTE_DIR/app"
-  # Frontend build sits inside the app image in prod, but compose still tries
-  # to bind-mount chat_frontend/dist from docker-compose.yml — provide an empty
-  # dir so it doesn't fail even though the prod override removes the mount.
-  install -d chat_frontend/dist
+  # Ensure the dir exists with web ownership; we'll populate the bundle in
+  # the next step via rsync-from-laptop.
+  install -d -m 0755 chat_frontend/dist
 EOSU
 REMOTE
+
+# ── 2.5 Ship the freshly-built React bundle to the server ────────────────────
+say "2.5/6  rsync chat_frontend/dist → server (built locally — see prod compose:46)"
+# `--delete` so removed assets on the new bundle don't linger on the server.
+# The prod compose mounts ./chat_frontend/dist:ro into the api container; an
+# empty dir would mask the image's baked fallback and 404 the entire /chat/.
+# We rsync as root (which can overwrite any existing file regardless of
+# ownership from prior partial deploys), then chown the result to web so
+# the api container reads it under its expected uid.
+rsync -az --delete chat_frontend/dist/ "root@$SERVER:$REMOTE_DIR/app/chat_frontend/dist/"
+ssh "root@$SERVER" "chown -R web:web '$REMOTE_DIR/app/chat_frontend/dist'"
 
 # ── 3. Push local secrets ────────────────────────────────────────────────────
 say "3/6  scp .env + auth.json → server (600, owned by web)"
@@ -132,7 +160,13 @@ COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
 
 \$COMPOSE pull postgres redis dozzle
 if [[ "$SKIP_BUILD" != "1" ]]; then
-  \$COMPOSE build api worker bot
+  # Build *every* service that has a build: stanza, not just api/worker/bot.
+  # The migrate service has its own image (app-migrate) because it inherits
+  # the *app YAML anchor's build. Skipping it leaves a stale image frozen
+  # at whatever migrations existed last time it was built — alembic then
+  # silently no-ops because it can't see the new revision files. (Same goes
+  # for the setup service.) This bit us once; don't let it bite again.
+  \$COMPOSE build api worker bot migrate setup
 fi
 
 # Start data services first, wait for healthcheck.
@@ -212,5 +246,11 @@ echo "GET https://$DOMAIN/chat/ → $code"
 ssh "root@$SERVER" "ss -tlnp | awk 'NR==1 || /:(8000|5432|6379|9999)/'"
 ssh "root@$SERVER" "cd $REMOTE_DIR/app && docker compose -f docker-compose.yml -f docker-compose.prod.yml ps"
 
+# What did we actually ship?
+deployed_sha=$(ssh "root@$SERVER" "cd $REMOTE_DIR/app && git rev-parse --short HEAD")
+deployed_msg=$(ssh "root@$SERVER" "cd $REMOTE_DIR/app && git log -1 --pretty=format:'%s'")
+
 echo
 echo "✓ deploy complete — https://$DOMAIN/chat/"
+echo "  branch:   $BRANCH"
+echo "  commit:   $deployed_sha — $deployed_msg"
