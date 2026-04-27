@@ -52,16 +52,21 @@ const overlay = defineConfig({
       clientPort: 443,
       protocol: 'wss',
     },
-    // CORS: the HTML loads from https://INSTANCE_HOST but the script
-    // tags reference https://INSTANCE_HMR_HOST — that's cross-origin.
-    // Without explicit CORS, Vite returns ACAO=server.origin (the HMR
-    // host) which doesn't match the requesting web origin → browser
-    // blocks the JS/CSS even though the bytes were 200 OK. Allow
-    // both origins so the @vite() <script> tags execute.
+    // CORS: the HTML loads from INSTANCE_HOST but the script tags
+    // reference INSTANCE_HMR_HOST — that's cross-origin. Without
+    // explicit CORS, Vite returns ACAO=server.origin which doesn't
+    // match the requesting web origin → browser blocks JS/CSS even
+    // though the bytes were 200 OK. Allow BOTH protocols (http +
+    // https) for both hostnames so a user who landed on http://
+    // (because they typed it, or before Cloudflare's "Always use
+    // HTTPS" rewrites) still gets working assets. The cloudflared
+    // tunnel terminates TLS at the edge regardless.
     cors: {
       origin: [
         'https://${INSTANCE_HOST}',
+        'http://${INSTANCE_HOST}',
         'https://${INSTANCE_HMR_HOST}',
+        'http://${INSTANCE_HMR_HOST}',
       ],
       credentials: true,
     },
