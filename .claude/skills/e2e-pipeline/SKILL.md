@@ -108,7 +108,10 @@ Phase 10 report           Final markdown report with artifact links, screenshots
 4. Screenshot → `$RUN_DIR/04-app-live/01-app-home.png`.
 5. `browser_console_messages` → `$RUN_DIR/04-app-live/console.json`. Any `error` level fails the phase.
 6. `browser_network_requests` → `$RUN_DIR/04-app-live/network.json`. Any non-2xx for static assets fails the phase.
-7. If the tunnel resolves but the app returns 502/503: the app inside the container isn't ready. Hot-fix: `docker exec` into the container, restart php-fpm or vite. Root-fix: add a healthcheck to the compose template.
+7. **vite-asset-routing** (catches the `public/hot=http://0.0.0.0:5173` regression that ships browser-unreachable script tags). Two checks:
+   1. `browser_evaluate(() => Array.from(document.querySelectorAll('script[src],link[href]')).map(e => e.src||e.href))` → save to `$RUN_DIR/04-app-live/asset-urls.json`. **Fail the phase** if any URL matches `^https?://(0\.0\.0\.0|localhost|127\.0\.0\.1)` — the build was shipped with Vite's bind address as the public URL, which is unreachable from a real browser.
+   2. `instance_exec(service="app", cmd="cat /var/www/html/public/hot")` (Laravel-Vue templates only — skip on plain PHP/static-site templates). Save to `$RUN_DIR/04-app-live/public-hot.txt`. **Fail the phase** if the content does NOT match `^https://hmr-inst-[0-9a-f]{14}\.` — the Vite overlay (`vite.config.tagh.mjs`) didn't take effect; check the renderer wrote it and the node `command:` runs with `--config vite.config.tagh.mjs`.
+8. If the tunnel resolves but the app returns 502/503: the app inside the container isn't ready. Hot-fix: `docker exec` into the container, restart php-fpm or vite. Root-fix: add a healthcheck to the compose template.
 
 ### Phase 5 — workspace-edit
 

@@ -76,7 +76,11 @@ services:
         if [ ! -d /var/www/html/node_modules ]; then
           (cd /var/www/html && npm ci);
         fi
-        cd /var/www/html && exec npm run dev -- --host 0.0.0.0
+        # Use the platform's Vite overlay config (vite.config.tagh.mjs)
+        # so server.origin points at the cloudflared HMR hostname and
+        # laravel-vite-plugin writes the public URL to public/hot —
+        # otherwise the browser tries 0.0.0.0:5173 and fails.
+        cd /var/www/html && exec npx vite --config vite.config.tagh.mjs --host 0.0.0.0
     environment:
       - INSTANCE_HOST=${INSTANCE_HOST}
       - INSTANCE_HMR_HOST=${INSTANCE_HMR_HOST}

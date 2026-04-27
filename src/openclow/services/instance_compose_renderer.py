@@ -149,6 +149,22 @@ def render(
 
     compose_out.write_text(_substitute(compose_tmpl.read_text(), env))
     cloudflared_out.write_text(_substitute(cloudflared_tmpl.read_text(), env))
+
+    # Vite overlay (Laravel-Vue + any future framework that ships one).
+    # The wrapper imports the project's own vite.config.{ts,js,mjs} and
+    # merges in `server.origin` / `server.hmr` / `server.allowedHosts`
+    # so Laravel's @vite() blade directive emits browser-reachable URLs
+    # via the cloudflared HMR hostname instead of Vite's bind address
+    # (the http://0.0.0.0:5173 in public/hot bug). Templates without
+    # this file (e.g. plain PHP, static-site) just skip this step.
+    vite_overlay_tmpl = template_dir / "vite.config.tagh.mjs"
+    if vite_overlay_tmpl.is_file():
+        vite_overlay_out = output_dir / "vite.config.tagh.mjs"
+        vite_overlay_out.write_text(
+            _substitute(vite_overlay_tmpl.read_text(), env)
+        )
+        _ensure_gitignore_entry(output_dir, "vite.config.tagh.mjs")
+
     return compose_out, cloudflared_out
 
 
@@ -164,6 +180,25 @@ def _substitute(text: str, env: Mapping[str, str]) -> str:
         return env[key]
 
     return re.sub(r"\$\{([A-Z][A-Z0-9_]*)\}", repl, text)
+
+
+def _ensure_gitignore_entry(output_dir: pathlib.Path, entry: str) -> None:
+    """Idempotently append a line to ``output_dir/.gitignore``.
+
+    The platform writes overlay files (e.g. ``vite.config.tagh.mjs``)
+    into the project's worktree. Without an ignore entry every git
+    status would show them as untracked, polluting the user's git log.
+    Appending only when the line isn't already present keeps the
+    operation idempotent across re-provisions.
+    """
+    gitignore = output_dir / ".gitignore"
+    existing = gitignore.read_text() if gitignore.is_file() else ""
+    if any(line.strip() == entry for line in existing.splitlines()):
+        return
+    sep = "" if existing.endswith("\n") or existing == "" else "\n"
+    gitignore.write_text(
+        existing + sep + f"# Added by TAGH platform overlay\n{entry}\n"
+    )
 
 
 def _reject_secret_env_in_project_yaml(project_yaml: str) -> None:
