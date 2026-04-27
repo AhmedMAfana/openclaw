@@ -90,6 +90,23 @@ if ! swapon --show | grep -q '^/swapfile'; then
   sysctl -q vm.swappiness=10
 fi
 
+# inotify limits — Vite (in every per-instance node container) watches
+# every file under /var/www/html, including thousands in vendor/ and
+# node_modules/. Default fs.inotify.max_user_watches=8192 (or ~30k on
+# some kernels) runs out fast: Vite throws ENOSPC, never writes
+# public/hot, Laravel's @vite directive then can't find the manifest
+# and the chat preview URL 500s with ViteManifestNotFoundException.
+# 524288 watches + 8192 instances is the standard "developer machine"
+# bump and covers ~50 concurrent per-instance node services. Persist
+# via /etc/sysctl.d so a reboot keeps them.
+if ! [[ -f /etc/sysctl.d/99-tagh-inotify.conf ]]; then
+  cat > /etc/sysctl.d/99-tagh-inotify.conf <<'INOTIFY'
+fs.inotify.max_user_watches = 524288
+fs.inotify.max_user_instances = 8192
+INOTIFY
+  sysctl -q -p /etc/sysctl.d/99-tagh-inotify.conf
+fi
+
 # Docker log rotation — keep json logs from eating disk over weeks.
 if ! [[ -f /etc/docker/daemon.json ]] || ! grep -q '"max-size"' /etc/docker/daemon.json; then
   mkdir -p /etc/docker
