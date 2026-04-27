@@ -617,7 +617,7 @@ async def get_host_settings():
 @router.put("/host")
 async def update_host_settings(body: dict):
     """Update host-mode settings. Accepts any subset of:
-    projects_base (str), mode_default ("docker"|"host"), auto_clone (bool)."""
+    projects_base (str), mode_default ("docker"|"host"|"container"), auto_clone (bool)."""
     from openclow.services import config_service as _cs
 
     allowed = {"projects_base", "mode_default", "auto_clone"}
@@ -625,8 +625,11 @@ async def update_host_settings(body: dict):
     if bad:
         raise HTTPException(400, f"Unknown keys: {sorted(bad)}")
 
-    if "mode_default" in body and body["mode_default"] not in ("docker", "host"):
-        raise HTTPException(400, "mode_default must be 'docker' or 'host'")
+    # Accept "container" — spec 001 added per-chat container mode (see
+    # bootstrap.py routing). Old check rejected it, so the Settings UI
+    # couldn't pick container as the default-for-new-projects.
+    if "mode_default" in body and body["mode_default"] not in ("docker", "host", "container"):
+        raise HTTPException(400, "mode_default must be 'docker', 'host', or 'container'")
 
     if "projects_base" in body:
         path = (body["projects_base"] or "").strip()

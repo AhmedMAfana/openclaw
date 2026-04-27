@@ -6,7 +6,7 @@ const lc = "block text-sm font-medium text-foreground mb-1";
 
 type HostSettings = {
   projects_base: string;
-  mode_default: "docker" | "host";
+  mode_default: "docker" | "host" | "container";
   auto_clone: boolean;
 };
 
@@ -98,7 +98,8 @@ export function SettingsHost() {
               setCfg({ ...cfg, mode_default: e.target.value as HostSettings["mode_default"] })
             }
           >
-            <option value="docker">docker (containerized stack)</option>
+            <option value="container">container (per-chat isolated stack — spec 001)</option>
+            <option value="docker">docker (legacy containerized stack)</option>
             <option value="host">host (already-running on VPS)</option>
           </select>
         </div>
