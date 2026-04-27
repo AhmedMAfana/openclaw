@@ -65,6 +65,12 @@ _COMPOSE_UP_TIMEOUT_S = 900       # ≤ 15 min for first-time image pull
 _COMPOSE_DOWN_TIMEOUT_S = 180
 _DOCKER_META_TIMEOUT_S = 30
 _PROJCTL_UP_TIMEOUT_S = 1800      # ≤ 30 min for slow guides
+# First-paint gate: how long to wait for the public URL to serve a real
+# 200 (no Laravel exception page) before flipping status to running.
+# The cold path includes npm ci + Vite warmup + Laravel @vite() resolution
+# on top of compose up — generous-but-bounded.
+_FIRST_PAINT_TIMEOUT_S = 180
+_FIRST_PAINT_POLL_INTERVAL_S = 3.0
 
 # The orchestrator's internal base URL as seen from inside the instance
 # containers. Configurable via platform_config so ops can override it
@@ -274,6 +280,19 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
         # 5. projctl up inside the app container. Poll its JSON-line
         # stdout for step_success / fatal events per the stdout schema.
         await _projctl_up(compose_project=compose_project, slug=slug)
+
+        # 5.5 First-paint gate: poll the public URL until it returns a
+        # real 200 (no Laravel "ViteManifestNotFound" / "Whoops" /
+        # generic 5xx). Without this, the row flips to running while
+        # Vite is still warming up + writing public/hot, and the user
+        # hits a 500 on the live URL. This is the platform fulfilling
+        # FR-004's "ready" transition only when the app actually IS
+        # ready. Timeout → status='failed' with failure_code=health_check.
+        await _wait_for_first_paint(
+            web_hostname=tunnel_result.web_hostname,
+            slug=slug,
+            timeout_s=_FIRST_PAINT_TIMEOUT_S,
+        )
 
         # 6. Flip DB state — instance is live.
         now = datetime.now(timezone.utc)
@@ -702,6 +721,81 @@ def _template_dir_for_instance(instance_id: UUID) -> pathlib.Path:
     """
     base = pathlib.Path(__file__).resolve().parents[2] / "setup" / "compose_templates"
     return base / "laravel-vue"
+
+
+_FIRST_PAINT_LARAVEL_EXCEPTION_MARKERS = (
+    "ViteManifestNotFoundException",
+    "ViteManifestNotFound",
+    "Whoops, looks like something went wrong.",
+    "Internal Server Error",
+)
+
+
+async def _wait_for_first_paint(
+    *, web_hostname: str, slug: str, timeout_s: int
+) -> None:
+    """Poll the public URL until the app actually serves a real 200.
+
+    Without this gate, ``status='running'`` flips the moment ``docker
+    compose up`` returns — but the dev server (Vite) may still be
+    warming up. Laravel's @vite() blade then 500s with
+    ``ViteManifestNotFoundException`` because public/hot isn't written
+    yet. The user sees a broken app on a "running" instance.
+
+    Accepts ONLY: HTTP 200 + body free of Laravel exception markers.
+    Anything else (5xx, 404, exception page returned with 200) is
+    "not ready, keep waiting". On timeout, raises ``_ProvisionFailure``
+    with ``FailureCode.HEALTH_CHECK`` so InstanceService.terminate
+    flips the row to ``failed`` and the chat surfaces a Retry card.
+    """
+    import httpx
+
+    public_url = f"https://{web_hostname}/"
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    last_status: int | None = None
+    last_error: str | None = None
+
+    log.info(
+        "provision_instance.first_paint_wait_start",
+        slug=slug, url=public_url, timeout_s=timeout_s,
+    )
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
+        follow_redirects=True,
+    ) as client:
+        while True:
+            now = asyncio.get_event_loop().time()
+            if now >= deadline:
+                raise _ProvisionFailure(
+                    FailureCode.HEALTH_CHECK,
+                    f"first-paint gate timed out after {timeout_s}s "
+                    f"(last_status={last_status}, last_error={last_error}). "
+                    f"App did not serve a clean 200 — check node logs for Vite "
+                    f"errors and app logs for Laravel exceptions."
+                )
+            try:
+                resp = await client.get(public_url)
+                last_status = resp.status_code
+                if resp.status_code == 200:
+                    body = resp.text
+                    if any(
+                        marker in body
+                        for marker in _FIRST_PAINT_LARAVEL_EXCEPTION_MARKERS
+                    ):
+                        last_error = "laravel_exception_page"
+                    else:
+                        log.info(
+                            "provision_instance.first_paint_ready",
+                            slug=slug,
+                            elapsed_s=round(timeout_s - (deadline - now), 1),
+                        )
+                        return
+                else:
+                    last_error = f"http_{resp.status_code}"
+            except httpx.HTTPError as e:
+                last_error = type(e).__name__
+            await asyncio.sleep(_FIRST_PAINT_POLL_INTERVAL_S)
 
 
 def _copy_template_support_files(

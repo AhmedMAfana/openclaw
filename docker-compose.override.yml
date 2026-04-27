@@ -32,11 +32,19 @@ services:
       - LOG_LEVEL=DEBUG
 
   worker:
+    # Dev: wrap arq with watchfiles so renderer / tasks code changes
+    # auto-reload without a manual `docker compose restart worker`.
+    # Without this, edits to instance_tasks.py / *_renderer.py sit on
+    # disk while the running arq process keeps the OLD module loaded —
+    # producing the "I shipped the change but provisioning is still
+    # broken" deploy-staleness surprise. The `--filter python` keeps
+    # it cheap (no reload on .pyc churn). Grace period 3s lets the
+    # current ARQ job finish before kill.
     command: >
       bash -c "
         chmod 666 /var/run/docker.sock 2>/dev/null || true;
         python3 -c 'import asyncio; from openclow.services.docker_guard import _detect_host_workspace_path; asyncio.run(_detect_host_workspace_path())' 2>/dev/null || true;
-        exec su -l openclow -c 'arq openclow.worker.arq_app.WorkerSettings'
+        exec su -l openclow -c 'watchfiles --filter python --ignore-paths __pycache__,*.egg-info,.pytest_cache --grace-period 3 \"arq openclow.worker.arq_app.WorkerSettings\" /app/src/openclow'
       "
     user: root
     volumes:
