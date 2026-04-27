@@ -277,6 +277,17 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
             ),
         )
 
+        # 3.5. Chown the workspace to the app image's user uid (typically
+        # www-data uid 82). Without this, composer/npm in the app
+        # container can't write into a 1000-owned bind-mount and the
+        # whole bootstrap dies at "vendor does not exist". Dynamic — the
+        # uid comes from the image, not hardcoded — so swapping
+        # templates / images / hosts doesn't break this.
+        await _chown_workspace_for_app(
+            host_workspace_dir=host_workspace_dir,
+            slug=slug,
+        )
+
         # 4. docker compose up -p <compose_project> -f _compose.yml -d.
         # Secrets injected via env; never touch disk.
         await _compose_up(
@@ -538,6 +549,89 @@ class _ProvisionFailure(Exception):
     def __init__(self, failure_code: FailureCode, message: str) -> None:
         super().__init__(message)
         self.failure_code = failure_code
+
+
+async def _chown_workspace_for_app(
+    *, host_workspace_dir: str | None, slug: str, app_image: str = "tagh/laravel-vue-app:latest",
+) -> None:
+    """Chown the per-instance workspace to whichever uid the app image runs
+    its app process as (typically ``www-data``).
+
+    The orchestrator's worker runs as openclow (uid 1000) and clones the
+    repo into ``/workspaces/<slug>/`` — so all files are 1000-owned. The
+    compose template's ``app`` service runs as ``www-data`` (uid 82 in
+    serversideup/php-alpine) and tries to ``composer install`` which
+    needs to create ``vendor/`` inside ``/var/www/html``. uid 82 can't
+    write into a 1000-owned dir → composer dies with
+    "/var/www/html/vendor does not exist and could not be created".
+
+    Two-step fix that's portable across servers AND images:
+      1. Query the actual app image for ``id -u www-data`` (don't hardcode 82).
+         Lets us swap to a debian-based image with a different uid without
+         breaking. Skips on lookup failure (warns + assumes 82).
+      2. Spawn a one-shot ``alpine`` container with the workspace bind-
+         mounted as root, chown -R to <uid>:<gid>. Worker has the docker
+         socket; one-shot is cheap (~1s).
+
+    Idempotent — safe to re-run on an already-chowned workspace.
+    """
+    if not host_workspace_dir:
+        log.warning("workspace_chown.no_host_path", slug=slug)
+        return
+    src = f"{host_workspace_dir}/{slug}"
+
+    # 1. Detect the app user's uid:gid from the image (one docker-run).
+    target_uid = "82"
+    target_gid = "82"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "run", "--rm", "--entrypoint=sh", app_image,
+            "-c", "id -u www-data; id -g www-data",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=15)
+        if proc.returncode == 0:
+            lines = out.decode().strip().splitlines()
+            if len(lines) >= 2 and lines[0].isdigit() and lines[1].isdigit():
+                target_uid, target_gid = lines[0], lines[1]
+        else:
+            log.warning(
+                "workspace_chown.uid_lookup_failed",
+                slug=slug, image=app_image, stderr=err.decode()[:200],
+                fallback=f"{target_uid}:{target_gid}",
+            )
+    except (asyncio.TimeoutError, Exception) as e:
+        log.warning(
+            "workspace_chown.uid_lookup_error",
+            slug=slug, error=str(e)[:200], fallback=f"{target_uid}:{target_gid}",
+        )
+
+    # 2. Chown via a one-shot alpine container (root inside, can chown to any uid).
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "run", "--rm",
+        "-v", f"{src}:/w",
+        "alpine:latest", "chown", "-R", f"{target_uid}:{target_gid}", "/w",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise _ProvisionFailure(
+            FailureCode.PROJCTL_UP,
+            f"workspace chown timed out (60s) for {src}",
+        )
+    if proc.returncode != 0:
+        raise _ProvisionFailure(
+            FailureCode.PROJCTL_UP,
+            f"workspace chown failed (rc={proc.returncode}): {err.decode()[:300]}",
+        )
+    log.info(
+        "workspace_chown.ok",
+        slug=slug, host_path=src, uid=target_uid, gid=target_gid,
+    )
 
 
 async def _compose_up(
