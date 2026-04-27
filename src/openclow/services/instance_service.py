@@ -413,6 +413,21 @@ class InstanceService:
                 await session.commit()
                 await session.refresh(instance)
 
+                # Enqueue INSIDE the lock + shielded against caller
+                # cancellation. The row was just committed; if we let
+                # the parent task get cancelled here (e.g. a streaming
+                # WS handler closes mid-flow), the enqueue would
+                # silently skip and the row would sit in 'provisioning'
+                # forever with no worker job to advance it. Shield
+                # ensures: once the row is in DB, the job lands in
+                # arq's queue, period. The orphan-recovery branch in
+                # inactivity_reaper is the safety net if even this fails
+                # (process kill / redis blip).
+                import asyncio as _asyncio
+                await _asyncio.shield(
+                    self._enqueue("provision_instance", str(instance.id))
+                )
+
         log.info(
             "instance.provisioning",
             instance_slug=instance.slug,
@@ -420,9 +435,6 @@ class InstanceService:
             user_id=user_id,
             project_id=instance.project_id,
         )
-        # Enqueue the actual infra work. Service stays cheap; the job is
-        # idempotent on its own (research.md §4).
-        await self._enqueue("provision_instance", str(instance.id))
         return instance
 
     async def get_or_resume(self, chat_session_id: int) -> Instance:

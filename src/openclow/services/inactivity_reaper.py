@@ -57,6 +57,15 @@ _DEFAULT_GRACE_WINDOW = timedelta(minutes=60)
 # concurrent reaper replicas each take their own batch without blocking.
 _BATCH_SIZE = 50
 
+# A real provision_instance job finishes in ~90s end-to-end. Anything
+# in 'provisioning' status for more than this is almost certainly an
+# orphan — the row was committed but the worker never ran the job
+# (process crash, redis blip, or upstream-cancellation race that
+# bypassed the shielded enqueue in instance_service.provision()).
+# Mark it failed so the user sees a Retry button instead of a stuck
+# spinner forever.
+_PROVISIONING_ORPHAN_AGE = timedelta(minutes=5)
+
 
 def _dry_run_enabled() -> bool:
     return os.environ.get("REAPER_DRY_RUN") == "1"
@@ -115,6 +124,48 @@ async def reap(
     notified = 0
     terminated = 0
 
+    orphan_failed = 0
+
+    # ── Phase 0: provisioning → failed (orphan: no worker job in flight) ─
+    # Safety net for the rare case where a row got committed in
+    # 'provisioning' but the enqueue never reached the worker. The
+    # shielded enqueue in InstanceService.provision() handles the common
+    # cancellation race; this picks up anything that slipped through
+    # (process kill / redis blip / etc). Threshold = 5min, generous vs
+    # the typical ~90s real provision time.
+    async with async_session() as session:
+        orphan_cutoff = now - _PROVISIONING_ORPHAN_AGE
+        orphan_stmt = (
+            select(Instance)
+            .where(
+                Instance.status == InstanceStatus.PROVISIONING.value,
+                Instance.created_at <= orphan_cutoff,
+            )
+            .limit(_BATCH_SIZE)
+            .with_for_update(skip_locked=True, of=Instance)
+        )
+        result = await session.execute(orphan_stmt)
+        rows = list(result.scalars().all())
+        for inst in rows:
+            log.warning(
+                "instance.orphan_recovered",
+                instance_slug=inst.slug,
+                age_minutes=(now - inst.created_at).total_seconds() / 60,
+                dry_run=dry_run,
+            )
+            if dry_run:
+                orphan_failed += 1
+                continue
+            # Mark as destroyed (with terminated_reason) instead of failed
+            # because we don't know the actual failure point — could be
+            # the enqueue, the worker startup, anything before the
+            # provision job itself wrote a real failure_code.
+            inst.status = InstanceStatus.DESTROYED.value
+            inst.terminated_reason = "admin_forced"
+            inst.terminated_at = now
+            await session.commit()
+            orphan_failed += 1
+
     # ── Phase 1: running → idle (TTL expired, no warning sent yet) ────
     async with async_session() as session:
         expired_stmt = (
@@ -129,7 +180,14 @@ async def reap(
             # on SQLite (dev/test). Multiple replicas never see the same
             # row because the first replica's UPDATE bumps the status
             # before a second tick can hit it.
-            .with_for_update(skip_locked=True)
+            # `of=Instance` scopes the row lock to instances ONLY — not
+            # the LEFT-JOINed projects table that SQLAlchemy auto-adds via
+            # Instance.project (lazy='joined'). Postgres rejects FOR UPDATE
+            # on the nullable side of an outer join, which is why the old
+            # bare `.with_for_update(skip_locked=True)` was raising
+            # "FeatureNotSupportedError: FOR UPDATE cannot be applied to
+            # the nullable side of an outer join" every reaper tick.
+            .with_for_update(skip_locked=True, of=Instance)
         )
         result = await session.execute(expired_stmt)
         rows = list(result.scalars().all())
@@ -171,7 +229,14 @@ async def reap(
                 Instance.grace_notification_at <= grace_cutoff,
             )
             .limit(_BATCH_SIZE)
-            .with_for_update(skip_locked=True)
+            # `of=Instance` scopes the row lock to instances ONLY — not
+            # the LEFT-JOINed projects table that SQLAlchemy auto-adds via
+            # Instance.project (lazy='joined'). Postgres rejects FOR UPDATE
+            # on the nullable side of an outer join, which is why the old
+            # bare `.with_for_update(skip_locked=True)` was raising
+            # "FeatureNotSupportedError: FOR UPDATE cannot be applied to
+            # the nullable side of an outer join" every reaper tick.
+            .with_for_update(skip_locked=True, of=Instance)
         )
         result = await session.execute(terminating_stmt)
         rows = list(result.scalars().all())
@@ -212,7 +277,12 @@ async def reap(
                         slug=inst.slug, error=str(e),
                     )
 
-    summary = {"notified": notified, "terminated": terminated, "dry_run": dry_run}
+    summary = {
+        "notified": notified,
+        "terminated": terminated,
+        "orphan_failed": orphan_failed,
+        "dry_run": dry_run,
+    }
     log.info("reaper.sweep_complete", **summary)
     return summary
 

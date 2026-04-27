@@ -477,11 +477,51 @@ async def teardown_instance(ctx: dict, instance_id: str) -> dict:
                 slug=slug, error=str(e),
             )
 
-        # 3. Workspace directory. Missing dir is fine.
+        # 3. Workspace directory + git worktree bookkeeping.
+        # Two-step cleanup so the cache repo's `git worktree list` doesn't
+        # leak references to deleted dirs:
+        #   a) `git worktree remove --force` from the project's cache
+        #      repo, telling git to drop both the dir AND its bookkeeping.
+        #   b) `shutil.rmtree` as belt-and-braces for the case where the
+        #      worktree was already half-removed (rmtree -f handles it).
+        # Without (a), a future provision against the same chat-session
+        # branch fails with "fatal: '<branch>' is already used by worktree
+        # at <old path>" — even after the directory is gone — because git
+        # still has the worktree registered in the cache repo's
+        # .git/worktrees/. (Same bug bit a real chat retry on staging.)
         try:
-            ws = pathlib.Path(workspace_path)
-            if ws.exists():
-                shutil.rmtree(ws, ignore_errors=True)
+            from openclow.services.workspace_service import WorkspaceService
+
+            ws_path = pathlib.Path(workspace_path)
+            project_name = None
+            async with async_session() as session:
+                inst_row = await session.get(Instance, inst_uuid)
+                if inst_row is not None and inst_row.project is not None:
+                    project_name = inst_row.project.name
+            if project_name:
+                cache_repo = pathlib.Path("/workspaces/_cache") / project_name
+                if cache_repo.exists():
+                    # Set safe.directory so git doesn't refuse on uid mismatches.
+                    await asyncio.create_subprocess_exec(
+                        "git", "config", "--global",
+                        "--add", "safe.directory", str(cache_repo),
+                    )
+                    proc = await asyncio.create_subprocess_exec(
+                        "git", "-C", str(cache_repo),
+                        "worktree", "remove", "--force", str(ws_path),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    out, err = await proc.communicate()
+                    if proc.returncode != 0:
+                        # Stale worktree refs (dir gone but git still
+                        # remembers) — prune them. Idempotent.
+                        await asyncio.create_subprocess_exec(
+                            "git", "-C", str(cache_repo),
+                            "worktree", "prune",
+                        )
+            if ws_path.exists():
+                shutil.rmtree(ws_path, ignore_errors=True)
         except Exception as e:
             log.warning(
                 "teardown_instance.workspace_rm_failed",
@@ -874,6 +914,23 @@ async def _mark_failed(
                 "failure_code": failure_code.value,
                 "failure_message": message[:500],
             })
+
+        # Auto-cleanup: enqueue teardown_instance to free the partial
+        # state we created so far (workspace dir, git worktree, compose
+        # stack, CF tunnel, DNS record). Without this, every failed
+        # provision leaks until an admin force-terminates manually —
+        # and the leaked git worktree blocks the chat from re-provisioning
+        # against the same session_branch ("fatal: '<branch>' is already
+        # used by worktree at <path>"). teardown_instance is idempotent
+        # so this is safe even if the partial state is already cleaned.
+        try:
+            from openclow.services.instance_service import _default_enqueuer
+            await _default_enqueuer("teardown_instance", str(instance_id))
+        except Exception as e:
+            log.warning(
+                "_mark_failed.teardown_enqueue_failed",
+                instance_id=str(instance_id), error=str(e)[:200],
+            )
     except Exception as e:  # pragma: no cover
         log.exception("_mark_failed.error", error=str(e))
 
