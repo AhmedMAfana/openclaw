@@ -69,7 +69,45 @@ _VALID_TERMINATE_REASONS: frozenset[str] = frozenset({
     TerminatedReason.FAILED.value,
     TerminatedReason.PROJECT_DELETED.value,
     TerminatedReason.CHAT_DELETED.value,
+    TerminatedReason.ADMIN_FORCED.value,  # spec 003 — admin Force Terminate
 })
+
+
+# ---------------------------------------------------------------------------
+# SSE emit helper (spec 003 — contracts/sse-events.md)
+#
+# All `instance_*` events go through one helper so the contract can be
+# audited from a single grep. Order: caller commits DB → calls this →
+# returns. The helper itself is best-effort and never raises.
+# ---------------------------------------------------------------------------
+
+# Rate-limit summary emits to one per minute (spec 003 — contracts/sse-events.md).
+_SUMMARY_DEBOUNCE_S = 60.0
+_last_summary_emit_at: float = 0.0
+
+
+def emit_instance_event(payload: dict) -> None:
+    """Append one instance event to the activity log (best-effort, sync)."""
+    try:
+        from openclow.services import activity_log
+        evt_type = payload.get("type", "instance_event")
+        # log_event re-merges the type and timestamp — pass everything else.
+        body = {k: v for k, v in payload.items() if k != "type"}
+        activity_log.log_event(evt_type, body)
+    except Exception:
+        # Never let an emit failure break a state transition.
+        pass
+
+
+def maybe_emit_summary(snapshot: dict) -> None:
+    """Debounced wrapper for instance_summary events (≤1/min)."""
+    global _last_summary_emit_at
+    import time as _time
+    now = _time.monotonic()
+    if now - _last_summary_emit_at < _SUMMARY_DEBOUNCE_S:
+        return
+    _last_summary_emit_at = now
+    emit_instance_event({"type": "instance_summary", **snapshot})
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +548,15 @@ class InstanceService:
             instance_slug=inst.slug,
             reason=reason,
         )
+        # Spec 003 — emit SSE so the admin UI converges in ≤10s.
+        # Order: commit (above) → emit → enqueue teardown.
+        emit_instance_event({
+            "type": "instance_status",
+            "slug": inst.slug,
+            "status": InstanceStatus.TERMINATING.value,
+            "previous_status": "running",  # best-effort; precise prior is not tracked here
+            "reason": reason,
+        })
         await self._enqueue("teardown_instance", str(instance_id))
 
     async def list_active(

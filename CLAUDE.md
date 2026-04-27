@@ -329,8 +329,10 @@ Legacy host/docker modes still work unchanged — the router in
 contract docs in [contracts/](specs/001-per-chat-instances/contracts/).
 
 <!-- SPECKIT START -->
-Active feature plan: [specs/001-per-chat-instances/plan.md](specs/001-per-chat-instances/plan.md)
-Spec: [specs/001-per-chat-instances/spec.md](specs/001-per-chat-instances/spec.md) · Research: [research.md](specs/001-per-chat-instances/research.md) · Data model: [data-model.md](specs/001-per-chat-instances/data-model.md) · Contracts: [contracts/](specs/001-per-chat-instances/contracts/)
+Active feature plan: [specs/003-admin-instance-mgmt/plan.md](specs/003-admin-instance-mgmt/plan.md)
+Spec: [specs/003-admin-instance-mgmt/spec.md](specs/003-admin-instance-mgmt/spec.md) · Research: [research.md](specs/003-admin-instance-mgmt/research.md) · Data model: [data-model.md](specs/003-admin-instance-mgmt/data-model.md) · Contracts: [contracts/](specs/003-admin-instance-mgmt/contracts/) · Quickstart: [quickstart.md](specs/003-admin-instance-mgmt/quickstart.md)
 
-Open phases: **Phase 10** (Chat UI container-mode compat — T097–T106) and **Phase 11** (Admin dashboard for instances — T107–T116) per [tasks.md](specs/001-per-chat-instances/tasks.md). The architectural-redesign spec [002-instance-manifest-overlay](specs/002-instance-manifest-overlay/) is **deferred**; revisit only after Phase 10 + 11 land.
+Spec 003 adds an admin **Instances** management section (list, detail, force-terminate, bulk, reprovision, rotate-token, extend-expiry) — thin presentation layer over existing `InstanceService` + `AuditLog` + `/api/activity/stream` SSE. **Subsumes Phase 11 (T107–T116) of spec 001.** Migration 014 adds `admin_forced` to the `TerminatedReason` enum.
+
+Background context still in flight: spec 001 Phase 10 (Chat UI container-mode compat — T097–T106) per [001 tasks.md](specs/001-per-chat-instances/tasks.md); spec [002-instance-manifest-overlay](specs/002-instance-manifest-overlay/) remains deferred until Phase 10 + 003 land.
 <!-- SPECKIT END -->

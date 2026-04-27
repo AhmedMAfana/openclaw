@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from openclow.api.routes import activity, health, settings, tasks, assistant, threads, plans, ws, actions, access, instances
+from openclow.api.routes import activity, health, settings, tasks, assistant, threads, plans, ws, actions, access, instances, admin_instances
 
 app = FastAPI(title="THAG GROUP API", version="0.1.0")
 
@@ -37,6 +37,10 @@ app.include_router(ws.router)
 app.include_router(actions.router)
 app.include_router(access.router)
 app.include_router(instances.router)
+# Spec 003 — admin Instances management surface (JSON only).
+# The UI lives in the React chat frontend at /chat/ → SettingsPanel →
+# Instances; legacy Jinja2 /settings/instances pages were removed.
+app.include_router(admin_instances.router)
 # Internal heartbeat / token-rotation — mounted on the same FastAPI app
 # but with a distinct `/internal/*` prefix. Upstream nginx/CF MUST NOT
 # route `/internal/*` to the public; compose-network only.

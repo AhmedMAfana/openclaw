@@ -352,6 +352,12 @@ The data event reached the frontend; no rich banner rendered.
 
 ## Phase 11: Admin Dashboard — Operator Surface for Instances (Priority: P2)
 
+> ⚠️ **PARTIALLY SUBSUMED BY [SPEC 003 — Admin Instance Management](../003-admin-instance-mgmt/)**
+>
+> Tasks **T107–T112** (admin Instances tab, force-terminate endpoint, migration 014, FE tab) are **superseded** by spec 003's first-class settings/instances section, which delivers a richer surface (list + detail + reprovision + rotate-token + extend-expiry + bulk + audit) on the same admin sidebar instead of a tab inside `AccessPanel`. Migration 014 (adds `admin_forced` to `TerminatedReason`) lives at `alembic/versions/014_admin_forced_terminated_reason.py` and ships with spec 003.
+>
+> Tasks **T113–T116** (Access UI grant form, auto-grant on project create, Add Project modal, `/api/repos` + `/api/projects` endpoints) are **NOT instance-management work** — they remain owned by spec 001 and should land independently of spec 003.
+
 **Purpose**: Give operators a first-class admin surface for the new per-chat-instances feature. Today operators read DB rows or worker logs; after Phase 11 they see a live table of active instances, can terminate stuck ones, and can grant / revoke per-user access without an SQL session.
 
 **Why now**: The backend already exposes `/api/users/<user_id>/instances` (T043) and `/api/access` (pre-existing). The chat UI has `SettingsPanel` + `AccessPanel` already mounted under the sidebar. Adding an Instances tab + a real access-management surface is additive — no new backend endpoints other than a force-terminate and a grant POST.
@@ -360,20 +366,18 @@ The data event reached the frontend; no rich banner rendered.
 
 ### Tests for Phase 11
 
-- [ ] T107 [P] [FE] Create `chat_frontend/src/__tests__/admin_instances_panel.test.tsx` — render the Instances tab with a mocked `/api/users/:id/instances` response; assert the table renders one row per instance with columns `slug`, `user`, `project`, `status`, `preview_url`, `last_activity_at`; assert clicking Force Terminate fires a `POST /api/admin/instances/:id/terminate`.
-- [ ] T108 [P] [BE] Create `tests/contract/test_admin_instances_api.py` — assert the new admin endpoints (`GET /api/admin/instances`, `POST /api/admin/instances/<id>/terminate`) require `is_admin=true`; non-admin users receive 403. Reuse `tests/integration/fixtures/instance_factory.py::instance_fixture` to seed rows.
+- [x] ~~T107 [P] [FE] Create `chat_frontend/src/__tests__/admin_instances_panel.test.tsx`~~ — **SUBSUMED BY SPEC 003** (replaced by `tests/contract/test_admin_instances_list.py` etc.) — render the Instances tab with a mocked `/api/users/:id/instances` response; assert the table renders one row per instance with columns `slug`, `user`, `project`, `status`, `preview_url`, `last_activity_at`; assert clicking Force Terminate fires a `POST /api/admin/instances/:id/terminate`.
+- [x] ~~T108 [P] [BE] Create `tests/contract/test_admin_instances_api.py`~~ — **SUBSUMED BY SPEC 003** (delivered as `tests/contract/test_admin_instances_list.py`, `test_admin_instances_terminate.py`, `test_admin_instance_detail.py`, etc., plus `tests/unit/test_admin_role_guard.py` for the 403 contract).
 
 ### Implementation for Phase 11
 
-- [ ] T109 [BE] Extend `src/openclow/api/routes/instances.py` with an admin-scoped router:
-  - `GET /api/admin/instances` — list ALL active instances across all users (joins users + projects for display). Requires `is_admin=true`. Paginated by `cursor` + `limit`. Returns `{instances: [{slug, chat_session_id, user: {id, username}, project: {id, name}, status, preview_url, started_at, last_activity_at, expires_at}]}`.
-  - `POST /api/admin/instances/{instance_id}/terminate` — force-terminate via `InstanceService.terminate(id, reason='admin_forced')`. Add `'admin_forced'` to the `_VALID_TERMINATE_REASONS` set and the `ck_instances_terminated_reason` check constraint (new migration 014).
-- [ ] T110 [BE] Migration 014 — extend the `ck_instances_terminated_reason` CHECK constraint to include `admin_forced`. Small DDL migration; backwards-compatible (existing rows have no new values). Also add a matching `TerminatedReason.ADMIN_FORCED = "admin_forced"` enum member in `models/instance.py`.
+- [x] ~~T109 [BE] Extend `src/openclow/api/routes/instances.py` with an admin-scoped router~~ — **SUBSUMED BY SPEC 003** (delivered as the dedicated `src/openclow/api/routes/admin_instances.py` router with 11 endpoints — see [spec 003 contracts](../003-admin-instance-mgmt/contracts/admin-instances-api.md)).
+- [x] ~~T110 [BE] Migration 014 — extend the `ck_instances_terminated_reason` CHECK constraint~~ — **SUBSUMED BY SPEC 003** (`alembic/versions/014_admin_forced_terminated_reason.py`).
 - [ ] T111 [BE] Extend `src/openclow/api/routes/access.py` with:
   - `POST /api/admin/access` — body `{user_id, project_id, role}`. Creates or updates a `UserProjectAccess` row with `granted_by=current_admin.id`. 409 on existing row with the same user/project (advise caller to use the update path).
   - `DELETE /api/admin/access/{id}` — drops a single row. Admin-only.
   - Guard: only admins can hit these paths.
-- [ ] T112 [FE] Extend `chat_frontend/src/components/AccessPanel.tsx` — add an **Instances** tab alongside the existing Users/Access tabs. Table columns: slug, user, project, status (coloured pill), started_at, last_activity_at, preview_url (hyperlink when set). Action column: Force Terminate (red button, two-step confirm per CLAUDE.md "No Dead Ends"). Polls `/api/admin/instances` every 10 s while the tab is focused; stops polling on blur.
+- [x] ~~T112 [FE] Extend `chat_frontend/src/components/AccessPanel.tsx` — add an **Instances** tab~~ — **SUBSUMED BY SPEC 003**: instances surface lives at `/settings/instances` in the settings dashboard (server-rendered Jinja2 + Tailwind + HTMX + EventSource), not as a tab inside `AccessPanel`. The richer presentation includes filters, detail view, bulk actions, audit, and live SSE updates.
 - [ ] T113 [FE] Extend `AccessPanel`'s Access tab — replace today's read-only list with an editable surface: per-row Revoke button, per-row role dropdown (developer/viewer/deployer/all), and a floating "Grant" form at the top (user dropdown + project dropdown + role dropdown + Grant button). All actions hit the new admin endpoints from T111.
 - [ ] T114 [BE] One-liner in `src/openclow/worker/tasks/onboarding.py` right after a new `Project` is committed: auto-grant `UserProjectAccess(user_id=creator, project_id=project.id, role='all', granted_by=creator)` so non-admin users who create projects via `trigger_addproject` get access automatically (the gap that spawned this planning round).
 - [ ] T115 [FE] New `AddProjectModal` component (`chat_frontend/src/components/AddProjectModal.tsx`). Opened from a + button above the project dropdown. Fetches the user's accessible repos from `GET /api/repos` (new thin backend wrapper around `github_mcp.list_repos`). Table with search + an "Add this repo" per row. Submits to `POST /api/projects` (new endpoint — wraps `onboard_project` enqueue + returns the job id). Progress is driven by the existing WebSocket at `/api/ws/<user>/<session>`.

@@ -46,8 +46,20 @@ async def activity_query(
 
 
 @router.get("/activity/stream")
-async def activity_stream(type: str = Query(default="")):
-    """Server-Sent Events stream — real-time tail of the activity log."""
+async def activity_stream(
+    type: str = Query(default="", description="Comma-separated event-type allowlist"),
+    slug: str = Query(default="", description="Filter to events whose payload carries this instance slug"),
+):
+    """Server-Sent Events stream — real-time tail of the activity log.
+
+    Both filters are applied server-side so non-matching events are dropped
+    before the network. ``type`` accepts a comma-separated list (e.g.
+    ``instance_status,instance_action``) so a single connection can multiplex
+    related event families. ``slug`` is exact-match on the entry's ``slug``
+    field — used by the per-instance detail view to subscribe only to its
+    own events. (Spec 003 — see contracts/sse-events.md.)
+    """
+    type_set = {t for t in (s.strip() for s in type.split(",")) if t}
 
     async def event_generator():
         try:
@@ -70,7 +82,9 @@ async def activity_stream(type: str = Query(default="")):
                         entry = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if type and entry.get("type") != type:
+                    if type_set and entry.get("type") not in type_set:
+                        continue
+                    if slug and entry.get("slug") != slug:
                         continue
                     yield f"data: {json.dumps(entry)}\n\n"
         except asyncio.CancelledError:

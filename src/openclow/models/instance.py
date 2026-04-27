@@ -61,6 +61,7 @@ class TerminatedReason(str, enum.Enum):
     FAILED = "failed"
     PROJECT_DELETED = "project_deleted"
     CHAT_DELETED = "chat_deleted"
+    ADMIN_FORCED = "admin_forced"
 
 
 class Instance(Base):

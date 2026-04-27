@@ -46,7 +46,7 @@ from openclow.services.instance_compose_renderer import (
     InstanceRenderContext,
     render as render_compose,
 )
-from openclow.services.instance_service import InstanceService
+from openclow.services.instance_service import InstanceService, emit_instance_event
 from openclow.services.tunnel_service import (
     CloudflareConfig,
     TunnelService,
@@ -354,6 +354,7 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
             inst.status = InstanceStatus.RUNNING.value
             inst.started_at = started_at
             await session.commit()
+            inst_slug_for_emit = inst.slug
 
             tunnel_row = (await session.execute(
                 select(InstanceTunnel).where(
@@ -365,6 +366,16 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
                 tunnel_row.status = TunnelStatus.ACTIVE.value
                 tunnel_row.last_health_at = now
                 await session.commit()
+
+        # Spec 003 — emit AFTER commit so admin SSE consumers can trust the
+        # state they observe matches DB truth.
+        emit_instance_event({
+            "type": "instance_status",
+            "slug": inst_slug_for_emit,
+            "status": InstanceStatus.RUNNING.value,
+            "previous_status": InstanceStatus.PROVISIONING.value,
+            "at": started_at.isoformat(),
+        })
 
         duration_s = (now - started_at).total_seconds()
         log.info(
@@ -468,12 +479,23 @@ async def teardown_instance(ctx: dict, instance_id: str) -> dict:
 
         # 4. Flip DB state.
         now = datetime.now(timezone.utc)
+        slug_for_destroyed_emit: str | None = None
         async with async_session() as session:
             inst = await session.get(Instance, inst_uuid)
             if inst is not None:
                 inst.status = InstanceStatus.DESTROYED.value
                 inst.terminated_at = now
                 await session.commit()
+                slug_for_destroyed_emit = inst.slug
+        # Spec 003 — admin SSE for the terminating → destroyed transition.
+        if slug_for_destroyed_emit:
+            emit_instance_event({
+                "type": "instance_status",
+                "slug": slug_for_destroyed_emit,
+                "status": InstanceStatus.DESTROYED.value,
+                "previous_status": InstanceStatus.TERMINATING.value,
+                "at": now.isoformat(),
+            })
 
             tunnel_row = (await session.execute(
                 select(InstanceTunnel).where(
@@ -729,6 +751,7 @@ async def _mark_failed(
     copy per Phase 9 (T075–T080).
     """
     try:
+        slug_for_emit: str | None = None
         async with async_session() as session:
             inst = await session.get(Instance, instance_id)
             if inst is None:
@@ -740,12 +763,23 @@ async def _mark_failed(
             inst.failure_code = failure_code.value
             inst.failure_message = message[:2000]
             await session.commit()
+            slug_for_emit = inst.slug
         log.error(
             "instance.failed",
             instance_id=str(instance_id),
             failure_code=failure_code.value,
             failure_message=message[:500],
         )
+        # Spec 003 — admin SSE.
+        if slug_for_emit:
+            emit_instance_event({
+                "type": "instance_status",
+                "slug": slug_for_emit,
+                "status": InstanceStatus.FAILED.value,
+                "previous_status": InstanceStatus.PROVISIONING.value,
+                "failure_code": failure_code.value,
+                "failure_message": message[:500],
+            })
     except Exception as e:  # pragma: no cover
         log.exception("_mark_failed.error", error=str(e))
 
@@ -1118,11 +1152,27 @@ async def tunnel_health_check_cron(ctx: dict) -> dict:
                     inst.id, capability="preview_url", upstream="cloudflare",
                 )
                 recovered += 1
+                # Spec 003 — emit instance_upstream so the admin detail view
+                # can flip the tunnel-health badge live without polling.
+                emit_instance_event({
+                    "type": "instance_upstream",
+                    "slug": inst.slug,
+                    "capability": "preview_url",
+                    "health": "live",
+                    "at": datetime.now(timezone.utc).isoformat(),
+                })
             else:
                 await svc.record_upstream_degradation(
                     inst.id, capability="preview_url", upstream="cloudflare",
                 )
                 degraded += 1
+                emit_instance_event({
+                    "type": "instance_upstream",
+                    "slug": inst.slug,
+                    "capability": "preview_url",
+                    "health": "degraded",
+                    "at": datetime.now(timezone.utc).isoformat(),
+                })
         except Exception as e:  # pragma: no cover
             log.warning(
                 "tunnel_health_check.event_failed",

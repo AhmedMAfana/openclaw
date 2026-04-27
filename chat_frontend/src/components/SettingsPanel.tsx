@@ -12,6 +12,7 @@ import {
   FolderIcon,
   UsersIcon,
   LinkIcon,
+  BoxesIcon,
   XIcon,
 } from "lucide-react";
 import { SettingsDashboard } from "@/components/settings/SettingsDashboard";
@@ -20,6 +21,7 @@ import { SettingsChat } from "@/components/settings/SettingsChat";
 import { SettingsGit } from "@/components/settings/SettingsGit";
 import { SettingsSystem } from "@/components/settings/SettingsSystem";
 import { SettingsProjects } from "@/components/settings/SettingsProjects";
+import { SettingsInstances } from "@/components/settings/SettingsInstances";
 import { SettingsUsers } from "@/components/settings/SettingsUsers";
 import { SettingsChannels } from "@/components/settings/SettingsChannels";
 import { SettingsHost } from "@/components/settings/SettingsHost";
@@ -32,6 +34,7 @@ export type SettingsPage =
   | "system"
   | "host"
   | "projects"
+  | "instances"
   | "users"
   | "channels";
 
@@ -47,6 +50,7 @@ const PAGE_LABELS: Record<SettingsPage, string> = {
   system: "System",
   host: "Host Mode",
   projects: "Projects",
+  instances: "Instances",
   users: "Users",
   channels: "Channels",
 };
@@ -77,6 +81,7 @@ const NAV: Array<{ section?: string; items: NavItem[] }> = [
     section: "Management",
     items: [
       { page: "projects", icon: <FolderIcon className="size-4" />, label: "Projects" },
+      { page: "instances", icon: <BoxesIcon className="size-4" />, label: "Instances" },
       { page: "users", icon: <UsersIcon className="size-4" />, label: "Users" },
       { page: "channels", icon: <LinkIcon className="size-4" />, label: "Channels" },
     ],
@@ -95,6 +100,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
       case "system":    return <SettingsSystem />;
       case "host":      return <SettingsHost />;
       case "projects":  return <SettingsProjects />;
+      case "instances": return <SettingsInstances />;
       case "users":     return <SettingsUsers />;
       case "channels":  return <SettingsChannels />;
     }
