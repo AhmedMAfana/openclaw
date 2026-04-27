@@ -272,6 +272,9 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
         # step 1 ("Booting containers") running.
         await _publish_progress_step(
             instance_id=instance_id, completed_step_index=0,
+            stream_buffer_append=(
+                f"Cloudflare tunnel ready: {tunnel_result.web_hostname}"
+            ),
         )
 
         # 4. docker compose up -p <compose_project> -f _compose.yml -d.
@@ -296,6 +299,10 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
         # Step 1 done: containers booted. Step 2 ("App bootstrap") next.
         await _publish_progress_step(
             instance_id=instance_id, completed_step_index=1,
+            stream_buffer_append=(
+                f"Containers up — running app bootstrap "
+                f"(composer install + npm ci + migrations) inside the app container"
+            ),
         )
 
         # 5. projctl up inside the app container. Poll its JSON-line
@@ -306,6 +313,10 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
         # finished. Step 3 ("Health check") next.
         await _publish_progress_step(
             instance_id=instance_id, completed_step_index=2,
+            stream_buffer_append=(
+                f"App bootstrap done — polling https://{tunnel_result.web_hostname}/ "
+                f"until it serves a clean 200"
+            ),
         )
 
         # 5.5 First-paint gate: poll the public URL until it returns a
@@ -319,6 +330,7 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
             web_hostname=tunnel_result.web_hostname,
             slug=slug,
             timeout_s=_FIRST_PAINT_TIMEOUT_S,
+            instance_id=instance_id,
         )
 
         # Step 3 done — overall_status flips to done. Card collapses to
@@ -327,6 +339,9 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
             instance_id=instance_id,
             completed_step_index=3,
             overall_status="done",
+            stream_buffer_append=(
+                f"Live at https://{tunnel_result.web_hostname}"
+            ),
         )
 
         # 6. Flip DB state — instance is live.
@@ -798,6 +813,7 @@ async def _publish_progress_step(
     completed_step_index: int,
     overall_status: str = "running",
     failed_step_index: int | None = None,
+    stream_buffer_append: str | None = None,
 ) -> None:
     """Advance the in-thread provisioning card by one phase.
 
@@ -864,6 +880,17 @@ async def _publish_progress_step(
                     card["elapsed"] = int(card.get("elapsed", 0)) + 5
             except Exception:
                 card["elapsed"] = int(card.get("elapsed", 0)) + 5
+            # stream_buffer is the AgentLogPanel content — append-only,
+            # cap at last 4KB so it doesn't grow unbounded across a long
+            # provision. Each line gets a [HH:MM:SS] timestamp prefix to
+            # match the existing log conventions.
+            if stream_buffer_append:
+                from datetime import datetime as _dt
+                prev = card.get("stream_buffer") or ""
+                stamp = _dt.now(timezone.utc).strftime("%H:%M:%S")
+                line = f"[{stamp}] {stream_buffer_append.rstrip()}"
+                merged = (prev + ("\n" if prev else "") + line)[-4096:]
+                card["stream_buffer"] = merged
             new_content = f"__PROGRESS_CARD__{_pj.dumps(card)}"
             row.content = new_content
             if overall_status in ("done", "failed"):
@@ -905,7 +932,8 @@ _FIRST_PAINT_LARAVEL_EXCEPTION_MARKERS = (
 
 
 async def _wait_for_first_paint(
-    *, web_hostname: str, slug: str, timeout_s: int
+    *, web_hostname: str, slug: str, timeout_s: int,
+    instance_id: str | None = None,
 ) -> None:
     """Poll the public URL until the app actually serves a real 200.
 
@@ -927,6 +955,8 @@ async def _wait_for_first_paint(
     deadline = asyncio.get_event_loop().time() + timeout_s
     last_status: int | None = None
     last_error: str | None = None
+    last_heartbeat_at = asyncio.get_event_loop().time()
+    poll_count = 0
 
     log.info(
         "provision_instance.first_paint_wait_start",
@@ -968,6 +998,23 @@ async def _wait_for_first_paint(
                     last_error = f"http_{resp.status_code}"
             except httpx.HTTPError as e:
                 last_error = type(e).__name__
+            poll_count += 1
+            # Heartbeat to the progress card every ~6s so the user sees
+            # activity during the (potentially 1-3 min) Vite warmup +
+            # Laravel boot. Each heartbeat advances elapsed and appends
+            # one line to the Agent log so they can read what's
+            # actually happening.
+            if instance_id and (now - last_heartbeat_at) >= 6.0:
+                hb_line = (
+                    f"poll #{poll_count}: status={last_status or 'unreachable'}"
+                    + (f" ({last_error})" if last_error else "")
+                )
+                await _publish_progress_step(
+                    instance_id=instance_id,
+                    completed_step_index=2,  # "Health check" (idx 3) is currently running
+                    stream_buffer_append=hb_line,
+                )
+                last_heartbeat_at = now
             await asyncio.sleep(_FIRST_PAINT_POLL_INTERVAL_S)
 
 

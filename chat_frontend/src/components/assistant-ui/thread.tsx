@@ -406,6 +406,19 @@ const WorkerProgressCard: FC<{ card: CardData }> = ({ card }) => {
   // without waiting for the backend stream (which gets cut and never sends a final card).
   const [localCancelled, setLocalCancelled] = useState(false);
 
+  // Client-side ticking elapsed: advance every second locally so the
+  // counter feels alive even when the backend is between heartbeats.
+  // Server resyncs the baseline on each `progress_card` event (when
+  // card.elapsed changes, useEffect resets the local state). Stops at
+  // terminal states (done / failed / locally cancelled).
+  const [tickedElapsed, setTickedElapsed] = useState(card.elapsed);
+  useEffect(() => {
+    setTickedElapsed(card.elapsed);
+    if (card.overall_status !== "running" || localCancelled) return;
+    const id = setInterval(() => setTickedElapsed((e) => e + 1), 1000);
+    return () => clearInterval(id);
+  }, [card.elapsed, card.overall_status, localCancelled]);
+
   const handleCancel = async () => {
     setLocalCancelled(true);
     try {
@@ -451,7 +464,7 @@ const WorkerProgressCard: FC<{ card: CardData }> = ({ card }) => {
           <span className="font-semibold text-foreground break-words [overflow-wrap:anywhere] min-w-0">{card.title}</span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <span className="text-[11px] font-mono px-1.5 py-0.5 rounded-md bg-muted/70 text-foreground/70 tabular-nums">{card.elapsed}s</span>
+          <span className="text-[11px] font-mono px-1.5 py-0.5 rounded-md bg-muted/70 text-foreground/70 tabular-nums">{tickedElapsed}s</span>
           {isStillRunning && card.session_id && (
             <button
               onClick={handleCancel}
