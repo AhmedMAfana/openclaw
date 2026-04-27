@@ -1096,13 +1096,19 @@ async def assistant_endpoint(
                 # the live URL via the YOUR INSTANCE prompt block.
                 if container_instance.status == "provisioning":
                     import json as _pcj
+                    # CardData contract (chat_frontend/.../thread.tsx
+                    # lines 332-346): each step uses `name` (NOT `label`)
+                    # and an optional `detail` sub-line. overall_status
+                    # is one of running|done|failed. Worker publishes
+                    # step updates against this same shape via
+                    # _publish_progress_step (instance_tasks.py).
                     _progress_card = {
                         "title": "Spinning up your environment",
                         "steps": [
-                            {"label": "Image pull + dependencies", "status": "running"},
-                            {"label": "Container startup", "status": "pending"},
-                            {"label": "Cloudflare tunnel", "status": "pending"},
-                            {"label": "App health check", "status": "pending"},
+                            {"name": "Provisioning Cloudflare tunnel", "status": "running"},
+                            {"name": "Booting containers", "status": "pending"},
+                            {"name": "App bootstrap (composer + npm)", "status": "pending"},
+                            {"name": "Health check", "status": "pending"},
                         ],
                         "overall_status": "running",
                         "elapsed": 0,

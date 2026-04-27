@@ -134,6 +134,15 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
         github_repo = (inst.project.github_repo if inst.project else None)
 
     started_at = datetime.now(timezone.utc)
+    # Stamp started_at upfront so the progress card's elapsed counter
+    # reflects real wall-clock from the moment the user hit send. Until
+    # this point the card may have been emitted with elapsed=0 by the
+    # API; the worker's first publish replaces it with delta-from-now.
+    async with async_session() as _ss:
+        _row = await _ss.get(Instance, inst_uuid)
+        if _row is not None and _row.started_at is None:
+            _row.started_at = started_at
+            await _ss.commit()
 
     try:
         cf_config = await _load_cloudflare_config()
@@ -258,6 +267,13 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
         # secrets on disk).
         app_key = "base64:" + base64.b64encode(secrets.token_bytes(32)).decode()
 
+        # Step 0 done: "Provisioning Cloudflare tunnel" is complete (the
+        # tunnel was provisioned at line ~143). Card flips step 0 done +
+        # step 1 ("Booting containers") running.
+        await _publish_progress_step(
+            instance_id=instance_id, completed_step_index=0,
+        )
+
         # 4. docker compose up -p <compose_project> -f _compose.yml -d.
         # Secrets injected via env; never touch disk.
         await _compose_up(
@@ -277,9 +293,20 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
             },
         )
 
+        # Step 1 done: containers booted. Step 2 ("App bootstrap") next.
+        await _publish_progress_step(
+            instance_id=instance_id, completed_step_index=1,
+        )
+
         # 5. projctl up inside the app container. Poll its JSON-line
         # stdout for step_success / fatal events per the stdout schema.
         await _projctl_up(compose_project=compose_project, slug=slug)
+
+        # Step 2 done: app bootstrap (composer install + npm ci + migrations)
+        # finished. Step 3 ("Health check") next.
+        await _publish_progress_step(
+            instance_id=instance_id, completed_step_index=2,
+        )
 
         # 5.5 First-paint gate: poll the public URL until it returns a
         # real 200 (no Laravel "ViteManifestNotFound" / "Whoops" /
@@ -292,6 +319,14 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
             web_hostname=tunnel_result.web_hostname,
             slug=slug,
             timeout_s=_FIRST_PAINT_TIMEOUT_S,
+        )
+
+        # Step 3 done — overall_status flips to done. Card collapses to
+        # the "ready" green state with all 4 steps checkmarked.
+        await _publish_progress_step(
+            instance_id=instance_id,
+            completed_step_index=3,
+            overall_status="done",
         )
 
         # 6. Flip DB state — instance is live.
@@ -323,9 +358,31 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
         return {"ok": True, "slug": slug, "state": "running"}
 
     except _ProvisionFailure as e:
+        # Map failure code → which step the failure happened on so the
+        # card highlights the right row in red instead of all steps
+        # collapsing to a generic failed state.
+        _failed_step_idx = {
+            FailureCode.TUNNEL_PROVISION.value: 0,
+            FailureCode.IMAGE_BUILD.value: 1,
+            FailureCode.COMPOSE_UP.value: 1,
+            FailureCode.PROJCTL_UP.value: 2,
+            FailureCode.HEALTH_CHECK.value: 3,
+        }.get(e.failure_code.value, 0)
+        await _publish_progress_step(
+            instance_id=instance_id,
+            completed_step_index=_failed_step_idx - 1,
+            overall_status="failed",
+            failed_step_index=_failed_step_idx,
+        )
         await _mark_failed(inst_uuid, e.failure_code, str(e))
         return {"ok": False, "error": str(e), "failure_code": e.failure_code.value}
     except TunnelServiceError as e:
+        await _publish_progress_step(
+            instance_id=instance_id,
+            completed_step_index=-1,
+            overall_status="failed",
+            failed_step_index=0,
+        )
         await _mark_failed(inst_uuid, FailureCode.TUNNEL_PROVISION, str(e))
         return {"ok": False, "error": str(e), "failure_code": FailureCode.TUNNEL_PROVISION.value}
     except asyncio.CancelledError:
@@ -721,6 +778,122 @@ def _template_dir_for_instance(instance_id: UUID) -> pathlib.Path:
     """
     base = pathlib.Path(__file__).resolve().parents[2] / "setup" / "compose_templates"
     return base / "laravel-vue"
+
+
+# Provision-step progress mirror — keys MUST match the step `name`
+# values in assistant.py auto-provision block (the API creates the
+# initial card; the worker advances it as each phase boundary lands).
+# Keep these in sync if the step list changes.
+_PROVISION_STEPS_NAMES: tuple[str, ...] = (
+    "Provisioning Cloudflare tunnel",
+    "Booting containers",
+    "App bootstrap (composer + npm)",
+    "Health check",
+)
+
+
+async def _publish_progress_step(
+    *,
+    instance_id: str,
+    completed_step_index: int,
+    overall_status: str = "running",
+    failed_step_index: int | None = None,
+) -> None:
+    """Advance the in-thread provisioning card by one phase.
+
+    Looks up the chat session + the latest unclosed __PROGRESS_CARD__
+    message for that chat, rewrites step statuses (steps[0..completed]
+    = done, steps[completed+1] = running, rest = pending), bumps the
+    `elapsed` counter, persists to the message row, and publishes via
+    Redis to `wc:{user}:{session}` so the live thread re-renders.
+
+    Best-effort: any failure logs a warning and returns without raising.
+    The provision flow MUST NOT fail because the progress card couldn't
+    be advanced (the env coming up is the real success contract; the
+    card is observability).
+    """
+    try:
+        import json as _pj
+        from openclow.models.web_chat import WebChatMessage, WebChatSession
+        from sqlalchemy import select as _sel, desc as _desc
+
+        async with async_session() as _db:
+            inst = await _db.get(Instance, UUID(instance_id))
+            if inst is None:
+                return
+            chat = await _db.get(WebChatSession, inst.chat_session_id)
+            if chat is None:
+                return
+            user_id = chat.user_id
+            session_id = chat.id
+            # Find the latest open progress card for this chat.
+            row = (await _db.execute(
+                _sel(WebChatMessage).where(
+                    WebChatMessage.session_id == session_id,
+                    WebChatMessage.role == "assistant",
+                    WebChatMessage.is_complete.is_(False),
+                    WebChatMessage.content.like("__PROGRESS_CARD__%"),
+                ).order_by(_desc(WebChatMessage.created_at)).limit(1)
+            )).scalar_one_or_none()
+            if row is None:
+                return
+            try:
+                card = _pj.loads(row.content[len("__PROGRESS_CARD__"):])
+            except Exception:
+                return
+            steps = card.get("steps") or []
+            # Rewrite statuses based on completed_step_index.
+            for i, step in enumerate(steps):
+                if failed_step_index is not None and i == failed_step_index:
+                    step["status"] = "failed"
+                elif i <= completed_step_index:
+                    step["status"] = "done"
+                elif i == completed_step_index + 1 and overall_status == "running":
+                    step["status"] = "running"
+                else:
+                    step["status"] = "pending"
+            card["overall_status"] = overall_status
+            # Elapsed: bump from started_at if known, else just monotonically.
+            try:
+                if inst.started_at:
+                    delta = (
+                        datetime.now(timezone.utc) - inst.started_at
+                    ).total_seconds()
+                    card["elapsed"] = max(0, int(delta))
+                else:
+                    card["elapsed"] = int(card.get("elapsed", 0)) + 5
+            except Exception:
+                card["elapsed"] = int(card.get("elapsed", 0)) + 5
+            new_content = f"__PROGRESS_CARD__{_pj.dumps(card)}"
+            row.content = new_content
+            if overall_status in ("done", "failed"):
+                row.is_complete = True
+            await _db.commit()
+
+        # Publish to live thread.
+        try:
+            import redis.asyncio as _aioredis
+            from openclow.settings import settings as _s
+            _channel = f"wc:{user_id}:{session_id}"
+            _r = _aioredis.from_url(_s.redis_url)
+            try:
+                await _r.publish(_channel, _pj.dumps({
+                    "type": "progress_card",
+                    "message_id": str(row.id),
+                    "card": card,
+                }))
+            finally:
+                await _r.aclose()
+        except Exception as _e:
+            log.warning(
+                "provision_instance.progress_publish_failed",
+                slug=inst.slug, error=str(_e),
+            )
+    except Exception as _e:
+        log.warning(
+            "provision_instance.progress_step_failed",
+            instance_id=instance_id, error=str(_e),
+        )
 
 
 _FIRST_PAINT_LARAVEL_EXCEPTION_MARKERS = (
