@@ -212,6 +212,8 @@ export default function App() {
     slug?: string;
     etaSeconds?: number;
     startedAtMs?: number;
+    /** Per-user cap from the backend (defaults to 3). */
+    cap?: number;
   };
   const [activeBanners, setActiveBanners] = useState<Banner[]>([]);
   const [activeCard, setActiveCard] = useState<Card | null>(null);
@@ -287,9 +289,10 @@ export default function App() {
         if (evt.variant === "per_user_cap") {
           setActiveCard({
             kind: "cap_exceeded",
-            prompt: `You already have ${evt.active_chat_ids?.length ?? 0} active chats (cap=${evt.cap}). End one to start another.`,
+            prompt: "End one of these to free up a slot for a new chat.",
             actions: evt.actions ?? [],
             variant: "per_user_cap",
+            cap: evt.cap,
           });
         } else {
           setActiveCard({
@@ -1385,6 +1388,10 @@ export default function App() {
                   slug={activeCard.slug}
                   etaSeconds={activeCard.etaSeconds}
                   startedAtMs={activeCard.startedAtMs}
+                  threadTitles={Object.fromEntries(
+                    threads.map((t) => [t.remoteId, t.title])
+                  )}
+                  cap={activeCard.cap}
                   onAction={async (a) => {
                     // Cards close on any action so the user isn't
                     // stuck looking at a stale card after acting.
