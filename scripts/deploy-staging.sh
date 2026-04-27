@@ -167,6 +167,18 @@ if [[ "$SKIP_BUILD" != "1" ]]; then
   # silently no-ops because it can't see the new revision files. (Same goes
   # for the setup service.) This bit us once; don't let it bite again.
   \$COMPOSE build api worker bot migrate setup
+
+  # Per-instance compose-template images. provision_instance does
+  # \`docker compose up\` against the rendered template; that compose.yml
+  # references \`tagh/laravel-vue-app:latest\` and \`tagh/projctl:dev\`.
+  # Neither exists on a public registry — both are built from in-repo
+  # source. Without these, every container-mode chat fails at
+  # \`docker compose up\` with "pull access denied for tagh/...".
+  # Idempotent: docker layer cache makes re-builds free if source unchanged.
+  docker build -t tagh/projctl:dev "$REMOTE_DIR/app/projctl/"
+  docker build --build-arg PROJCTL_TAG=dev \\
+               -t tagh/laravel-vue-app:latest \\
+               "$REMOTE_DIR/app/src/openclow/setup/compose_templates/laravel-vue/"
 fi
 
 # Start data services first, wait for healthcheck.
@@ -177,6 +189,14 @@ fi
 
 # App services.
 \$COMPOSE up -d api bot worker dozzle
+
+# Existing activity_logs named volume might have wrong (root) ownership
+# from before Dockerfile.app's mkdir+chown of /app/logs landed. Docker
+# only syncs perms onto a volume on FIRST creation; existing volumes are
+# stuck with their original perms. One-shot chown via the api container
+# (it has the volume mounted; --user 0 so chown succeeds). Idempotent.
+\$COMPOSE exec -T --user 0 api chown -R openclow:openclow /app/logs 2>&1 \\
+  | sed 's/^/[fix-perms] /' || true
 
 \$COMPOSE ps
 REMOTE
