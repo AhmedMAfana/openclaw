@@ -67,11 +67,13 @@ export interface InstanceProvisioning {
   estimated_seconds: number;
 }
 
-/** T080 — Instance reached terminal `failed` state. Frontend renders a card with Retry + Main Menu actions per CLAUDE.md No Dead Ends. */
+/** T080 — Instance reached terminal `failed` state. Frontend renders a card with Retry + Main Menu actions per CLAUDE.md No Dead Ends. The optional `message` carries the per-failure-code prose `_failure_chat_copy` previously injected into the LLM's text channel — now structured so the UI owns the rendering. */
 export interface InstanceFailed {
   type: "instance_failed";
   slug: string;
   failure_code: "image_build" | "compose_up" | "projctl_up" | "tunnel_provision" | "dns" | "health_check" | "oom" | "storage_full" | "orchestrator_crash" | "unknown";
+  /** Human-readable failure copy from `_failure_chat_copy(failure_code, failure_message)`. Frontend renders this as the card body. */
+  message?: string;
   actions: CardAction[];
 }
 
@@ -123,6 +125,12 @@ export interface Confirm {
   actions: CardAction[];
 }
 
+/** Short orchestrator-level error surfaced to the chat — empty message, invalid retry target, no-active-instance, unhandled exception, etc. The frontend renders this as a small inline error card with proper styling rather than letting the orchestrator inject prose into the LLM's text channel (Principle II: deterministic infra status flows through structured events, not impersonated LLM voice). */
+export interface OrchestratorError {
+  type: "error";
+  message: string;
+}
+
 /** Every event the backend may emit on the assistant_stream `2:` channel. */
 export type StreamEvent =
   | MessageId
@@ -136,8 +144,9 @@ export type StreamEvent =
   | InstanceBusy
   | InstanceTerminating
   | InstanceRetryStarted
-  | Confirm;
+  | Confirm
+  | OrchestratorError;
 
 /** Closed set of event-type discriminators. Mirrors the schema enum. */
-export const STREAM_EVENT_TYPES = ["message_id", "tool_use", "tool_result", "instance_provisioning", "instance_failed", "instance_limit_exceeded", "instance_upstream_degraded", "instance_busy", "instance_terminating", "instance_retry_started", "confirm"] as const;
+export const STREAM_EVENT_TYPES = ["message_id", "tool_use", "tool_result", "instance_provisioning", "instance_failed", "instance_limit_exceeded", "instance_upstream_degraded", "instance_busy", "instance_terminating", "instance_retry_started", "confirm", "error"] as const;
 export type StreamEventType = (typeof STREAM_EVENT_TYPES)[number];

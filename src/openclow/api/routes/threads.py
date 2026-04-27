@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import redis.asyncio as aioredis
 import sqlalchemy as _sa
 from arq import create_pool
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import select, desc, delete
 
 
@@ -83,13 +83,33 @@ async def list_threads(user: User = Depends(web_user_dep)):
 
 
 @router.post("/threads")
-async def create_thread(user: User = Depends(web_user_dep)):
-    """Create a new session."""
+async def create_thread(
+    user: User = Depends(web_user_dep),
+    body: dict | None = Body(default=None),
+):
+    """Create a new session.
+
+    Optional ``project_id`` in the request body binds the thread to a
+    project atomically at creation time (Change 4 of senior-DevOps
+    refactor). Without this, a fresh thread is born with
+    ``project_id=NULL`` and the picker writes it via a follow-up PUT —
+    which races a fast first message: the LLM sees a no-project chat
+    and falls back to the kiosk-bullet path. Atomic binding closes the
+    race.
+    """
+    project_id: int | None = None
+    if isinstance(body, dict):
+        raw = body.get("project_id")
+        if isinstance(raw, int):
+            project_id = raw
+        elif isinstance(raw, str) and raw.isdigit():
+            project_id = int(raw)
     async with async_session() as session:
         new_session = WebChatSession(
             user_id=user.id,
             title="New Chat",
             mode="quick",
+            project_id=project_id,
         )
         session.add(new_session)
         await session.commit()
@@ -98,6 +118,7 @@ async def create_thread(user: User = Depends(web_user_dep)):
     return {
         "remoteId": str(new_session.id),
         "externalId": None,
+        "projectId": new_session.project_id,
     }
 
 

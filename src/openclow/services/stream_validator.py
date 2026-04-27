@@ -210,6 +210,7 @@ _REQUIRED_BY_TYPE: dict[str, tuple[str, ...]] = {
     "instance_terminating": ("type", "slug"),
     "instance_retry_started": ("type", "failed_instance_id"),
     "confirm": ("type", "prompt", "actions"),
+    "error": ("type", "message"),
 }
 
 _SLUG_BEARING: frozenset[str] = frozenset({

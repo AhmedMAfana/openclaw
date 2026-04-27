@@ -55,6 +55,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Thread } from "@/components/assistant-ui/thread";
 import { InstanceBanner, type BannerKind } from "@/components/instance/InstanceBanner";
 import { InstanceCard, type CardKind } from "@/components/instance/InstanceCard";
+import { NewChatModal } from "@/components/NewChatModal";
 import type { CardAction } from "@/types/stream-events";
 import { ThinkingContext } from "@/lib/thinking-context";
 import { TaskModeContext } from "@/lib/task-mode-context";
@@ -76,6 +77,11 @@ interface Project {
   id: number;
   name: string;
   techStack?: string | null;
+  /** "container" | "docker" | "host" — used by the new-chat modal badge
+   *  and by future pre-flight checks. Optional because legacy
+   *  ProjectResponse rows may omit it. */
+  mode?: string;
+  status?: string;
 }
 
 interface ChatMessage {
@@ -153,6 +159,7 @@ async function readStream(
                 case "instance_retry_started":
                 case "confirm":
                 case "tool_result":
+                case "error":
                   onInstanceEvent?.(evt);
                   break;
                 default: {
@@ -200,9 +207,16 @@ export default function App() {
     actions: CardAction[];
     failureCode?: string;
     variant?: "per_user_cap" | "platform_capacity";
+    /** Plan v2 Change 2: provisioning card carries the slug + ETA +
+     *  wall-clock start so the body can render a live elapsed counter. */
+    slug?: string;
+    etaSeconds?: number;
+    startedAtMs?: number;
   };
   const [activeBanners, setActiveBanners] = useState<Banner[]>([]);
   const [activeCard, setActiveCard] = useState<Card | null>(null);
+  // Plan v2 Change 1: mandatory project-picker modal on "New chat".
+  const [showNewChatModal, setShowNewChatModal] = useState(false);
   const bannerSeq = useRef(0);
 
   function pushBanner(b: Omit<Banner, "seq">) {
@@ -225,12 +239,26 @@ export default function App() {
   function dispatchInstanceEvent(evt: StreamEvent) {
     switch (evt.type) {
       case "instance_provisioning":
-        // Clear any stale failure card — a fresh provision started.
-        setActiveCard(null);
-        // Drop terminating / busy / retry banners since the new
-        // status is live.
-        clearBannersOfKind(["terminating", "busy", "retry_started"]);
-        pushBanner({ kind: "provisioning", slug: evt.slug, etaSeconds: evt.estimated_seconds });
+        // Plan v2 Change 2: render provisioning as a full-width card
+        // (the user explicitly asked for this — the banner pill was
+        // too thin to convey "the platform is working for me right
+        // now"). The card's body has a live elapsed counter against
+        // the ETA. Replaces any stale failure card from a prior
+        // attempt; clears terminating / busy / retry banners.
+        clearBannersOfKind([
+          "terminating",
+          "busy",
+          "retry_started",
+          "provisioning",
+        ]);
+        setActiveCard({
+          kind: "provisioning",
+          prompt: "Spinning up your environment",
+          actions: [],
+          slug: evt.slug,
+          etaSeconds: evt.estimated_seconds,
+          startedAtMs: Date.now(),
+        });
         break;
       case "instance_upstream_degraded":
         pushBanner({ kind: "upstream_degraded", slug: evt.slug, capabilities: evt.capabilities });
@@ -250,11 +278,14 @@ export default function App() {
         break;
       case "instance_failed":
         // A new failure replaces the old card and clears any stale
-        // provisioning banner from the previous attempt.
+        // provisioning banner from the previous attempt. The optional
+        // `message` field carries the per-failure-code prose from
+        // `_failure_chat_copy` (Change 3 — no longer impersonates the
+        // LLM via append_text).
         clearBannersOfKind(["provisioning", "retry_started"]);
         setActiveCard({
           kind: "failed",
-          prompt: "Something went wrong starting your environment.",
+          prompt: evt.message ?? "Something went wrong starting your environment.",
           actions: evt.actions ?? [],
           failureCode: evt.failure_code,
         });
@@ -287,6 +318,16 @@ export default function App() {
         // Pre-existing event — surfaced via the assistant-ui
         // ToolResultBlock pipeline elsewhere. No-op here keeps the
         // exhaustiveness gate satisfied.
+        break;
+      case "error":
+        // Short orchestrator-level error (Change 3 of senior-DevOps
+        // refactor): rendered as an inline card with Main Menu so the
+        // user is never dead-ended (CLAUDE.md No Dead Ends).
+        setActiveCard({
+          kind: "failed",
+          prompt: evt.message,
+          actions: [{ label: "Main Menu", action_id: "menu:main" }],
+        });
         break;
       // tool_use / message_id are handled by their dedicated
       // callbacks; they shouldn't reach this dispatcher, but the
@@ -635,7 +676,23 @@ export default function App() {
       const res = await fetch("/api/projects", { credentials: "include" });
       if (res.ok) {
         const data = await res.json();
-        setProjects(data.projects ?? []);
+        // /api/projects returns a raw list[ProjectResponse]; legacy
+        // wrappers used `{projects: [...]}`. Handle both.
+        const raw = Array.isArray(data) ? data : (data.projects ?? []);
+        const list: Project[] = raw.map((p: {
+          id: number;
+          name: string;
+          tech_stack?: string | null;
+          mode?: string;
+          status?: string;
+        }) => ({
+          id: p.id,
+          name: p.name,
+          techStack: p.tech_stack ?? null,
+          mode: p.mode,
+          status: p.status,
+        }));
+        setProjects(list);
       }
     } catch { /* non-critical */ }
   }
@@ -727,20 +784,42 @@ export default function App() {
     } catch { /* silently fail */ }
   }
 
-  async function newThread() {
+  // Plan v2 Change 1: clicking "New conversation" no longer creates a
+  // chat row immediately. Instead it opens a mandatory project-picker
+  // modal. Only the user picking a project from the modal triggers the
+  // POST /api/threads with `project_id` baked in (Change-4 atomic-
+  // binding path). Cancel = no chat row. This makes a no-project chat
+  // structurally impossible — the bug class that produced gaslit "I'll
+  // spin up your env" replies on chat 35 etc.
+  function newThread() {
     cancelStream();
     setPendingPlan(null);
     setShowSettingsPanel(false); // creating a chat should hide settings
+    setShowNewChatModal(true);
+  }
+
+  async function createThreadWithProject(projectId: number) {
+    setShowNewChatModal(false);
     try {
-      const res = await fetch("/api/threads", { method: "POST", credentials: "include" });
+      const res = await fetch("/api/threads", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_id: projectId }),
+      });
       if (res.ok) {
         const t = await res.json();
-        const thread: ChatThread = { remoteId: t.remoteId, title: "New Chat" };
+        const thread: ChatThread = {
+          remoteId: t.remoteId,
+          title: "New Chat",
+          projectId,
+        };
         setThreads((prev) => [thread, ...prev]);
         setMessages([]);
-        setActiveProjectId(null);
-        // Use a small delay to ensure the thread is in state before setting active
-        // (avoids the selectThread guard check `if (id === activeThreadId) return`)
+        setActiveProjectId(projectId);
+        // Use a small delay to ensure the thread is in state before
+        // setting active (avoids the selectThread guard check
+        // `if (id === activeThreadId) return`)
         setActiveThreadId(null);
         setTimeout(() => setActiveThreadId(thread.remoteId), 0);
       }
@@ -1082,6 +1161,15 @@ export default function App() {
 
   return (
     <div className="h-screen flex overflow-hidden bg-background">
+      {/* Plan v2 Change 1: mandatory project-pick modal on "New chat".
+          Mounted at root so it overlays the entire chat surface. */}
+      {showNewChatModal ? (
+        <NewChatModal
+          projects={projects}
+          onPick={createThreadWithProject}
+          onCancel={() => setShowNewChatModal(false)}
+        />
+      ) : null}
       {/* Sidebar */}
       <aside className="w-[255px] shrink-0 flex flex-col border-r border-border/60" style={{ background: "var(--sidebar)" }}>
         {/* Brand header */}
@@ -1301,6 +1389,9 @@ export default function App() {
                   actions={activeCard.actions}
                   failureCode={activeCard.failureCode}
                   variant={activeCard.variant}
+                  slug={activeCard.slug}
+                  etaSeconds={activeCard.etaSeconds}
+                  startedAtMs={activeCard.startedAtMs}
                   onAction={async (a) => {
                     // Cards close on any action so the user isn't
                     // stuck looking at a stale card after acting.

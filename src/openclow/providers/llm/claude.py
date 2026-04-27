@@ -61,8 +61,10 @@ def _mcp_instance(instance) -> dict:
     """Spawn instance_mcp bound to this instance's compose project.
 
     Takes an ``openclow.models.Instance`` row. Reads only DB-authoritative
-    fields (``compose_project``) — accepting the whole row rather than a
-    slug discourages callers from substituting a slug at call time.
+    fields (``compose_project``, ``chat_session_id``) — accepting the
+    whole row rather than a slug discourages callers from substituting
+    a slug at call time. ``--chat-session-id`` pins the lifecycle tools
+    (provision_now / instance_status / terminate_now) to this one chat.
     """
     return {
         "command": "python",
@@ -70,6 +72,7 @@ def _mcp_instance(instance) -> dict:
             "-m", "openclow.mcp_servers.instance_mcp",
             "--compose-project", instance.compose_project,
             "--allowed-services", _DEFAULT_INSTANCE_SERVICES,
+            "--chat-session-id", str(instance.chat_session_id),
         ],
     }
 
@@ -117,6 +120,12 @@ CONTAINER_MODE_TOOLS: list[str] = [
     "mcp__instance__instance_restart",
     "mcp__instance__instance_ps",
     "mcp__instance__instance_health",
+    # instance_mcp — lifecycle (Change 2 of senior-DevOps refactor).
+    # The LLM owns provision/status/terminate decisions instead of the
+    # platform deciding behind its back.
+    "mcp__instance__provision_now",
+    "mcp__instance__instance_status",
+    "mcp__instance__terminate_now",
     # workspace_mcp — root-bound.
     "mcp__workspace__read_file",
     "mcp__workspace__write_file",

@@ -20,7 +20,8 @@
         "instance_busy",
         "instance_terminating",
         "instance_retry_started",
-        "confirm"
+        "confirm",
+        "error"
       ]
     }
   },
@@ -74,7 +75,7 @@
     },
     {
       "title": "InstanceFailed",
-      "description": "T080 — Instance reached terminal `failed` state. Frontend renders a card with Retry + Main Menu actions per CLAUDE.md No Dead Ends.",
+      "description": "T080 — Instance reached terminal `failed` state. Frontend renders a card with Retry + Main Menu actions per CLAUDE.md No Dead Ends. The optional `message` carries the per-failure-code prose `_failure_chat_copy` previously injected into the LLM's text channel — now structured so the UI owns the rendering.",
       "required": ["type", "slug", "failure_code", "actions"],
       "additionalProperties": false,
       "properties": {
@@ -88,6 +89,7 @@
             "orchestrator_crash", "unknown"
           ]
         },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000, "description": "Human-readable failure copy from `_failure_chat_copy(failure_code, failure_message)`. Frontend renders this as the card body." },
         "actions": {
           "type": "array",
           "minItems": 1,
@@ -186,6 +188,16 @@
           "maxItems": 4,
           "items": { "$ref": "#/$defs/CardAction" }
         }
+      }
+    },
+    {
+      "title": "OrchestratorError",
+      "description": "Short orchestrator-level error surfaced to the chat — empty message, invalid retry target, no-active-instance, unhandled exception, etc. The frontend renders this as a small inline error card with proper styling rather than letting the orchestrator inject prose into the LLM's text channel (Principle II: deterministic infra status flows through structured events, not impersonated LLM voice).",
+      "required": ["type", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "error" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 500 }
       }
     }
   ],

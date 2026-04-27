@@ -24,7 +24,7 @@ import argparse
 import asyncio
 import shlex
 import sys
-from typing import Iterable
+from typing import Any, Iterable
 
 from mcp.server.fastmcp import FastMCP
 
@@ -37,7 +37,7 @@ from mcp.server.fastmcp import FastMCP
 # ---------------------------------------------------------------------------
 
 
-def _parse_argv(argv: list[str]) -> tuple[str, frozenset[str]]:
+def _parse_argv(argv: list[str]) -> tuple[str, frozenset[str], int | None]:
     parser = argparse.ArgumentParser(
         prog="openclow.mcp_servers.instance_mcp",
         description="Per-instance compose operations, pinned to one project.",
@@ -54,12 +54,24 @@ def _parse_argv(argv: list[str]) -> tuple[str, frozenset[str]]:
         default="app,web,node,db,redis",
         help="Comma-separated service allowlist. `cloudflared` must NOT appear.",
     )
+    parser.add_argument(
+        "--chat-session-id",
+        required=False,
+        default="",
+        help="Chat session ID for this MCP — pins the lifecycle tools "
+             "(provision_now/instance_status/terminate_now) to one chat.",
+    )
     ns, _ = parser.parse_known_args(argv)
     allowlist = frozenset(s.strip() for s in ns.allowed_services.split(",") if s.strip())
-    return ns.compose_project, allowlist
+    csid: int | None
+    try:
+        csid = int(ns.chat_session_id) if ns.chat_session_id else None
+    except ValueError:
+        csid = None
+    return ns.compose_project, allowlist, csid
 
 
-_COMPOSE_PROJECT, _ALLOWED_SERVICES = _parse_argv(sys.argv[1:])
+_COMPOSE_PROJECT, _ALLOWED_SERVICES, _CHAT_SESSION_ID = _parse_argv(sys.argv[1:])
 
 # Refuse to start if an operator accidentally allowlists the sidecar.
 # cloudflared holds the CF tunnel token; exposing it to an agent would
@@ -234,6 +246,142 @@ async def instance_health() -> str:
         status = obj.get("Status") or ""
         lines.append(f"{svc}: {health} ({status})")
     return "\n".join(lines) or "(no allowed services reporting)"
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle tools — let the LLM own provision/status/terminate as a senior
+# engineer would. All three resolve the active instance from the pinned
+# `--chat-session-id`; none take an `instance_*` / `chat_*` argument
+# (Principle III). DB access is via `async_session()` inheriting the
+# worker's env vars in this subprocess.
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_instance() -> tuple[Any, Any] | str:  # type: ignore[name-defined]
+    """Look up the chat's active Instance row.
+
+    Returns ``(instance, session_factory)`` on hit, or an error string
+    on miss/refusal. ``session_factory`` is returned so callers that need
+    a fresh session for follow-up writes don't reopen an import.
+    """
+    if _CHAT_SESSION_ID is None:
+        return "REFUSED: instance_mcp started without --chat-session-id."
+
+    from openclow.models import async_session  # type: ignore
+    from openclow.models.instance import Instance  # type: ignore
+    from openclow.services.instance_service import ACTIVE_STATUSES  # type: ignore
+    from sqlalchemy import select  # type: ignore
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Instance).where(
+                Instance.chat_session_id == _CHAT_SESSION_ID,
+                Instance.status.in_(ACTIVE_STATUSES),
+            )
+        )
+        inst = result.scalar_one_or_none()
+    return inst, async_session
+
+
+@mcp.tool()
+async def instance_status() -> str:
+    """Return the live status of THIS chat's instance.
+
+    Read-only. Returns a multi-line key:value block. If no active
+    instance exists, says so plainly so the LLM can decide whether
+    to call provision_now() based on user intent.
+    """
+    try:
+        resolved = await _resolve_instance()
+    except Exception as e:
+        return f"FAILED: {type(e).__name__}: {str(e)[:200]}"
+    if isinstance(resolved, str):
+        return resolved
+    inst, _ = resolved
+    if inst is None:
+        return (
+            "status: none\n"
+            "(No instance is provisioned for this chat. "
+            "Call provision_now() to bring one up.)"
+        )
+    web_hostname = None
+    try:
+        if inst.tunnels:
+            web_hostname = inst.tunnels[0].web_hostname
+    except Exception:
+        web_hostname = None
+    started = inst.started_at.isoformat() if inst.started_at else "(not yet started)"
+    last_act = (
+        inst.last_activity_at.isoformat() if inst.last_activity_at else "(unknown)"
+    )
+    return (
+        f"status: {inst.status}\n"
+        f"slug: {inst.slug}\n"
+        f"web_hostname: {web_hostname or '(not yet assigned)'}\n"
+        f"started_at: {started}\n"
+        f"last_activity_at: {last_act}\n"
+        f"failure_code: {inst.failure_code or '(none)'}"
+    )
+
+
+@mcp.tool()
+async def provision_now() -> str:
+    """Bring this chat's instance up. Idempotent.
+
+    Calls InstanceService.get_or_resume(). If an active instance
+    exists, returns its current state. Otherwise enqueues the provision
+    job and returns immediately — provisioning runs async (~60-90s).
+    Poll instance_status() for completion.
+    """
+    if _CHAT_SESSION_ID is None:
+        return "REFUSED: instance_mcp started without --chat-session-id."
+    try:
+        from openclow.services.instance_service import InstanceService  # type: ignore
+        svc = InstanceService()
+        inst = await svc.get_or_resume(_CHAT_SESSION_ID)
+    except Exception as e:
+        return f"FAILED: {type(e).__name__}: {str(e)[:200]}"
+    web_hostname = None
+    try:
+        if inst.tunnels:
+            web_hostname = inst.tunnels[0].web_hostname
+    except Exception:
+        web_hostname = None
+    return (
+        f"OK: provision in flight (or already running).\n"
+        f"slug: {inst.slug}\n"
+        f"status: {inst.status}\n"
+        f"web_hostname: {web_hostname or '(not yet assigned)'}\n"
+        f"Note: provisioning is async (~60-90s on cold boot). "
+        f"Use instance_status() to poll."
+    )
+
+
+@mcp.tool()
+async def terminate_now() -> str:
+    """Tear down this chat's instance. User-triggered termination.
+
+    Refuses if no active instance exists. Idempotent on already-
+    terminating rows. Cleanup (compose down, tunnel destroy, DB row
+    flip to destroyed) runs in the worker via the teardown ARQ job.
+    """
+    try:
+        resolved = await _resolve_instance()
+    except Exception as e:
+        return f"FAILED: {type(e).__name__}: {str(e)[:200]}"
+    if isinstance(resolved, str):
+        return resolved
+    inst, _ = resolved
+    if inst is None:
+        return "REFUSED: no active instance to terminate."
+    instance_id = inst.id
+    slug = inst.slug
+    try:
+        from openclow.services.instance_service import InstanceService  # type: ignore
+        await InstanceService().terminate(instance_id, reason="user_request")
+    except Exception as e:
+        return f"FAILED: {type(e).__name__}: {str(e)[:200]}"
+    return f"OK: terminate enqueued. slug={slug}"
 
 
 def get_tool_manifest() -> list[dict]:
