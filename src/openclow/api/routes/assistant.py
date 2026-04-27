@@ -1109,11 +1109,45 @@ async def assistant_endpoint(
                         "session_id": str(session_id),
                     }
                     try:
-                        await _save_message(
+                        # 1. Save the message row so the card survives a
+                        #    page reload (thread.tsx renders __PROGRESS_CARD__
+                        #    content via WorkerProgressCard).
+                        _card_msg_id = await _save_message(
                             session_id, user.id, "assistant",
                             f"__PROGRESS_CARD__{_pcj.dumps(_progress_card)}",
                             is_complete=False,
                         )
+                        # 2. Publish msg_new + progress_card to the chat's
+                        #    WebSocket channel so the LIVE thread sees the
+                        #    card immediately (without this it'd only show
+                        #    after a page reload). Same channel + payload
+                        #    shape as web provider's send_progress_card —
+                        #    inlined here to avoid wiring a chat-provider
+                        #    instance into the FastAPI route.
+                        try:
+                            import redis.asyncio as _aioredis
+                            from openclow.settings import settings as _s
+                            _channel = f"wc:{user.id}:{session_id}"
+                            _r = _aioredis.from_url(_s.redis_url)
+                            try:
+                                await _r.publish(_channel, _pcj.dumps({
+                                    "type": "msg_new",
+                                    "message_id": str(_card_msg_id),
+                                    "text": f"__PROGRESS_CARD__{_pcj.dumps(_progress_card)}",
+                                }))
+                                await _r.publish(_channel, _pcj.dumps({
+                                    "type": "progress_card",
+                                    "message_id": str(_card_msg_id),
+                                    "card": _progress_card,
+                                }))
+                            finally:
+                                await _r.aclose()
+                        except Exception as _pub_e:
+                            log.warning(
+                                "assistant.progress_card_publish_failed",
+                                slug=container_instance.slug,
+                                error=str(_pub_e),
+                            )
                     except Exception as _e:
                         log.warning(
                             "assistant.progress_card_save_failed",
