@@ -119,15 +119,37 @@ services:
         # ERESOLVE. --legacy-peer-deps mirrors what these projects'
         # READMEs tell humans to do. Fall back to `npm install` if the
         # lockfile is missing/stale (npm ci is strict about both).
-        if [ ! -d node_modules ] || [ ! -e node_modules/vite ]; then
-          npm ci --legacy-peer-deps \
+        # Check `.bin/vite` (the symlink npm creates), not `vite` package
+        # dir — the package can exist with no .bin if a previous install
+        # was interrupted by a restart-loop, and `npx vite` fails with
+        # "vite: not found" on a half-installed tree forever.
+        if [ ! -x node_modules/.bin/vite ]; then
+          # Wipe a partial node_modules tree so the install starts clean.
+          # Otherwise npm ci sees an existing tree and may skip work.
+          [ -d node_modules ] && rm -rf node_modules
+          # `npm ci` is strict about lockfile shape; real-world Laravel/
+          # Vue templates (Vuexy, Spatie media-library) ship lockfiles
+          # with peer-dep conflicts. --legacy-peer-deps is what the
+          # project READMEs tell humans to use; we mirror that. Fall
+          # back to `npm install` if the lockfile is missing/stale.
+          npm ci --legacy-peer-deps --no-audit --no-fund \
             || npm install --legacy-peer-deps --no-audit --no-fund
+          # If the install STILL didn't produce vite, something is
+          # fundamentally wrong (auth on private packages, network
+          # blip, broken lockfile). Loud failure beats silent restart-
+          # loop with vite-not-found.
+          if [ ! -x node_modules/.bin/vite ]; then
+            echo "FATAL: npm install completed but node_modules/.bin/vite is missing." >&2
+            echo "Inspect with: docker logs <container>; check .npm-debug.log inside the container." >&2
+            sleep 60   # don't tight-loop the host
+            exit 1
+          fi
         fi
         # Use the platform's Vite overlay config (vite.config.tagh.mjs)
         # so server.origin points at the cloudflared HMR hostname and
         # laravel-vite-plugin writes the public URL to public/hot —
         # otherwise the browser tries 0.0.0.0:5173 and fails.
-        exec npx vite --config vite.config.tagh.mjs --host 0.0.0.0
+        exec node_modules/.bin/vite --config vite.config.tagh.mjs --host 0.0.0.0
     environment:
       - INSTANCE_HOST=${INSTANCE_HOST}
       - INSTANCE_HMR_HOST=${INSTANCE_HMR_HOST}
