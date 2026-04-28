@@ -103,7 +103,7 @@ services:
     # 4G gives enough headroom for the worst-case spike + a couple
     # of concurrent re-transforms during HMR. Reduce via
     # INSTANCE_MEM_NODE for projects with smaller dep graphs.
-    mem_limit: ${INSTANCE_MEM_NODE:-4g}
+    mem_limit: ${INSTANCE_MEM_NODE:-6g}
     mem_reservation: 512m
     # Install front-end deps + start the Vite dev server. projctl runs
     # inside `app` and can't docker-exec into other services, so the

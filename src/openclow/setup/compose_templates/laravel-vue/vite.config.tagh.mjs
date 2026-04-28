@@ -64,6 +64,18 @@ async function loadProjectConfig() {
 const projectConfig = await loadProjectConfig();
 
 const overlay = defineConfig({
+  // Override expensive optimizeDeps settings that some project configs
+  // ship (Vuexy / Vuetify templates often set `force: true` and a wide
+  // `entries: ["./resources/ts/**/*.vue"]`). On every container
+  // restart Vite would then re-scan thousands of .vue files in
+  // parallel via esbuild workers — peak anon-rss hit 3.77 GB on
+  // staging and OOM-killed esbuild before the dev server could
+  // serve a single request. We want the persistent cache to survive
+  // restarts, not be invalidated every boot.
+  optimizeDeps: {
+    force: false,
+    holdUntilCrawlEnd: false,
+  },
   server: {
     host: '0.0.0.0',
     port: 5173,
