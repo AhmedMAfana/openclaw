@@ -68,4 +68,29 @@ if [ -n "$PLAYWRIGHT_BROWSERS_PATH" ] && [ ! -d "$PLAYWRIGHT_BROWSERS_PATH" ]; t
     echo "[entrypoint] WARNING: PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH missing; run npx playwright install chromium inside the container." >&2
 fi
 
+# /workspaces sanity check — must exist AND be writable. The orchestrator
+# clones project repos into /workspaces/_cache/<project>/ and the per-
+# instance app containers bind-mount the same host path back into
+# /var/www/html. On prod this is the `app_workspaces` named volume;
+# on dev it's a host bind. If an operator brings the worker up with the
+# wrong overlay (e.g. forgets `-f docker-compose.prod.yml`), the worker
+# silently mounts an empty fresh dir and every provision fails 30s in
+# with "Permission denied: /workspaces/_cache". Fail LOUD on boot so the
+# next operator hits a clear actionable error instead.
+# WORKSPACES_BIND_MODE=skip disables the check (offline / unit-test).
+if [ "${WORKSPACES_BIND_MODE:-check}" != "skip" ]; then
+    if [ ! -d /workspaces ]; then
+        echo "[entrypoint] FATAL: /workspaces does not exist — compose file is missing the workspaces volume mount." >&2
+        exit 78
+    fi
+    _probe="/workspaces/.entrypoint_writable_$$"
+    if ! touch "$_probe" 2>/dev/null; then
+        echo "[entrypoint] FATAL: /workspaces is not writable by uid=$(id -u). Most likely cause: container started with the dev compose only — re-run with \`-f docker-compose.yml -f docker-compose.prod.yml\` (prod) so /workspaces gets the named volume mount, or chown the host bind dir if you're on dev." >&2
+        ls -ld /workspaces >&2 || true
+        exit 78
+    fi
+    rm -f "$_probe"
+    echo "[entrypoint] /workspaces ok (writable by uid=$(id -u))"
+fi
+
 exec "$@"
