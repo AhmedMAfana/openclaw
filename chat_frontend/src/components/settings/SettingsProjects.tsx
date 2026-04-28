@@ -48,10 +48,42 @@ export function SettingsProjects() {
   const [editDraft, setEditDraft] = useState<Partial<Project>>({});
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState("");
+  // Connected GitHub repos — loaded lazily when the Add modal opens.
+  // Keeps the Settings page snappy and avoids a 2 s GitHub round-trip on
+  // first render. `null` = not loaded yet, `[]` = loaded but empty.
+  type GhRepo = { full_name: string; default_branch: string; private: boolean; description: string | null };
+  const [ghRepos, setGhRepos] = useState<GhRepo[] | null>(null);
+  const [ghLoading, setGhLoading] = useState(false);
+  const [ghError, setGhError] = useState("");
+  const [ghQuery, setGhQuery] = useState("");
 
   useEffect(() => {
     load();
   }, []);
+
+  async function loadGhRepos() {
+    if (ghRepos !== null || ghLoading) return;
+    setGhLoading(true);
+    setGhError("");
+    try {
+      const res = await fetch("/api/settings/projects/github-repos", { credentials: "include" });
+      if (res.ok) {
+        const d = await res.json();
+        setGhRepos(d.repos || []);
+      } else {
+        const d = await res.json().catch(() => ({}));
+        setGhError(d.detail || `Failed to load repos (${res.status})`);
+      }
+    } catch (e) {
+      setGhError(String(e));
+    } finally {
+      setGhLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (addOpen) loadGhRepos();
+  }, [addOpen]);
 
   async function load() {
     setLoading(true);
@@ -266,13 +298,62 @@ export function SettingsProjects() {
                   <label className={lc}>
                     Repository <span className="text-red-400">*</span>
                   </label>
-                  <input
-                    type="text"
-                    placeholder="owner/repo"
-                    value={form.github_repo}
-                    onChange={(e) => setForm((f) => ({ ...f, github_repo: e.target.value }))}
-                    className={ic}
-                  />
+                  {ghLoading ? (
+                    <div className={`${ic} text-muted-foreground`}>Loading repos…</div>
+                  ) : ghError ? (
+                    <input
+                      type="text"
+                      placeholder="owner/repo"
+                      value={form.github_repo}
+                      onChange={(e) => setForm((f) => ({ ...f, github_repo: e.target.value }))}
+                      className={ic}
+                    />
+                  ) : (
+                    <>
+                      <input
+                        type="text"
+                        list="gh-repo-list"
+                        placeholder={
+                          ghRepos && ghRepos.length
+                            ? `Search ${ghRepos.length} repos…`
+                            : "owner/repo"
+                        }
+                        value={form.github_repo}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setGhQuery(v);
+                          const match = ghRepos?.find((r) => r.full_name === v);
+                          setForm((f) => ({
+                            ...f,
+                            github_repo: v,
+                            default_branch: match?.default_branch || f.default_branch,
+                            name: match && !f.name
+                              ? (match.full_name.split("/")[1] || "")
+                              : f.name,
+                          }));
+                        }}
+                        className={ic}
+                      />
+                      <datalist id="gh-repo-list">
+                        {(ghRepos || [])
+                          .filter((r) =>
+                            !ghQuery || r.full_name.toLowerCase().includes(ghQuery.toLowerCase())
+                          )
+                          .slice(0, 200)
+                          .map((r) => (
+                            <option key={r.full_name} value={r.full_name}>
+                              {r.private ? "🔒 " : ""}
+                              {r.description || r.default_branch}
+                            </option>
+                          ))}
+                      </datalist>
+                    </>
+                  )}
+                  {ghError && (
+                    <div className="text-xs text-amber-500 mt-1">
+                      {ghError} — type the repo manually
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className={lc}>

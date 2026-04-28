@@ -101,10 +101,14 @@ class ProjectResponse(BaseModel):
     id: int
     name: str
     github_repo: str
-    default_branch: str
-    description: str | None
-    tech_stack: str | None
-    is_dockerized: bool
+    # Tolerate NULL on legacy/manually-inserted rows — older container-mode
+    # rows can be added with just (name, mode, status, github_repo) and
+    # the rest left to defaults. Without `| None` the list endpoint 500s
+    # on the first NULL row and the Settings page goes blank.
+    default_branch: str | None = None
+    description: str | None = None
+    tech_stack: str | None = None
+    is_dockerized: bool | None = None
     docker_compose_file: str | None
     app_container_name: str | None
     app_port: int | None

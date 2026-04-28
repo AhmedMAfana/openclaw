@@ -695,6 +695,68 @@ async def delete_project(project_id: int):
     return {"status": "ok", "message": f"Project '{project.name}' deactivated"}
 
 
+@router.get("/projects/github-repos")
+async def list_github_repos():
+    """List repos the configured GitHub PAT can see — owner + collaborator
+    + org-member affiliated. Used by the Settings → Add Project modal so
+    the user picks from a dropdown instead of typing `owner/repo` by hand.
+
+    Reads `git/provider.github.token` from platform_config. Returns a
+    flat list of `{full_name, default_branch, private, description}`
+    sorted by full_name. Up to 300 repos (3 pages × 100).
+    """
+    cfg = await config_service.get_config("git", "provider.github")
+    token = (cfg or {}).get("token") if cfg else None
+    if not token:
+        raise HTTPException(
+            400,
+            "git/provider.github not configured — add a GitHub token in "
+            "platform_config first",
+        )
+    repos: list[dict] = []
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+        for page in (1, 2, 3):
+            try:
+                resp = await client.get(
+                    "https://api.github.com/user/repos",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                    params={
+                        "per_page": 100, "page": page,
+                        "sort": "full_name", "affiliation": "owner,collaborator,organization_member",
+                    },
+                )
+            except httpx.HTTPError as e:
+                raise HTTPException(502, f"GitHub request failed: {e}")
+            if resp.status_code == 401:
+                raise HTTPException(
+                    401,
+                    "GitHub token rejected — check git/provider.github in "
+                    "platform_config",
+                )
+            if resp.status_code != 200:
+                raise HTTPException(
+                    502, f"GitHub returned {resp.status_code}: {resp.text[:200]}"
+                )
+            page_repos = resp.json()
+            if not page_repos:
+                break
+            for r in page_repos:
+                repos.append({
+                    "full_name": r.get("full_name"),
+                    "default_branch": r.get("default_branch") or "main",
+                    "private": bool(r.get("private")),
+                    "description": r.get("description"),
+                })
+            if len(page_repos) < 100:
+                break
+    repos.sort(key=lambda r: (r["full_name"] or "").lower())
+    return {"repos": repos, "count": len(repos)}
+
+
 # ---------------------------------------------------------------------------
 # User CRUD
 # ---------------------------------------------------------------------------
