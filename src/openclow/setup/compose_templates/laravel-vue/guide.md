@@ -17,9 +17,9 @@
 ## install-php
 
 ```projctl
-cmd: composer install --no-interaction --prefer-dist
+cmd: composer install --no-interaction --prefer-dist || composer install --no-interaction --prefer-dist --no-scripts
 cwd: /var/www/html
-success_check: test -d /var/www/html/vendor
+success_check: test -d /var/www/html/vendor && test -f /var/www/html/vendor/autoload.php
 skippable: false
 max_attempts: 3
 retry_policy: exponential_backoff
@@ -29,6 +29,17 @@ timeout_seconds: 600
 Installs PHP dependencies via Composer. Required before `artisan migrate`.
 Reads `COMPOSER_AUTH` env (set by the orchestrator from /app/auth.json) for
 private VCS auth.
+
+Two-stage cmd: try with scripts first (so a healthy project still runs
+its post-install hooks), fall back to `--no-scripts` if any post-install
+artisan command crashes. Real-world failure mode this guards against:
+a feature branch with a duplicate `use` statement in `config/*.php`
+makes `php artisan package:discover` exit 255 — and without the
+fallback, projctl would retry the whole install 3 times and fail the
+provision over a project-side code bug. With `--no-scripts` the vendor
+tree is fully populated; the success_check verifies autoload.php
+actually exists; and the agent inside the chat can fix the underlying
+PHP issue without re-provisioning.
 
 ## setup-env
 
