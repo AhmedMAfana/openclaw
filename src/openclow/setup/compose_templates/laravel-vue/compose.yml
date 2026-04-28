@@ -84,12 +84,15 @@ services:
     image: node:20-alpine
     restart: unless-stopped
     working_dir: /var/www/html
-    # Node gets the largest cap because `npm ci` of a Vuexy-template-
-    # sized project legitimately spikes to ~1.2 GB during dep
-    # resolution. 1.5G gives headroom; OOM-kill it before it eats
-    # the host.
-    mem_limit: ${INSTANCE_MEM_NODE:-1500m}
-    mem_reservation: 256m
+    # Node gets the largest cap. Real numbers from a 2026-04-28 oom:
+    # esbuild alone hit 1.35 GB anon RSS while transforming the Vuexy
+    # template's main.ts (huge dep graph). Vite's worker pool runs ≥4
+    # esbuild children in parallel, so the practical ceiling is well
+    # above 1.5G. 2.5G fits one instance comfortably on a 4G droplet
+    # and leaves room for app+db+sidecars; reduce via INSTANCE_MEM_NODE
+    # for smaller projects.
+    mem_limit: ${INSTANCE_MEM_NODE:-2500m}
+    mem_reservation: 384m
     # Install front-end deps + start the Vite dev server. projctl runs
     # inside `app` and can't docker-exec into other services, so the
     # node service does its own bootstrap. The container restarts if
