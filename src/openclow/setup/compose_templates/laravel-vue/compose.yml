@@ -81,7 +81,18 @@ services:
       - instance
 
   node:
-    image: node:20-alpine
+    # glibc base, NOT alpine. Real-world Laravel/Vue templates (Vuexy,
+    # Spatie media-library, Inertia starter, …) ship lockfiles that
+    # pin platform-specific binaries — most notably esbuild's
+    # `@esbuild/linux-x64` and Sass's `linux-x64` native modules,
+    # both built for glibc. Run them on alpine (musl) and they
+    # silently segfault: vite then crashes with `[plugin:vite:esbuild]
+    # write EPIPE` because the esbuild subprocess died on first
+    # transform. bookworm-slim costs ~30 MB extra layer over alpine
+    # but eliminates an entire class of musl-vs-glibc landmines.
+    # (2026-04-28: tagh-test esbuild segfault diagnosed by EPIPE +
+    # absence of any OOM in dmesg + cgroup at 7% mem use.)
+    image: node:20-bookworm-slim
     restart: unless-stopped
     working_dir: /var/www/html
     # Node gets the largest cap. Real numbers from a 2026-04-28 oom:
