@@ -85,6 +85,41 @@ export function SettingsProjects() {
     if (addOpen) loadGhRepos();
   }, [addOpen]);
 
+  // Branches for the Edit modal — fetched per-project on open. Lets the
+  // user point a chat at a working branch instead of a broken main
+  // (e.g. tagh-test where main has a Vite config bug; a feature branch
+  // has the fix). One round-trip to GitHub per Edit-open; not cached
+  // because branches change frequently outside our system.
+  type GhBranch = { name: string; is_default: boolean; protected: boolean };
+  const [editBranches, setEditBranches] = useState<GhBranch[] | null>(null);
+  const [editBranchesLoading, setEditBranchesLoading] = useState(false);
+  const [editBranchesError, setEditBranchesError] = useState("");
+  useEffect(() => {
+    setEditBranches(null);
+    setEditBranchesError("");
+    if (!editTarget) return;
+    setEditBranchesLoading(true);
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/settings/projects/${editTarget.id}/branches`,
+          { credentials: "include" },
+        );
+        if (res.ok) {
+          const d = await res.json();
+          setEditBranches(d.branches || []);
+        } else {
+          const d = await res.json().catch(() => ({}));
+          setEditBranchesError(d.detail || `Failed to load branches (${res.status})`);
+        }
+      } catch (e) {
+        setEditBranchesError(String(e));
+      } finally {
+        setEditBranchesLoading(false);
+      }
+    })();
+  }, [editTarget?.id]);
+
   async function load() {
     setLoading(true);
     const res = await fetch("/api/settings/projects", { credentials: "include" });
@@ -145,6 +180,7 @@ export function SettingsProjects() {
   function openEdit(p: Project) {
     setEditTarget(p);
     setEditDraft({
+      default_branch: p.default_branch ?? "main",
       mode: p.mode ?? "docker",
       project_dir: p.project_dir ?? "",
       start_command: p.start_command ?? "",
@@ -481,6 +517,48 @@ export function SettingsProjects() {
               Host-mode settings and public URL. Fields apply only when mode = host.
             </Dialog.Description>
             <div className="space-y-3">
+              <div>
+                <label className={lc}>
+                  Default Branch{" "}
+                  <span className="text-xs text-muted-foreground font-normal">
+                    (every new chat clones from here)
+                  </span>
+                </label>
+                {editBranchesLoading ? (
+                  <div className={`${ic} text-muted-foreground`}>Loading branches…</div>
+                ) : (
+                  <>
+                    <input
+                      type="text"
+                      list={`branch-list-${editTarget?.id}`}
+                      placeholder={
+                        editBranches && editBranches.length
+                          ? `Search ${editBranches.length} branches…`
+                          : "main"
+                      }
+                      value={editDraft.default_branch ?? ""}
+                      onChange={(e) =>
+                        setEditDraft((d) => ({ ...d, default_branch: e.target.value }))
+                      }
+                      className={ic}
+                    />
+                    <datalist id={`branch-list-${editTarget?.id}`}>
+                      {(editBranches || []).map((b) => (
+                        <option key={b.name} value={b.name}>
+                          {b.is_default ? "★ default" : ""}
+                          {b.protected ? " 🔒 protected" : ""}
+                        </option>
+                      ))}
+                    </datalist>
+                  </>
+                )}
+                {editBranchesError && (
+                  <div className="text-xs text-amber-500 mt-1">
+                    {editBranchesError} — type the branch manually
+                  </div>
+                )}
+              </div>
+
               <div>
                 <label className={lc}>Mode</label>
                 <select
