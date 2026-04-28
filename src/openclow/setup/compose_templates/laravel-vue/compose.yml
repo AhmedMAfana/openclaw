@@ -193,11 +193,17 @@ services:
       - MYSQL_ROOT_PASSWORD
     volumes:
       - db-data:/var/lib/mysql
+    # mariadb:11 ships /usr/local/bin/healthcheck.sh which probes the
+    # server via a real connection (not just a TCP open). Using
+    # `mysqladmin ping` here would return success-on-ECONNREFUSED in
+    # some versions and report unhealthy after the server is actually
+    # ready (auth/socket quirks); the bundled script avoids both.
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 5s
       timeout: 5s
       retries: 20
+      start_period: 30s
     networks:
       - instance
 
