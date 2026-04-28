@@ -55,6 +55,17 @@ USER root
 RUN install-php-extensions gd exif \
  && apk add --no-cache mysql-client git \
  && chmod 0755 /usr/local/bin/projctl \
+ # Disable SSL for the mysql CLI globally inside this image. The
+ # per-instance MySQL container runs on a private compose bridge with
+ # TLS turned off (compose.yml: `--tls-version=`); without this client
+ # config, any artisan command that shells out to `mysql` (gecche
+ # multidomain, schema introspection, etc.) fails with
+ # "ERROR 2026 (HY000): TLS/SSL error: SSL is required, but the
+ # server does not support it" — the CLI's default ssl-mode=PREFERRED
+ # downgrades to REQUIRED on some builds. ssl-mode=DISABLED forces
+ # plaintext, matching what the server now offers.
+ && mkdir -p /etc/my.cnf.d /etc/mysql/conf.d \
+ && printf '[client]\nssl-mode=DISABLED\n' | tee /etc/my.cnf.d/no-ssl.cnf /etc/mysql/conf.d/no-ssl.cnf >/dev/null \
  # Pre-create projctl's state dir and hand ownership to the runtime
  # user. The compose file mounts a named volume here; docker copies
  # the mount-point's existing ownership onto the named volume on
