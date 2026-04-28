@@ -195,17 +195,43 @@ case "${STEP}:${VARIANT}" in
     # (e.g. password), the INSERT silently fails and the step is
     # logged but not a hard failure (skippable: true in guide.md).
     seed-admin:multidomain-gecche|seed-admin:*)
-        # Use a heredoc so the SQL is readable. Connect via mysql
-        # client to the per-instance db service. The values mirror
-        # the user's "default seed for our instances" spec.
-        mysql -h db -u app -p"${DB_PASSWORD}" app <<'SQL' 2>&1 || \
-            echo "  (seed-admin INSERT failed — schema may require non-default columns; skipping)"
-INSERT IGNORE INTO users (id, name, email, uuid, created_at, updated_at)
-VALUES (1, 'Admin', 'admin@admin.com',
-        '0199bf2d-406d-71e6-b6b2-f28f8256c6df',
-        '2025-11-23 22:01:59',
-        '2025-11-23 22:02:03');
-SQL
+        # Schema-tolerant INSERT: introspect the users table first so
+        # we only reference columns that actually exist. Different
+        # Laravel templates ship different users schemas — basic
+        # Breeze has (id, name, email, password, *_at); Vuexy templates
+        # add division_id, default_department_id, external_id; spatie
+        # has uuid; some have role_id NOT NULL; etc. Hardcoding any
+        # specific column set fails on whichever shape the project
+        # doesn't have. (Caught when tagh-test had no `uuid` column
+        # and the INSERT errored out, leaving the users table empty.)
+        echo "  introspecting users schema for portable INSERT..."
+        cols=$(mysql -h db -u app -p"${DB_PASSWORD}" -N -B app -e \
+            "SELECT COLUMN_NAME FROM information_schema.columns \
+             WHERE table_schema='app' AND table_name='users';" 2>/dev/null)
+        if [ -z "$cols" ]; then
+            echo "  (no users table — skipping seed-admin)"
+        else
+            # Build column/value lists from what's actually present.
+            sql_cols="id,name,email"
+            sql_vals="1,'Admin','admin@admin.com'"
+            echo "$cols" | grep -qx "uuid" && {
+                sql_cols="${sql_cols},uuid"
+                sql_vals="${sql_vals},'0199bf2d-406d-71e6-b6b2-f28f8256c6df'"
+            }
+            echo "$cols" | grep -qx "created_at" && {
+                sql_cols="${sql_cols},created_at"
+                sql_vals="${sql_vals},NOW()"
+            }
+            echo "$cols" | grep -qx "updated_at" && {
+                sql_cols="${sql_cols},updated_at"
+                sql_vals="${sql_vals},NOW()"
+            }
+            mysql -h db -u app -p"${DB_PASSWORD}" app -e \
+                "INSERT IGNORE INTO users (${sql_cols}) VALUES (${sql_vals});" \
+                2>&1 || echo "  (seed-admin INSERT failed — schema needs columns we don't know; skipping)"
+            mysql -h db -u app -p"${DB_PASSWORD}" -N -B app -e \
+                "SELECT CONCAT('  seeded ', COUNT(*), ' user row(s)') FROM users;" 2>/dev/null
+        fi
         ;;
 
     # storage-link: gecche docs note that --domain is honored on this
