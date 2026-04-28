@@ -936,12 +936,13 @@ async def _mark_failed(
         # against the same session_branch ("fatal: '<branch>' is already
         # used by worktree at <path>"). teardown_instance is idempotent
         # so this is safe even if the partial state is already cleaned.
-        from openclow.models.instance import TerminatedReason
         from openclow.services.bot_actions import enqueue_job
+        # teardown_instance signature is (ctx, instance_id) — no reason
+        # kwarg. The DB row already has failure_code/terminated_reason
+        # set by InstanceService.terminate which teardown calls.
         await enqueue_job(
             "teardown_instance",
             instance_id=str(instance_id),
-            reason=TerminatedReason.FAILED.value,
         )
     except Exception as e:  # pragma: no cover
         log.exception("_mark_failed.error", error=str(e))
