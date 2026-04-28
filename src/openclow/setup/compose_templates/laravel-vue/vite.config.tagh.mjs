@@ -20,19 +20,48 @@
 //
 // Generated for INSTANCE_HOST=${INSTANCE_HOST}, INSTANCE_HMR_HOST=${INSTANCE_HMR_HOST}.
 
-import { defineConfig, mergeConfig } from 'vite';
+import { defineConfig, loadConfigFromFile, mergeConfig } from 'vite';
+import { existsSync } from 'node:fs';
+import { resolve as pathResolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-// Resolve the project's own Vite config — try .ts first (modern), fall
-// back to .js. The dynamic import keeps every plugin (vue, laravel-
-// vite-plugin, etc.) and resolve-alias the project ships.
-const projectConfigModule = await import('./vite.config.ts').catch(
-  () => import('./vite.config.js'),
-);
-const projectExport = projectConfigModule.default;
-const projectConfig =
-  typeof projectExport === 'function'
-    ? await projectExport({ command: 'serve', mode: 'development' })
-    : projectExport;
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Resolve the project's own Vite config so its plugins (laravel-vite-
+// plugin, @vitejs/plugin-vue, vuetify, …) and aliases survive the
+// merge. We can't `await import('./vite.config.ts')` because Node's
+// native ESM loader has no TypeScript transformer — the import throws
+// ERR_MODULE_NOT_FOUND, the fallback hits a non-existent .js file,
+// and `mergeConfig(undefined, overlay)` quietly drops the project's
+// plugins. Vite still boots (the overlay is a valid config) but
+// laravel-vite-plugin never runs, so public/hot is never written and
+// every Laravel page 500s with ViteManifestNotFoundException.
+//
+// Vite ships `loadConfigFromFile` for exactly this case: it bundles
+// the candidate file with esbuild on the fly so .ts / .js / .mjs
+// all work uniformly.
+async function loadProjectConfig() {
+  for (const candidate of ['vite.config.ts', 'vite.config.js', 'vite.config.mjs']) {
+    const abs = pathResolve(__dirname, candidate);
+    if (!existsSync(abs)) continue;
+    try {
+      const result = await loadConfigFromFile(
+        { command: 'serve', mode: 'development' },
+        abs,
+      );
+      if (result?.config) {
+        console.log(`[tagh] loaded project config from ${candidate}`);
+        return result.config;
+      }
+    } catch (err) {
+      console.warn(`[tagh] failed to load ${candidate}: ${err?.message || err}`);
+    }
+  }
+  console.warn('[tagh] no project vite config found — overlay-only fallback (laravel-vite-plugin will NOT run)');
+  return {};
+}
+
+const projectConfig = await loadProjectConfig();
 
 const overlay = defineConfig({
   server: {
