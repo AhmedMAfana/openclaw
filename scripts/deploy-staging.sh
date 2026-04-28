@@ -212,8 +212,15 @@ fi
 # Run migrations to completion.
 \$COMPOSE run --rm migrate
 
-# App services.
-\$COMPOSE up -d api bot worker dozzle
+# App services. --force-recreate is critical: when only the image
+# *content* changed (FROM rebuilt with new code) but the tag didn't
+# (\`:latest\` → \`:latest\`), \`compose up -d\` is a no-op — it sees the
+# tag is unchanged and leaves the running container alone. Symptom:
+# you SSH in 2 hours after deploy and find the worker still running
+# yesterday's bytecode while disk has today's source. Force-recreate
+# guarantees the new image actually starts.
+\$COMPOSE up -d --force-recreate api bot worker
+\$COMPOSE up -d dozzle
 
 # Existing activity_logs named volume might have wrong (root) ownership
 # from before Dockerfile.app's mkdir+chown of /app/logs landed. Docker
