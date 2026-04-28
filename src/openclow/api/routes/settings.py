@@ -655,51 +655,16 @@ async def list_projects():
         return result.scalars().all()
 
 
-@router.post("/projects", response_model=ProjectResponse)
-async def create_project(body: ProjectCreate):
-    from sqlalchemy.exc import IntegrityError
-
-    async with async_session() as session:
-        project = Project(**body.model_dump())
-        session.add(project)
-        try:
-            await session.commit()
-        except IntegrityError:
-            await session.rollback()
-            raise HTTPException(400, f"Project '{body.name}' already exists")
-        await session.refresh(project)
-        return project
-
-
-@router.put("/projects/{project_id}", response_model=ProjectResponse)
-async def update_project(project_id: int, body: ProjectUpdate):
-    async with async_session() as session:
-        project = await session.get(Project, project_id)
-        if not project:
-            raise HTTPException(404, "Project not found")
-        for field, value in body.model_dump(exclude_unset=True).items():
-            setattr(project, field, value)
-        await session.commit()
-        await session.refresh(project)
-        return project
-
-
-@router.delete("/projects/{project_id}")
-async def delete_project(project_id: int):
-    async with async_session() as session:
-        project = await session.get(Project, project_id)
-        if not project:
-            raise HTTPException(404, "Project not found")
-        project.status = "inactive"
-        await session.commit()
-    return {"status": "ok", "message": f"Project '{project.name}' deactivated"}
-
-
 @router.get("/projects/github-repos")
 async def list_github_repos():
     """List repos the configured GitHub PAT can see — owner + collaborator
     + org-member affiliated. Used by the Settings → Add Project modal so
     the user picks from a dropdown instead of typing `owner/repo` by hand.
+
+    Defined BEFORE `/projects/{project_id}` routes so FastAPI doesn't
+    interpret `github-repos` as a project_id path parameter and return
+    405. (Static-segment routes must precede `{param}` routes that share
+    the same prefix.)
 
     Reads `git/provider.github.token` from platform_config. Returns a
     flat list of `{full_name, default_branch, private, description}`
@@ -755,6 +720,46 @@ async def list_github_repos():
                 break
     repos.sort(key=lambda r: (r["full_name"] or "").lower())
     return {"repos": repos, "count": len(repos)}
+
+
+@router.post("/projects", response_model=ProjectResponse)
+async def create_project(body: ProjectCreate):
+    from sqlalchemy.exc import IntegrityError
+
+    async with async_session() as session:
+        project = Project(**body.model_dump())
+        session.add(project)
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            raise HTTPException(400, f"Project '{body.name}' already exists")
+        await session.refresh(project)
+        return project
+
+
+@router.put("/projects/{project_id}", response_model=ProjectResponse)
+async def update_project(project_id: int, body: ProjectUpdate):
+    async with async_session() as session:
+        project = await session.get(Project, project_id)
+        if not project:
+            raise HTTPException(404, "Project not found")
+        for field, value in body.model_dump(exclude_unset=True).items():
+            setattr(project, field, value)
+        await session.commit()
+        await session.refresh(project)
+        return project
+
+
+@router.delete("/projects/{project_id}")
+async def delete_project(project_id: int):
+    async with async_session() as session:
+        project = await session.get(Project, project_id)
+        if not project:
+            raise HTTPException(404, "Project not found")
+        project.status = "inactive"
+        await session.commit()
+    return {"status": "ok", "message": f"Project '{project.name}' deactivated"}
 
 
 # ---------------------------------------------------------------------------
