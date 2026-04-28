@@ -161,30 +161,27 @@ services:
       - instance
 
   db:
-    image: mysql:8.4
+    # MariaDB instead of mysql:8.4. Reasons:
+    #   1. Alpine's `mysql-client` package (in the per-instance app
+    #      image) is actually mariadb-client — it doesn't ship MySQL
+    #      8.4's `caching_sha2_password` auth plugin. Connecting to
+    #      mysql:8.4 fails with "Plugin caching_sha2_password could
+    #      not be loaded: No such file or directory".
+    #   2. MariaDB defaults to mysql_native_password, no plugin
+    #      hunting required, mariadb-client just works.
+    #   3. Wire-protocol compatible — Laravel PDO mysql driver and
+    #      gecche multidomain queries work unchanged.
+    #   4. Lower default memory footprint (~140 MB vs ~250 MB).
+    image: mariadb:11
     restart: unless-stopped
     mem_limit: ${INSTANCE_MEM_DB:-512m}
-    mem_reservation: 192m
-    # MySQL's defaults assume a dedicated host. Tell it to keep its
-    # buffer pool small and skip the perf schema so it actually fits
-    # in the 512m cap above. Without these the OOM killer hits
-    # mysqld during heavy migrations on small droplets.
-    # NOTE: do NOT pass --default-authentication-plugin here — that
-    # flag was removed in MySQL 8.4 and the server refuses to start
-    # with "unknown variable". caching_sha2_password is the default
-    # in 8.4 anyway. (Was a bug in our 2026-04-28 template change.)
-    #
-    # `--tls-version=` (empty value) disables TLS entirely on the
-    # server. MySQL 8.4 ships with auto-generated self-signed certs
-    # and offers TLS by default; any artisan command (or laravel-
-    # multidomain's gecche package, or any migration script) that
-    # shells out to the `mysql` CLI then fails with
-    # "TLS/SSL error: self-signed certificate in certificate chain"
-    # because the client can't verify the cert chain. The whole
-    # per-instance compose network is on a private bridge — no
-    # eavesdropper exists between containers — so plaintext is
-    # safe and removes a class of TLS-handshake gotchas. (2026-04-28
-    # tagh-test migrate failure caught this.)
+    mem_reservation: 128m
+    # `--tls-version=` (empty) disables TLS server-side. MariaDB,
+    # like MySQL 8.4, ships self-signed certs by default; any artisan
+    # / gecche command that shells out to the mysql CLI then fails
+    # with "TLS/SSL error: self-signed certificate in certificate
+    # chain". Per-instance compose network is private — plaintext is
+    # safe and avoids a whole class of cert-chain gotchas.
     command:
       - --innodb-buffer-pool-size=128M
       - --performance-schema=OFF
