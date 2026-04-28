@@ -159,19 +159,34 @@ case "${STEP}:${VARIANT}" in
     # command with `--domain=<host>` to pick which .env.<host> file to
     # read. So it's `php artisan migrate --domain=...` (NOT
     # `domain:migrate` which doesn't exist in this package).
-    migrate:multidomain-gecche)
-        php artisan migrate --domain="${INSTANCE_HOST}" --force
-        ;;
-    migrate:multidomain-spatie)
-        php artisan migrate --force --path=database/migrations/landlord
-        php artisan tenants:artisan "migrate --force"
-        ;;
-    migrate:multidomain-stancl)
-        php artisan migrate --force
-        php artisan tenants:migrate --force
-        ;;
-    migrate:*)
-        php artisan migrate --force
+    #
+    # SHARED SETUP: remove any committed schema dumps (database/schema/*.sql).
+    # When Laravel sees a dump file it loads it FIRST then runs migrations —
+    # which conflicts whenever the dump's snapshot date is older than the
+    # newest migration files (Laravel re-runs the same CREATE TABLE
+    # statements and dies with `Base table or view already exists`). On
+    # an ephemeral per-chat dev DB starting empty there's no perf benefit
+    # to the dump shortcut, so unconditionally take the migrations-only
+    # path. (Caught on tagh-test 2026-04-28 — `mysql-schema.sql` had
+    # `brands` plus a newer `create_brands_table.php` migration.)
+    migrate:multidomain-gecche|migrate:multidomain-spatie|migrate:multidomain-stancl|migrate:*)
+        rm -f database/schema/*.sql 2>/dev/null || :
+        case "${VARIANT}" in
+            multidomain-gecche)
+                php artisan migrate --domain="${INSTANCE_HOST}" --force
+                ;;
+            multidomain-spatie)
+                php artisan migrate --force --path=database/migrations/landlord
+                php artisan tenants:artisan "migrate --force"
+                ;;
+            multidomain-stancl)
+                php artisan migrate --force
+                php artisan tenants:migrate --force
+                ;;
+            *)
+                php artisan migrate --force
+                ;;
+        esac
         ;;
 
     # seed: optional seed data. Same `--domain` rule as migrate for gecche.
