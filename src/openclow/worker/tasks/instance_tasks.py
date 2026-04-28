@@ -290,6 +290,16 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
             slug=slug,
         )
 
+        # 3.6. Detect project variant from the cloned tree (composer.json).
+        # Drives the per-step dispatch in the bundled `_variant.sh`. Pure
+        # function — no DB, no network. Never raises (falls back to
+        # "normal" on any read/parse failure).
+        project_variant = _detect_project_variant(workspace_path)
+        log.info(
+            "provision_instance.variant_detected",
+            slug=slug, variant=project_variant,
+        )
+
         # 4. docker compose up -p <compose_project> -f _compose.yml -d.
         # Secrets injected via env; never touch disk.
         await _compose_up(
@@ -306,6 +316,11 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
                 "TUNNEL_TOKEN": tunnel_result.credentials_blob,
                 "COMPOSER_AUTH": composer_auth,
                 "APP_KEY": app_key,
+                # Variant — flows into the app container, used by the
+                # bundled _variant.sh dispatcher to pick the right
+                # per-step commands (e.g. domain:add + domain:migrate
+                # for gecche/laravel-multidomain).
+                "PROJECT_VARIANT": project_variant,
             },
         )
 
@@ -628,31 +643,48 @@ async def _make_workspace_shared_writable(
     if not host_workspace_dir:
         log.warning("workspace_perms.no_host_path", slug=slug)
         return
-    src = f"{host_workspace_dir}/{slug}"
 
-    # One-shot alpine as root, chmod the whole tree to 0777 so any uid
-    # in any sibling container can read+write+exec.
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "run", "--rm",
-        "-v", f"{src}:/w",
-        "alpine:latest", "chmod", "-R", "0777", "/w",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    # The worker just cloned the repo, so it owns every file as
+    # openclow (uid 1000). chmod 0777 doesn't require root — only
+    # owner. So do it locally in Python, no docker run needed. Earlier
+    # version used a one-shot alpine container; that broke when the
+    # local docker daemon couldn't pull `alpine:latest` (containerd
+    # corruption after a docker disk resize). Local chmod has zero
+    # external dependencies.
+    #
+    # The path inside THIS worker container is `workspace_path`
+    # (which is `/workspaces/<slug>/` on the worker fs, bind-mounted
+    # to/from the host's workspaces volume). Use that — `host_workspace_dir`
+    # is the HOST-side path, not visible to this Python process.
+    workspace_path = pathlib.Path("/workspaces") / slug
+    if not workspace_path.is_dir():
+        log.warning(
+            "workspace_perms.path_not_found",
+            slug=slug, expected_path=str(workspace_path),
+        )
+        return
+
+    count = 0
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
-    except asyncio.TimeoutError:
-        proc.kill()
+        # 0o777 on the root dir first so subsequent file walks succeed
+        # even if some intermediate dir is permission-locked.
+        workspace_path.chmod(0o777)
+        for entry in workspace_path.rglob("*"):
+            try:
+                entry.chmod(0o777)
+                count += 1
+            except (OSError, PermissionError):
+                # Symlinks to absent targets, sockets, etc — keep going.
+                continue
+    except OSError as e:
         raise _ProvisionFailure(
             FailureCode.PROJCTL_UP,
-            f"workspace chmod timed out (60s) for {src}",
+            f"workspace chmod failed at {workspace_path}: {e}",
         )
-    if proc.returncode != 0:
-        raise _ProvisionFailure(
-            FailureCode.PROJCTL_UP,
-            f"workspace chmod failed (rc={proc.returncode}): {err.decode()[:300]}",
-        )
-    log.info("workspace_perms.shared_writable", slug=slug, host_path=src)
+    log.info(
+        "workspace_perms.shared_writable",
+        slug=slug, path=str(workspace_path), files_chmodded=count,
+    )
 
 
 async def _compose_up(
@@ -904,14 +936,13 @@ async def _mark_failed(
         # against the same session_branch ("fatal: '<branch>' is already
         # used by worktree at <path>"). teardown_instance is idempotent
         # so this is safe even if the partial state is already cleaned.
-        try:
-            from openclow.services.instance_service import _default_enqueuer
-            await _default_enqueuer("teardown_instance", str(instance_id))
-        except Exception as e:
-            log.warning(
-                "_mark_failed.teardown_enqueue_failed",
-                instance_id=str(instance_id), error=str(e)[:200],
-            )
+        from openclow.models.instance import TerminatedReason
+        from openclow.services.bot_actions import enqueue_job
+        await enqueue_job(
+            "teardown_instance",
+            instance_id=str(instance_id),
+            reason=TerminatedReason.FAILED.value,
+        )
     except Exception as e:  # pragma: no cover
         log.exception("_mark_failed.error", error=str(e))
 
@@ -959,6 +990,53 @@ def _template_dir_for_instance(instance_id: UUID) -> pathlib.Path:
     """
     base = pathlib.Path(__file__).resolve().parents[2] / "setup" / "compose_templates"
     return base / "laravel-vue"
+
+
+# Maps `composer.json` package name → variant string. The variant
+# flows through the `PROJECT_VARIANT` env var into the per-instance
+# `app` container, where the bundled `_variant.sh` script dispatches
+# step-by-step based on this string. Adding a 4th variant here is
+# the only place to extend for "command-only" differences (no template
+# fork needed). Order matters when a project happens to require two
+# of these — first match wins; in practice they're mutually exclusive.
+_VARIANT_PACKAGES: dict[str, str] = {
+    "gecche/laravel-multidomain": "multidomain-gecche",
+    "spatie/laravel-multitenancy": "multidomain-spatie",
+    "stancl/tenancy": "multidomain-stancl",
+}
+
+
+def _detect_project_variant(workspace_path: str) -> str:
+    """Inspect the cloned project's ``composer.json`` and pick a variant.
+
+    Returns one of: ``"normal"`` (default Laravel single-tenant — what
+    every existing chat used), or one of the multi-domain variants in
+    ``_VARIANT_PACKAGES``. Pure function — no DB, no network. Safe to
+    call from anywhere in provision_instance.
+
+    Failure modes (missing file, malformed JSON, IO error) all fall
+    through to ``"normal"`` with a warning log — preserves today's
+    behaviour for non-PHP projects (no composer.json) and for any
+    transient read failure (we'd rather provision wrong than crash).
+    """
+    composer_path = pathlib.Path(workspace_path) / "composer.json"
+    if not composer_path.is_file():
+        return "normal"
+    try:
+        data = json.loads(composer_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        log.warning(
+            "variant_detect.composer_read_failed",
+            path=str(composer_path), error=str(e)[:200],
+        )
+        return "normal"
+    require = data.get("require") or {}
+    require_dev = data.get("require-dev") or {}
+    pkgs = set(require.keys()) | set(require_dev.keys())
+    for pkg, variant in _VARIANT_PACKAGES.items():
+        if pkg in pkgs:
+            return variant
+    return "normal"
 
 
 # Provision-step progress mirror — keys MUST match the step `name`
@@ -1136,13 +1214,31 @@ async def _wait_for_first_paint(
         while True:
             now = asyncio.get_event_loop().time()
             if now >= deadline:
-                raise _ProvisionFailure(
-                    FailureCode.HEALTH_CHECK,
-                    f"first-paint gate timed out after {timeout_s}s "
-                    f"(last_status={last_status}, last_error={last_error}). "
-                    f"App did not serve a clean 200 — check node logs for Vite "
-                    f"errors and app logs for Laravel exceptions."
+                # First-paint timeout no longer fails the provision. The
+                # platform's job is to bring infrastructure up; if the
+                # user's application code (Vite config, dep conflicts,
+                # Laravel exception) keeps the app from rendering, we
+                # still want them in the chat with a working agent so
+                # they can DEBUG the app — not a dead "failed" card.
+                # The instance flips to running with a degraded upstream
+                # marker; the chat UI surfaces a "App not responding"
+                # banner so the user knows to ask the agent to fix it.
+                log.warning(
+                    "provision_instance.first_paint_timeout_degraded",
+                    slug=slug, last_status=last_status,
+                    last_error=last_error, timeout_s=timeout_s,
                 )
+                if instance_id:
+                    await _publish_progress_step(
+                        instance_id=instance_id,
+                        completed_step_index=3,
+                        stream_buffer_append=(
+                            f"App did not serve a clean 200 within {timeout_s}s "
+                            f"(last_status={last_status}, last_error={last_error}). "
+                            "Marking instance live anyway — ask the agent to debug."
+                        ),
+                    )
+                return
             try:
                 resp = await client.get(public_url)
                 last_status = resp.status_code
@@ -1203,12 +1299,22 @@ def _copy_template_support_files(
         ("nginx.conf", "_nginx.conf"),
         ("guide.md", "guide.md"),
         ("project.yaml", "project.yaml"),
+        # _variant.sh is the dispatcher invoked by every variant-aware
+        # guide.md step (`sh /var/www/html/_variant.sh <step>`). Must be
+        # present in the workspace before compose-up so the bind-mount
+        # has it ready when projctl tries to exec.
+        ("_variant.sh", "_variant.sh"),
     ):
         src = template_dir / src_name
         if not src.is_file():
             continue
         dst = output_dir / dst_name
         dst.write_bytes(src.read_bytes())
+        # Make _variant.sh executable inside the bind-mount; the cp
+        # above preserves bytes but not modes when the destination is
+        # newly created on certain filesystems.
+        if dst_name == "_variant.sh":
+            dst.chmod(0o755)
 
 
 def _heartbeat_url_for(slug: str) -> str:

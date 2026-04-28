@@ -36,7 +36,12 @@ import urllib.request
 REPO = pathlib.Path(__file__).resolve().parents[2]
 TEMPLATE_DIR = REPO / "src" / "openclow" / "setup" / "compose_templates" / "laravel-vue"
 TEMPLATE_FILES = ("compose.yml", "cloudflared.yml", "project.yaml",
-                  "vite.config.js", "nginx.conf", "guide.md")
+                  "vite.config.js", "guide.md", "_variant.sh")
+# Note: nginx.conf is NOT required — the serversideup/php-alpine base
+# image ships its own nginx config (s6-supervised). The historical
+# `_copy_template_support_files` reference to nginx.conf is a no-op
+# (skipped when the file doesn't exist). _variant.sh IS required:
+# it's the dispatcher invoked by every variant-aware guide.md step.
 
 
 def _result(name: str, ok: bool, **kw):

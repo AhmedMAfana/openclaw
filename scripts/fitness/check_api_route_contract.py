@@ -39,6 +39,18 @@ FRONTEND_DIR = REPO / "chat_frontend" / "src"
 # pages.py HTML router that lives outside routes/.
 _FRONTEND_ONLY_OK: set[str] = {
     "/api/auth/login",   # if served by middleware, not a router
+    # Spec 003 admin Instances detail view dispatches the four action
+    # endpoints (terminate / reprovision / rotate-token / extend-expiry)
+    # through a tiny client-side router (`postAction(action, body)` in
+    # SettingsInstances.tsx). The url is built as
+    # `/api/admin/instances/${slug}/${path}` where ${path} resolves at
+    # runtime to one of those four — all of which ARE registered in
+    # admin_instances.py. The static linter can't trace dynamic
+    # `${path}` segments, so it sees one URL and matches no route.
+    # Each concrete URL pattern (e.g. /api/admin/instances/{slug}/terminate)
+    # is also visible to the linter via the explicit fetch sites — those
+    # match. This whitelist suppresses ONLY the dynamic-dispatch parent.
+    "/api/admin/instances/${slug}/${path}",
 }
 
 # Backend routes that legitimately have no frontend caller — e.g.

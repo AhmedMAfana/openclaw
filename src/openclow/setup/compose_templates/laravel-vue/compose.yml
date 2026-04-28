@@ -50,6 +50,12 @@ services:
       # this name so private VCS deps (gitlab.com, private GitHub repos)
       # can clone without writing auth.json to the per-instance disk.
       - COMPOSER_AUTH
+      # PROJECT_VARIANT is set by the orchestrator from
+      # _detect_project_variant(workspace) — drives the per-step
+      # dispatch in the bundled `_variant.sh` script. One of:
+      # "normal", "multidomain-gecche", "multidomain-spatie",
+      # "multidomain-stancl". Default "normal" if unset.
+      - PROJECT_VARIANT=${PROJECT_VARIANT:-normal}
     volumes:
       - ${WORKSPACE_HOST_DIR}/${INSTANCE_SLUG}:/var/www/html
       - projctl-state:/var/lib/projctl
@@ -73,14 +79,22 @@ services:
       - sh
       - -c
       - |
-        if [ ! -d /var/www/html/node_modules ]; then
-          (cd /var/www/html && npm ci);
+        set -e
+        cd /var/www/html
+        # Real-world Laravel/Vue projects (e.g. Vuexy admin templates)
+        # have peer-dep conflicts that strict `npm ci` rejects with
+        # ERESOLVE. --legacy-peer-deps mirrors what these projects'
+        # READMEs tell humans to do. Fall back to `npm install` if the
+        # lockfile is missing/stale (npm ci is strict about both).
+        if [ ! -d node_modules ] || [ ! -e node_modules/vite ]; then
+          npm ci --legacy-peer-deps \
+            || npm install --legacy-peer-deps --no-audit --no-fund
         fi
         # Use the platform's Vite overlay config (vite.config.tagh.mjs)
         # so server.origin points at the cloudflared HMR hostname and
         # laravel-vite-plugin writes the public URL to public/hot —
         # otherwise the browser tries 0.0.0.0:5173 and fails.
-        cd /var/www/html && exec npx vite --config vite.config.tagh.mjs --host 0.0.0.0
+        exec npx vite --config vite.config.tagh.mjs --host 0.0.0.0
     environment:
       - INSTANCE_HOST=${INSTANCE_HOST}
       - INSTANCE_HMR_HOST=${INSTANCE_HMR_HOST}

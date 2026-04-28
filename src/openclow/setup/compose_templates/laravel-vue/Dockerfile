@@ -37,7 +37,23 @@ COPY --from=projctl-bin /projctl /usr/local/bin/projctl
 #     packages that can't be served from dist). Composer's fallback
 #     blows up with "git was not found in your PATH" without it.
 USER root
-RUN apk add --no-cache mysql-client git \
+# PHP extensions needed by the wider Laravel ecosystem this template
+# supports. Default serversideup/php-alpine ships pdo_mysql, mbstring,
+# pcntl, redis, etc. — but NOT gd or exif. Real-world Laravel apps in
+# the tagh-* fleet require:
+#   - gd:    image processing (milon/barcode, phpspreadsheet, fpdf,
+#            simple-qrcode, intervention/image)
+#   - exif:  EXIF metadata (spatie/image, spatie/laravel-medialibrary)
+# Caught running tagh-test (composer install dies with "ext-gd is
+# missing from your system" + the same for exif).
+#
+# serversideup ships PHP themselves (NOT alpine's php84-* packages),
+# so `apk add php84-gd` installs into a different php binary that
+# isn't loaded. Their documented mechanism is the `install-php-extensions`
+# helper (https://serversideup.net/open-source/docker-php/docs/getting-started/installing-additional-php-extensions),
+# which knows how to wire extensions into THEIR php build.
+RUN install-php-extensions gd exif \
+ && apk add --no-cache mysql-client git \
  && chmod 0755 /usr/local/bin/projctl \
  # Pre-create projctl's state dir and hand ownership to the runtime
  # user. The compose file mounts a named volume here; docker copies

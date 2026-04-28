@@ -7,6 +7,12 @@
 #     (its compose `command:` block). Do not run npm from this guide.
 #
 # What projctl owns: project-level deps + DB migrations + queue worker.
+#
+# Variant-aware steps (`setup-env`, `migrate`, `seed`) dispatch through
+# `_variant.sh` based on PROJECT_VARIANT (set by the orchestrator from
+# composer.json detection). Variants today: normal,
+# multidomain-gecche, multidomain-spatie, multidomain-stancl. See
+# _variant.sh for per-variant commands.
 
 ## install-php
 
@@ -24,23 +30,61 @@ Installs PHP dependencies via Composer. Required before `artisan migrate`.
 Reads `COMPOSER_AUTH` env (set by the orchestrator from /app/auth.json) for
 private VCS auth.
 
+## setup-env
+
+```projctl
+cmd: sh /var/www/html/_variant.sh setup-env
+cwd: /var/www/html
+success_check: test -f /var/www/html/.env -o -f /var/www/html/.env.${INSTANCE_HOST}
+skippable: false
+max_attempts: 1
+timeout_seconds: 30
+```
+
+Provisions the per-domain .env file(s) before any artisan command.
+Vanilla Laravel: copies .env.example → .env and sed-overrides DB/APP_URL/etc.
+gecche/laravel-multidomain: writes .env.${INSTANCE_HOST} and registers
+the domain via `php artisan domain:add`. Other multidomain variants
+fall through to the vanilla .env path.
+
 ## migrate
 
 ```projctl
-cmd: php artisan migrate --force
+cmd: sh /var/www/html/_variant.sh migrate
 cwd: /var/www/html
-success_check: php artisan migrate --pretend > /dev/null
+success_check: sh /var/www/html/_variant.sh migrate --check 2>/dev/null || php artisan migrate --pretend > /dev/null
 skippable: false
 max_attempts: 2
-timeout_seconds: 120
+timeout_seconds: 300
 ```
 
 Runs DB migrations against the per-instance MySQL.
+Variant-aware: normal Laravel uses `migrate --force`; gecche uses
+`domain:migrate --domain=$INSTANCE_HOST --force`; spatie/stancl run
+their per-tenant migrate commands. See _variant.sh.
+
+## seed-admin
+
+```projctl
+cmd: sh /var/www/html/_variant.sh seed-admin
+cwd: /var/www/html
+success_check: test 1 -eq 1
+skippable: true
+max_attempts: 1
+timeout_seconds: 30
+```
+
+Inserts a default Admin user into the per-instance MySQL so the
+SSO / fake-auth `/webapi/set` flow has something to authenticate
+as on a fresh instance. Idempotent (INSERT IGNORE on PK=1) and
+skippable — if the project's users table requires extra NOT NULL
+columns the seeder doesn't know about, the step logs the failure
+but doesn't block the rest of the boot.
 
 ## seed
 
 ```projctl
-cmd: php artisan db:seed --force 2>&1 | tee /tmp/seed.log; grep -qiE "duplicate entry|already exists|integrity constraint" /tmp/seed.log && echo "seed already applied — treating as success" || tail -1 /tmp/seed.log
+cmd: sh /var/www/html/_variant.sh seed 2>&1 | tee /tmp/seed.log; grep -qiE "duplicate entry|already exists|integrity constraint" /tmp/seed.log && echo "seed already applied — treating as success" || tail -1 /tmp/seed.log
 cwd: /var/www/html
 success_check: test 1 -eq 1
 skippable: true
@@ -64,7 +108,7 @@ project-specific assertion (e.g.
 ## storage-link
 
 ```projctl
-cmd: php artisan storage:link
+cmd: sh /var/www/html/_variant.sh storage-link
 cwd: /var/www/html
 success_check: test -L /var/www/html/public/storage
 skippable: true

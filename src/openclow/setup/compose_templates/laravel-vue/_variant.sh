@@ -1,0 +1,233 @@
+#!/bin/sh
+# Per-step dispatch for the laravel-vue template.
+#
+# Invoked from `guide.md` step `cmd:` lines as:
+#   sh /var/www/html/_variant.sh <step-name>
+#
+# Picks commands based on PROJECT_VARIANT (set by the orchestrator
+# from `_detect_project_variant(workspace)` — see
+# `src/openclow/worker/tasks/instance_tasks.py`):
+#
+#   normal              — vanilla Laravel single-tenant
+#   multidomain-gecche  — gecche/laravel-multidomain (per-domain .env files,
+#                         `domain:add` + `domain:migrate` artisan commands)
+#   multidomain-spatie  — spatie/laravel-multitenancy
+#   multidomain-stancl  — stancl/tenancy
+#
+# Adding a new variant: add a new arm here AND add the package name →
+# variant string mapping in `_VARIANT_PACKAGES` in instance_tasks.py.
+# Those two are the ONLY places to extend.
+
+set -e
+STEP="$1"
+VARIANT="${PROJECT_VARIANT:-normal}"
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+# Idempotent upsert: if KEY exists in the .env file → sed-replace it.
+# Otherwise append it. The sed-only pattern would silently miss keys
+# that aren't in .env.example (e.g. PUSHER_* on a project whose example
+# doesn't list them) and the resulting .env would never get the value.
+upsert_env() {
+    file="$1"
+    key="$2"
+    value="$3"
+    if grep -qE "^${key}=" "$file" 2>/dev/null; then
+        # Use a delimiter unlikely to appear in URLs / passwords / JSON.
+        sed -i "s|^${key}=.*|${key}=${value}|" "$file" 2>/dev/null || :
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$file"
+    fi
+}
+
+# Apply per-instance infrastructure overrides to a .env file. Idempotent.
+# Used by both the normal and gecche paths.
+apply_infra_env() {
+    target="$1"
+    upsert_env "$target" APP_URL "https://${INSTANCE_HOST}"
+    upsert_env "$target" APP_SHORT_URL "${INSTANCE_HOST}"
+    upsert_env "$target" APP_ENV local
+    upsert_env "$target" APP_DEBUG true
+    upsert_env "$target" APP_KEY "${APP_KEY}"
+    upsert_env "$target" DB_CONNECTION mysql
+    upsert_env "$target" DB_HOST db
+    upsert_env "$target" DB_PORT 3306
+    upsert_env "$target" DB_DATABASE app
+    upsert_env "$target" DB_USERNAME app
+    upsert_env "$target" DB_PASSWORD "${DB_PASSWORD}"
+    upsert_env "$target" REDIS_HOST redis
+    upsert_env "$target" REDIS_PORT 6379
+    upsert_env "$target" MAIL_HOST mailpit
+    upsert_env "$target" MAIL_PORT 1025
+    upsert_env "$target" MEILISEARCH_HOST "http://meilisearch:7700"
+}
+
+# Apply per-app config that EVERY instance needs regardless of variant
+# (Pusher creds, AMI SSO endpoints). These are the values the user wired
+# into the orchestrator so the deployed app can reach the staging
+# Pusher cluster + AMI's SSO server for the /webapi/set fake-auth flow.
+# Hardcoded here so a brand-new chat instance is functional out of the
+# box; long-term these belong in platform_config so they're outside git.
+apply_app_env() {
+    target="$1"
+    # Pusher (real-time messaging)
+    upsert_env "$target" PUSHER_APP_ID 1755863
+    upsert_env "$target" PUSHER_APP_KEY e315dd664caa7dedee07
+    upsert_env "$target" PUSHER_APP_SECRET e315dd664caa7dedee07
+    upsert_env "$target" PUSHER_SCHEME https
+    upsert_env "$target" PUSHER_APP_CLUSTER ap2
+    # AMI SSO endpoints (staging) — used by the fake-auth /webapi/set flow.
+    upsert_env "$target" AUTH_SERVER_URL "https://sso-back.staging-ami.com/"
+    upsert_env "$target" AUTH_FE_SERVER_URL "https://sso.staging-ami.com/#/"
+    upsert_env "$target" AUTH_SERVER_CLIENT_ID 0199bf2e-1a90-727e-b305-c71284ee9044
+    upsert_env "$target" AUTH_SERVER_CLIENT_SECRET lFNaMPhHykAWL9Wpl3JKKKoWYvYrTR9gOcsrQIFI
+    # serversideup/php image honors WWWUSER/WWWGROUP for the runtime user
+    # (tagh-test's own docker-compose.yml uses these too).
+    upsert_env "$target" WWWUSER 1000
+    upsert_env "$target" WWWGROUP 1000
+}
+
+# gecche/laravel-multidomain setup. Per the package README:
+#   - `domain:add <host>` creates `.env.<host>` AS A COPY OF `.env`
+#     (NOT .env.example), and adds an entry to config/domain.php's
+#     `domains` array.
+#   - Migrations / seeds / any standard artisan command then take
+#     `--domain=<host>` to pick which env file to read.
+#
+# Critical sequencing: `.env` must exist AND have the right
+# infrastructure values BEFORE `domain:add` runs, because
+# `domain:add` snapshots `.env` into `.env.<host>` at that moment.
+gecche_setup_env() {
+    if [ -z "$INSTANCE_HOST" ]; then
+        echo "_variant.sh: INSTANCE_HOST not set — gecche setup-env can't proceed" >&2
+        exit 3
+    fi
+    if [ ! -f .env ]; then
+        if [ ! -f .env.example ]; then
+            echo "_variant.sh: neither .env nor .env.example present — can't bootstrap" >&2
+            exit 4
+        fi
+        cp .env.example .env
+    fi
+    # Apply infra + app config to .env BEFORE domain:add so they're
+    # inherited by .env.<INSTANCE_HOST>.
+    apply_infra_env .env
+    apply_app_env .env
+    # Register the domain. domain:add creates .env.<INSTANCE_HOST>
+    # from .env. Tolerate a "domain already exists" failure (e.g. if
+    # an earlier provision attempt left a stale config/domain.php
+    # entry from the cloned repo).
+    php artisan domain:add "${INSTANCE_HOST}" 2>&1 || \
+        echo "  (domain:add returned non-zero — assuming domain already registered)"
+    # Re-apply infra + app config to the per-domain file too. domain:add
+    # may not propagate keys that weren't in .env at copy time (e.g. if
+    # a previous run left a stale .env.<host>); upsert_env handles both
+    # missing-key (append) and present-key (replace) paths.
+    if [ -f ".env.${INSTANCE_HOST}" ]; then
+        apply_infra_env ".env.${INSTANCE_HOST}"
+        apply_app_env ".env.${INSTANCE_HOST}"
+    fi
+}
+
+# Vanilla single-tenant Laravel needs a .env file at root for
+# php-fpm + artisan to read. Most templates don't ship one.
+normal_setup_env() {
+    if [ ! -f .env ] && [ -f .env.example ]; then
+        cp .env.example .env
+    fi
+    if [ -f .env ]; then
+        apply_infra_env .env
+        apply_app_env .env
+    fi
+}
+
+# ── Dispatch ────────────────────────────────────────────────────────────────
+
+case "${STEP}:${VARIANT}" in
+
+    # setup-env: prepare .env file(s) before any artisan command. Always
+    # the first projctl step. Variant-specific because gecche needs a
+    # per-domain .env.<host>, vanilla wants a single .env.
+    setup-env:multidomain-gecche)
+        gecche_setup_env
+        ;;
+    setup-env:*)
+        normal_setup_env
+        ;;
+
+    # migrate: schema migrations. gecche extends EVERY standard artisan
+    # command with `--domain=<host>` to pick which .env.<host> file to
+    # read. So it's `php artisan migrate --domain=...` (NOT
+    # `domain:migrate` which doesn't exist in this package).
+    migrate:multidomain-gecche)
+        php artisan migrate --domain="${INSTANCE_HOST}" --force
+        ;;
+    migrate:multidomain-spatie)
+        php artisan migrate --force --path=database/migrations/landlord
+        php artisan tenants:artisan "migrate --force"
+        ;;
+    migrate:multidomain-stancl)
+        php artisan migrate --force
+        php artisan tenants:migrate --force
+        ;;
+    migrate:*)
+        php artisan migrate --force
+        ;;
+
+    # seed: optional seed data. Same `--domain` rule as migrate for gecche.
+    seed:multidomain-gecche)
+        php artisan db:seed --domain="${INSTANCE_HOST}" --force
+        ;;
+    seed:multidomain-spatie)
+        php artisan db:seed --force
+        php artisan tenants:artisan "db:seed --force" || :
+        ;;
+    seed:*)
+        php artisan db:seed --force
+        ;;
+
+    # seed-admin: insert a default Admin user so /webapi/set + the
+    # SSO/fake-auth flow have something to authenticate as on a fresh
+    # instance. Idempotent via INSERT IGNORE on the primary key.
+    # Schema-tolerant: uses only columns that exist in a vanilla
+    # Laravel users table (id, name, email, created_at, updated_at).
+    # If tagh-test's users table requires additional NOT NULL columns
+    # (e.g. password), the INSERT silently fails and the step is
+    # logged but not a hard failure (skippable: true in guide.md).
+    seed-admin:multidomain-gecche|seed-admin:*)
+        # Use a heredoc so the SQL is readable. Connect via mysql
+        # client to the per-instance db service. The values mirror
+        # the user's "default seed for our instances" spec.
+        mysql -h db -u app -p"${DB_PASSWORD}" app <<'SQL' 2>&1 || \
+            echo "  (seed-admin INSERT failed — schema may require non-default columns; skipping)"
+INSERT IGNORE INTO users (id, name, email, uuid, created_at, updated_at)
+VALUES (1, 'Admin', 'admin@admin.com',
+        '0199bf2d-406d-71e6-b6b2-f28f8256c6df',
+        '2025-11-23 22:01:59',
+        '2025-11-23 22:02:03');
+SQL
+        ;;
+
+    # storage-link: gecche docs note that --domain is honored on this
+    # command but the symlink name is hardcoded by Laravel core to
+    # `storage`. For our single-domain-per-instance use case the standard
+    # link is what we want; gecche-specific multi-link setups (one
+    # symlink per registered domain) aren't needed here.
+    storage-link:*)
+        php artisan storage:link
+        ;;
+
+    # config-cache: optional, gecche generates per-domain config-<host>.php
+    # files when --domain is passed. Useful in production for boot speed.
+    config-cache:multidomain-gecche)
+        php artisan config:cache --domain="${INSTANCE_HOST}"
+        ;;
+    config-cache:*)
+        php artisan config:cache
+        ;;
+
+    *)
+        echo "_variant.sh: unknown step '${STEP}' for variant '${VARIANT}'" >&2
+        exit 2
+        ;;
+esac
