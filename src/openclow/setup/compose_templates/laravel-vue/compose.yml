@@ -132,10 +132,13 @@ services:
     # buffer pool small and skip the perf schema so it actually fits
     # in the 512m cap above. Without these the OOM killer hits
     # mysqld during heavy migrations on small droplets.
+    # NOTE: do NOT pass --default-authentication-plugin here — that
+    # flag was removed in MySQL 8.4 and the server refuses to start
+    # with "unknown variable". caching_sha2_password is the default
+    # in 8.4 anyway. (Was a bug in our 2026-04-28 template change.)
     command:
       - --innodb-buffer-pool-size=128M
       - --performance-schema=OFF
-      - --default-authentication-plugin=caching_sha2_password
     environment:
       - MYSQL_DATABASE=app
       - MYSQL_USER=app
