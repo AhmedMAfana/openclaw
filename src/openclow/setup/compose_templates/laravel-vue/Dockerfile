@@ -65,7 +65,16 @@ RUN install-php-extensions gd exif \
  # downgrades to REQUIRED on some builds. ssl-mode=DISABLED forces
  # plaintext, matching what the server now offers.
  && mkdir -p /etc/my.cnf.d /etc/mysql/conf.d \
- && printf '[client]\nssl-mode=DISABLED\n' | tee /etc/my.cnf.d/no-ssl.cnf /etc/mysql/conf.d/no-ssl.cnf >/dev/null \
+ # Alpine's `mysql-client` is mariadb-client — uses `ssl=0` (MariaDB
+ # syntax). Oracle MySQL uses `ssl-mode=DISABLED`. Either client errors
+ # on the OTHER's option name in shared [client], so use the tool-
+ # specific section names so each only reads its own:
+ #   [client-mariadb] → MariaDB CLI
+ #   [client-mysql]   → Oracle mysql CLI (8.x)
+ # Plus `loose-` prefix on a [client] fallback so unknown options
+ # become warnings, not errors, on whichever client reads it.
+ && printf '[client]\nloose-ssl=0\nloose-ssl-mode=DISABLED\n[client-mariadb]\nssl=0\n[client-mysql]\nssl-mode=DISABLED\n' \
+    | tee /etc/my.cnf.d/no-ssl.cnf /etc/mysql/conf.d/no-ssl.cnf >/dev/null \
  # Pre-create projctl's state dir and hand ownership to the runtime
  # user. The compose file mounts a named volume here; docker copies
  # the mount-point's existing ownership onto the named volume on
