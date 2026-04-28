@@ -173,9 +173,22 @@ services:
     # flag was removed in MySQL 8.4 and the server refuses to start
     # with "unknown variable". caching_sha2_password is the default
     # in 8.4 anyway. (Was a bug in our 2026-04-28 template change.)
+    #
+    # `--tls-version=` (empty value) disables TLS entirely on the
+    # server. MySQL 8.4 ships with auto-generated self-signed certs
+    # and offers TLS by default; any artisan command (or laravel-
+    # multidomain's gecche package, or any migration script) that
+    # shells out to the `mysql` CLI then fails with
+    # "TLS/SSL error: self-signed certificate in certificate chain"
+    # because the client can't verify the cert chain. The whole
+    # per-instance compose network is on a private bridge — no
+    # eavesdropper exists between containers — so plaintext is
+    # safe and removes a class of TLS-handshake gotchas. (2026-04-28
+    # tagh-test migrate failure caught this.)
     command:
       - --innodb-buffer-pool-size=128M
       - --performance-schema=OFF
+      - --tls-version=
     environment:
       - MYSQL_DATABASE=app
       - MYSQL_USER=app
