@@ -1175,23 +1175,6 @@ _FIRST_PAINT_LARAVEL_EXCEPTION_MARKERS = (
     "Internal Server Error",
 )
 
-# When ANY of these markers appears in the response body — even at HTTP
-# 5xx — it means the platform is fully up and the app's failure is
-# project-side (broken vite config, missing migration, bad blade
-# import). Short-circuit straight to "running but degraded" so the user
-# can chat with the agent to fix THEIR app instead of staring at the
-# warmup spinner for 180 s. Keep this list narrow: only signals that
-# unambiguously prove the platform reached the app.
-_FIRST_PAINT_APP_BUG_MARKERS = (
-    "Vite manifest not found",          # Laravel @vite() blade, dev mode crashed
-    "ViteManifestNotFoundException",
-    "ViteManifestNotFound",
-    "VITE_MANIFEST_NOT_FOUND",
-    "Spatie\\LaravelIgnition",          # Ignition error page = Laravel rendered
-    "Illuminate\\Foundation",            # Laravel stack trace
-    "Whoops, looks like something went wrong.",
-)
-
 
 async def _wait_for_first_paint(
     *, web_hostname: str, slug: str, timeout_s: int,
@@ -1260,8 +1243,8 @@ async def _wait_for_first_paint(
             try:
                 resp = await client.get(public_url)
                 last_status = resp.status_code
-                body = resp.text if resp.content else ""
                 if resp.status_code == 200:
+                    body = resp.text
                     if any(
                         marker in body
                         for marker in _FIRST_PAINT_LARAVEL_EXCEPTION_MARKERS
@@ -1276,33 +1259,6 @@ async def _wait_for_first_paint(
                         return
                 else:
                     last_error = f"http_{resp.status_code}"
-                    # App-bug short-circuit: if the response body contains
-                    # an unambiguous "the app reached PHP/Laravel and crashed
-                    # on its own code" signal (broken vite config, missing
-                    # migration, blade exception), there's no point waiting
-                    # the full 180s. The platform did its job; flip to
-                    # running-degraded immediately so the user can chat
-                    # with the agent.
-                    if body and any(m in body for m in _FIRST_PAINT_APP_BUG_MARKERS):
-                        log.warning(
-                            "provision_instance.first_paint_app_bug_short_circuit",
-                            slug=slug, status=resp.status_code,
-                            marker_hit=next(
-                                (m for m in _FIRST_PAINT_APP_BUG_MARKERS if m in body),
-                                None,
-                            ),
-                        )
-                        if instance_id:
-                            await _publish_progress_step(
-                                instance_id=instance_id,
-                                completed_step_index=3,
-                                stream_buffer_append=(
-                                    f"App returned {resp.status_code} with a Laravel "
-                                    "exception page (project-level bug, not platform). "
-                                    "Marking instance live — ask the agent to fix."
-                                ),
-                            )
-                        return
             except httpx.HTTPError as e:
                 last_error = type(e).__name__
             poll_count += 1
