@@ -42,6 +42,7 @@ def _load_functions():
         teardown_instance,
         rotate_github_token,
         tunnel_health_check_cron,
+        orphan_compose_sweeper_cron,
     )
     from openclow.worker.tasks.maintenance import gc_session_branch
     return [
@@ -67,6 +68,7 @@ def _load_functions():
         teardown_instance,
         rotate_github_token,
         tunnel_health_check_cron,
+        orphan_compose_sweeper_cron,
         gc_session_branch,
     ]
 
@@ -411,7 +413,10 @@ def _load_cron_jobs():
     default ensures only one worker executes a given tick).
     """
     from openclow.services.inactivity_reaper import reaper_cron
-    from openclow.worker.tasks.instance_tasks import tunnel_health_check_cron
+    from openclow.worker.tasks.instance_tasks import (
+        tunnel_health_check_cron,
+        orphan_compose_sweeper_cron,
+    )
     return [
         cron(
             reaper_cron,
@@ -428,6 +433,20 @@ def _load_cron_jobs():
             tunnel_health_check_cron,
             name="tunnel_health_check",
             second=0,
+            run_at_startup=False,
+            unique=True,
+        ),
+        # Defence-in-depth: every 15 min, find any tagh-inst-*
+        # compose project whose DB row is gone (or terminated/destroyed)
+        # and tear it down. Catches leaks from crashed teardown jobs,
+        # manual `docker stop` on the orchestrator, partial provisions
+        # — anything that orphans containers and leaks RAM/disk.
+        # 2026-04-28 incident: 21 leaked containers OOM-killed sshd.
+        cron(
+            orphan_compose_sweeper_cron,
+            name="orphan_compose_sweeper",
+            minute={2, 17, 32, 47},  # offset 2min from reaper to avoid lockstep
+            second=30,
             run_at_startup=False,
             unique=True,
         ),

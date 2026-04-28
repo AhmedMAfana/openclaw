@@ -175,6 +175,48 @@ set -euo pipefail
 cd "$REMOTE_DIR/app"
 COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
 
+# Resource preflight — refuse to build when the host is already
+# memory-pressured. On 2026-04-28 we kicked off two parallel docker
+# rebuilds while ~21 leaked containers were still running; the box
+# OOM-thrashed, sshd died, and recovery required a power cycle from
+# the DO console. Numbers chosen to leave 1G+ free for nginx+sshd
+# headroom while the build runs.
+free_mb=\$(free -m | awk '/^Mem:/ {print \$7}')   # MemAvailable in MB
+free_disk_gb=\$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+echo "[preflight] free memory: \${free_mb} MiB  /  free disk: \${free_disk_gb} GiB"
+if [[ \$free_mb -lt 1500 ]]; then
+  echo "[preflight] FATAL: only \${free_mb} MiB free — refusing to rebuild." >&2
+  echo "[preflight] Free memory first: docker ps then docker compose -p <project> down -v --remove-orphans" >&2
+  echo "[preflight] Or skip the build: bash scripts/deploy-staging.sh --skip-build" >&2
+  exit 1
+fi
+if [[ \$free_disk_gb -lt 5 ]]; then
+  echo "[preflight] FATAL: only \${free_disk_gb} GiB free disk — refusing to rebuild." >&2
+  echo "[preflight] Free up space: docker system prune -af --volumes" >&2
+  exit 1
+fi
+
+# Reap obvious stale per-instance compose projects BEFORE building so
+# the build doesn't compete with leaked containers for RAM.
+stale=\$(docker compose ls --all --format json 2>/dev/null | python3 -c '
+import json, sys, subprocess
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for r in rows:
+    name = r.get("Name", "")
+    status = (r.get("Status") or "").lower()
+    if name.startswith("tagh-inst-") and ("exited" in status or "dead" in status):
+        print(name)
+' 2>/dev/null || true)
+if [[ -n "\$stale" ]]; then
+  echo "[preflight] reaping exited orphan instances: \$stale"
+  while IFS= read -r p; do
+    [[ -n "\$p" ]] && docker compose -p "\$p" down --volumes --remove-orphans --timeout 15 >/dev/null 2>&1 || true
+  done <<< "\$stale"
+fi
+
 \$COMPOSE pull postgres redis dozzle
 if [[ "$SKIP_BUILD" != "1" ]]; then
   # Build *every* service that has a build: stanza, not just api/worker/bot.

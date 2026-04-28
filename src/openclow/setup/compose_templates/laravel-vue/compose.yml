@@ -15,11 +15,24 @@ name: ${COMPOSE_PROJECT}
 #       GITHUB_TOKEN, HEARTBEAT_SECRET, HEARTBEAT_URL, and
 #       CF_TUNNEL_TOKEN before invoking `docker compose up`.
 
+# Per-service memory caps. Without these, a runaway npm install or a
+# Laravel job that allocates without bounds can swallow the whole
+# host's RAM and OOM-kill sshd / nginx — which is exactly how
+# 2026-04-28 turned the staging box into a "ping ok, ssh dead" brick.
+# Numbers chosen to fit ~6 concurrent instances on an 8 GB droplet:
+#   app(1G) + node(1.5G) + db(512M) + redis(128M) + meili(256M)
+#   + mailpit(64M) + cloudflared(128M) ≈ 3.6G per instance.
+# Override per-deployment via PROJECT_MEM_* env if a project genuinely
+# needs more — but YAGNI: the defaults below cover every Laravel
+# template we've actually shipped.
+
 services:
   app:
     image: tagh/laravel-vue-app:latest
     restart: unless-stopped
     working_dir: /var/www/html
+    mem_limit: ${INSTANCE_MEM_APP:-1g}
+    mem_reservation: 256m
     environment:
       - INSTANCE_SLUG=${INSTANCE_SLUG}
       - INSTANCE_HOST=${INSTANCE_HOST}
@@ -71,6 +84,12 @@ services:
     image: node:20-alpine
     restart: unless-stopped
     working_dir: /var/www/html
+    # Node gets the largest cap because `npm ci` of a Vuexy-template-
+    # sized project legitimately spikes to ~1.2 GB during dep
+    # resolution. 1.5G gives headroom; OOM-kill it before it eats
+    # the host.
+    mem_limit: ${INSTANCE_MEM_NODE:-1500m}
+    mem_reservation: 256m
     # Install front-end deps + start the Vite dev server. projctl runs
     # inside `app` and can't docker-exec into other services, so the
     # node service does its own bootstrap. The container restarts if
@@ -107,6 +126,16 @@ services:
   db:
     image: mysql:8.4
     restart: unless-stopped
+    mem_limit: ${INSTANCE_MEM_DB:-512m}
+    mem_reservation: 192m
+    # MySQL's defaults assume a dedicated host. Tell it to keep its
+    # buffer pool small and skip the perf schema so it actually fits
+    # in the 512m cap above. Without these the OOM killer hits
+    # mysqld during heavy migrations on small droplets.
+    command:
+      - --innodb-buffer-pool-size=128M
+      - --performance-schema=OFF
+      - --default-authentication-plugin=caching_sha2_password
     environment:
       - MYSQL_DATABASE=app
       - MYSQL_USER=app
@@ -125,6 +154,10 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    mem_limit: ${INSTANCE_MEM_REDIS:-128m}
+    # Hard maxmemory + LRU eviction so a runaway cache fill doesn't
+    # touch the kernel limit (which would OOM-kill instead of evicting).
+    command: ["redis-server", "--maxmemory", "96mb", "--maxmemory-policy", "allkeys-lru"]
     networks:
       - instance
 
@@ -136,6 +169,7 @@ services:
   meilisearch:
     image: getmeili/meilisearch:v1.10
     restart: unless-stopped
+    mem_limit: ${INSTANCE_MEM_MEILI:-256m}
     environment:
       - MEILI_NO_ANALYTICS=true
       - MEILI_ENV=development
@@ -147,6 +181,7 @@ services:
   mailpit:
     image: axllent/mailpit:latest
     restart: unless-stopped
+    mem_limit: ${INSTANCE_MEM_MAILPIT:-64m}
     environment:
       - MP_DATA_FILE=/data/mailpit.db
     volumes:
@@ -157,6 +192,7 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
+    mem_limit: ${INSTANCE_MEM_CLOUDFLARED:-128m}
     command: ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yml", "run"]
     environment:
       - TUNNEL_TOKEN

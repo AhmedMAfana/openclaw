@@ -1425,6 +1425,111 @@ async def tunnel_health_check_cron(ctx: dict) -> dict:
     return {"probed": probed, "degraded": degraded, "recovered": recovered}
 
 
+async def orphan_compose_sweeper_cron(ctx: dict) -> dict:
+    """Find `tagh-inst-*` compose projects whose DB row is gone or
+    terminated/destroyed, and tear them down.
+
+    On 2026-04-28 a chain of failed provisions left ~21 leaked
+    containers running because the auto-teardown had a kwarg bug;
+    those leaks chewed enough RAM to OOM the staging droplet's sshd.
+    Even after the kwarg fix, defence-in-depth: any future leak —
+    crashed worker mid-teardown, manual kill, etc. — gets reaped here.
+
+    Runs every 15 minutes. Safe-by-default: only acts on compose
+    projects whose name matches ``tagh-inst-*`` AND whose slug has
+    NO live (provisioning/running/idle/terminating) row in the DB.
+
+    Returns ``{"orphans_found": N, "torn_down": M}``.
+    """
+    # 1. List all compose projects.
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "compose", "ls", "--all", "--format", "json",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=get_docker_env(),
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        log.warning("orphan_sweeper.docker_compose_ls_timeout")
+        return {"orphans_found": 0, "torn_down": 0, "error": "compose_ls_timeout"}
+    if proc.returncode != 0:
+        return {"orphans_found": 0, "torn_down": 0,
+                "error": f"compose_ls_rc={proc.returncode}"}
+
+    try:
+        rows = json.loads(stdout.decode() or "[]")
+    except json.JSONDecodeError:
+        return {"orphans_found": 0, "torn_down": 0, "error": "json_decode"}
+
+    candidates = [r for r in rows if (r.get("Name") or "").startswith("tagh-inst-")]
+    if not candidates:
+        return {"orphans_found": 0, "torn_down": 0}
+
+    # 2. Cross-reference with live DB rows.
+    LIVE = (
+        InstanceStatus.PROVISIONING.value,
+        InstanceStatus.RUNNING.value,
+        InstanceStatus.IDLE.value,
+        InstanceStatus.TERMINATING.value,
+    )
+    async with async_session() as session:
+        result = await session.execute(
+            select(Instance.compose_project)
+            .where(Instance.status.in_(LIVE))
+        )
+        live_projects = {row[0] for row in result.all()}
+
+    orphans = [r for r in candidates if r["Name"] not in live_projects]
+    if not orphans:
+        return {"orphans_found": 0, "torn_down": 0}
+
+    # 3. Tear down each orphan with `compose down -v --remove-orphans`.
+    torn = 0
+    failed = 0
+    for orph in orphans:
+        name = orph["Name"]
+        log.warning("orphan_sweeper.tearing_down", project=name)
+        # Reuse the same down flags as teardown_instance so volumes go
+        # too — leaked named volumes (db-data, node_modules) are the
+        # main reason the host runs out of disk over time.
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "compose", "-p", name,
+            "down", "--remove-orphans", "--volumes",
+            "--timeout", "30",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            env=get_docker_env(),
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=_COMPOSE_DOWN_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            log.warning("orphan_sweeper.down_timeout", project=name)
+            failed += 1
+            continue
+        if proc.returncode == 0:
+            torn += 1
+        else:
+            failed += 1
+            log.warning(
+                "orphan_sweeper.down_failed",
+                project=name, rc=proc.returncode,
+                stderr=stderr.decode()[:200],
+            )
+
+    log.info(
+        "orphan_sweeper.sweep",
+        orphans_found=len(orphans), torn_down=torn, failed=failed,
+    )
+    return {"orphans_found": len(orphans), "torn_down": torn, "failed": failed}
+
+
 async def rotate_github_token(ctx: dict, instance_id: str) -> dict:
     """T063: mint a fresh GitHub installation token and inject it into
     the running instance's ``~/.git-credentials`` via ``docker exec``.
