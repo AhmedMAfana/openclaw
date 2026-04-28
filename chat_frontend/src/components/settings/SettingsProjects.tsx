@@ -91,6 +91,40 @@ export function SettingsProjects() {
   // has the fix). One round-trip to GitHub per Edit-open; not cached
   // because branches change frequently outside our system.
   type GhBranch = { name: string; is_default: boolean; protected: boolean };
+  // Branches for Add Project — keyed by repo name (no project row exists
+  // yet). Re-fetched whenever the user picks a different repo.
+  const [addBranches, setAddBranches] = useState<GhBranch[] | null>(null);
+  const [addBranchesLoading, setAddBranchesLoading] = useState(false);
+  const [addBranchesError, setAddBranchesError] = useState("");
+  useEffect(() => {
+    setAddBranches(null);
+    setAddBranchesError("");
+    if (!addOpen || !form.github_repo || !form.github_repo.includes("/")) return;
+    const repo = form.github_repo;
+    setAddBranchesLoading(true);
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/settings/projects/branches?repo=${encodeURIComponent(repo)}`,
+          { credentials: "include" },
+        );
+        if (res.ok) {
+          const d = await res.json();
+          if (form.github_repo === repo) setAddBranches(d.branches || []);
+        } else {
+          const d = await res.json().catch(() => ({}));
+          if (form.github_repo === repo) {
+            setAddBranchesError(d.detail || `Failed to load branches (${res.status})`);
+          }
+        }
+      } catch (e) {
+        if (form.github_repo === repo) setAddBranchesError(String(e));
+      } finally {
+        if (form.github_repo === repo) setAddBranchesLoading(false);
+      }
+    })();
+  }, [addOpen, form.github_repo]);
+
   const [editBranches, setEditBranches] = useState<GhBranch[] | null>(null);
   const [editBranchesLoading, setEditBranchesLoading] = useState(false);
   const [editBranchesError, setEditBranchesError] = useState("");
@@ -407,13 +441,36 @@ export function SettingsProjects() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={lc}>Default Branch</label>
-                  <input
-                    type="text"
-                    placeholder="main"
-                    value={form.default_branch}
-                    onChange={(e) => setForm((f) => ({ ...f, default_branch: e.target.value }))}
-                    className={ic}
-                  />
+                  {addBranchesLoading ? (
+                    <div className={`${ic} text-muted-foreground`}>Loading branches…</div>
+                  ) : (
+                    <>
+                      <input
+                        type="text"
+                        list="add-branch-list"
+                        placeholder={
+                          addBranches && addBranches.length
+                            ? `Search ${addBranches.length} branches…`
+                            : "main"
+                        }
+                        value={form.default_branch}
+                        onChange={(e) => setForm((f) => ({ ...f, default_branch: e.target.value }))}
+                        className={ic}
+                      />
+                      <datalist id="add-branch-list">
+                        {(addBranches || []).map((b) => (
+                          <option key={b.name} value={b.name}>
+                            {b.protected ? "🔒 protected" : ""}
+                          </option>
+                        ))}
+                      </datalist>
+                    </>
+                  )}
+                  {addBranchesError && (
+                    <div className="text-xs text-amber-500 mt-1">
+                      {addBranchesError} — type the branch manually
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className={lc}>Tech Stack</label>

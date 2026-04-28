@@ -722,22 +722,10 @@ async def list_github_repos():
     return {"repos": repos, "count": len(repos)}
 
 
-@router.get("/projects/{project_id}/branches")
-async def list_project_branches(project_id: int):
-    """List branches on the project's GitHub repo using the configured PAT.
-
-    Defined BEFORE the generic /projects/{project_id} PUT/DELETE so static
-    sub-segments are matched first. Returns up to 100 branches sorted
-    name-asc with the project's current default_branch flagged.
-    """
-    async with async_session() as session:
-        project = await session.get(Project, project_id)
-        if not project:
-            raise HTTPException(404, "Project not found")
-        if not project.github_repo:
-            raise HTTPException(400, "Project has no github_repo")
-        repo = project.github_repo
-        current_default = project.default_branch
+async def _fetch_branches_by_repo(repo: str, current_default: str | None = None) -> list[dict]:
+    """Shared GitHub branches fetcher — used by both the project-id route
+    (Edit modal) and the repo-keyed route (Add modal, where no project
+    row exists yet)."""
     cfg = await config_service.get_config("git", "provider.github")
     token = (cfg or {}).get("token") if cfg else None
     if not token:
@@ -767,12 +755,45 @@ async def list_project_branches(project_id: int):
             for b in page_data:
                 branches.append({
                     "name": b.get("name"),
-                    "is_default": b.get("name") == current_default,
+                    "is_default": current_default is not None and b.get("name") == current_default,
                     "protected": bool(b.get("protected")),
                 })
             if len(page_data) < 100:
                 break
     branches.sort(key=lambda b: (b["name"] or "").lower())
+    return branches
+
+
+@router.get("/projects/branches")
+async def list_branches_for_repo(repo: str):
+    """Branches for an arbitrary `owner/name` repo. Used by the Add Project
+    modal where no DB row exists yet — the user picks a repo first, then
+    the Default Branch field populates from this. Defined BEFORE
+    /projects/{project_id}/branches and /projects/{project_id} so the
+    static `branches` segment doesn't get swallowed as a project_id."""
+    if not repo or "/" not in repo:
+        raise HTTPException(400, "repo query param must be 'owner/name'")
+    branches = await _fetch_branches_by_repo(repo)
+    return {"repo": repo, "branches": branches, "count": len(branches)}
+
+
+@router.get("/projects/{project_id}/branches")
+async def list_project_branches(project_id: int):
+    """List branches on the project's GitHub repo using the configured PAT.
+
+    Defined BEFORE the generic /projects/{project_id} PUT/DELETE so static
+    sub-segments are matched first. Returns up to 100 branches sorted
+    name-asc with the project's current default_branch flagged.
+    """
+    async with async_session() as session:
+        project = await session.get(Project, project_id)
+        if not project:
+            raise HTTPException(404, "Project not found")
+        if not project.github_repo:
+            raise HTTPException(400, "Project has no github_repo")
+        repo = project.github_repo
+        current_default = project.default_branch
+    branches = await _fetch_branches_by_repo(repo, current_default)
     return {"repo": repo, "current_default": current_default,
             "branches": branches, "count": len(branches)}
 
