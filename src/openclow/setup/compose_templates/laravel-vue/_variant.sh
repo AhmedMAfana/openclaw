@@ -211,12 +211,26 @@ case "${STEP}:${VARIANT}" in
         if [ -z "$cols" ]; then
             echo "  (no users table — skipping seed-admin)"
         else
-            # Build column/value lists from what's actually present.
+            # Bodyease default seed — the SSO `external_id` UUID is the
+            # one that sso-back.staging-ami.com recognises for this dev
+            # account; without it the SDK lookup `users.external_id`
+            # in validateCredentials returns no match and the SSO flow
+            # fails post-token-exchange.
+            SSO_UUID="0199bf2d-406d-71e6-b6b2-f28f8256c6df"
             sql_cols="id,name,email"
-            sql_vals="1,'Admin','admin@admin.com'"
-            echo "$cols" | grep -qx "uuid" && {
-                sql_cols="${sql_cols},uuid"
-                sql_vals="${sql_vals},'0199bf2d-406d-71e6-b6b2-f28f8256c6df'"
+            sql_vals="1,'Bodyease','accounts@bodyease.co.uk'"
+            # Different Laravel templates use different column names
+            # for the SSO link. Match whichever exists.
+            for sso_col in external_id sso_uuid uuid; do
+                if echo "$cols" | grep -qx "$sso_col"; then
+                    sql_cols="${sql_cols},${sso_col}"
+                    sql_vals="${sql_vals},'${SSO_UUID}'"
+                    break
+                fi
+            done
+            echo "$cols" | grep -qx "email_verified_at" && {
+                sql_cols="${sql_cols},email_verified_at"
+                sql_vals="${sql_vals},'2025-12-17 15:08:20'"
             }
             echo "$cols" | grep -qx "created_at" && {
                 sql_cols="${sql_cols},created_at"
