@@ -22,6 +22,28 @@ set -e
 STEP="$1"
 VARIANT="${PROJECT_VARIANT:-normal}"
 
+# Some projects override Laravel's environmentPath in bootstrap/app.php
+# to read .env files from /var/www/html/envs/ instead of the root.
+# Detect that and mirror every .env / .env.<host> file we write into
+# both locations so env() resolves regardless of which path Laravel
+# loads. (Caught on tagh-test 2026-04-29: env() returned null because
+# the project sets `dirname(__DIR__).'/envs'` as the second arg to
+# Application::__construct.)
+ENV_PATHS=( "." )
+if grep -qE "envs|environmentPath" bootstrap/app.php 2>/dev/null && [ -d envs ]; then
+    ENV_PATHS=( "." "envs" )
+fi
+mirror_env() {
+    src="$1"
+    [ -f "$src" ] || return 0
+    base="$(basename "$src")"
+    for d in "${ENV_PATHS[@]}"; do
+        target="$d/$base"
+        [ "$(realpath "$src" 2>/dev/null)" = "$(realpath "$target" 2>/dev/null)" ] && continue
+        cp -f "$src" "$target" 2>/dev/null || :
+    done
+}
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 # Idempotent upsert: if KEY exists in the .env file → sed-replace it.
@@ -140,6 +162,9 @@ gecche_setup_env() {
         cp .env ".env.${INSTANCE_HOST}"
         echo "  fallback: created .env.${INSTANCE_HOST} from .env"
     fi
+    # Mirror to /envs/ if the project uses a custom env path.
+    mirror_env .env
+    mirror_env ".env.${INSTANCE_HOST}"
     if [ -f config/domain.php ] && ! grep -q "'${INSTANCE_HOST}'" config/domain.php; then
         # Insert a mapping line into the 'domains' array. Use a sentinel
         # comment so the same instance can't be added twice on re-run.
@@ -178,6 +203,7 @@ normal_setup_env() {
     if [ -f .env ]; then
         apply_infra_env .env
         apply_app_env .env
+        mirror_env .env
     fi
 }
 
