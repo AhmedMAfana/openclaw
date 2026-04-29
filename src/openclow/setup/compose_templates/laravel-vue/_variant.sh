@@ -22,6 +22,34 @@ set -e
 STEP="$1"
 VARIANT="${PROJECT_VARIANT:-normal}"
 
+# Diagnostic capture: every step's full stdout+stderr (with `set -x` trace)
+# is teed to /var/lib/projctl/_variant-logs/<step>.log. The orchestrator's
+# _mark_failed handler copies that directory out of the projctl-state volume
+# into /var/log/openclow/failed-instances/ BEFORE teardown wipes the volume.
+# On failure, we also dump the last 60 lines to stderr so projctl's own
+# stderrTail (saved into state.json by RecordFailure) carries the diagnostic.
+# Without this, a failing step records exit_code only — no clue *why*.
+_LOG_DIR="/var/lib/projctl/_variant-logs"
+mkdir -p "$_LOG_DIR" 2>/dev/null || _LOG_DIR=/tmp
+_LOG_FILE="$_LOG_DIR/${STEP}.log"
+: > "$_LOG_FILE" 2>/dev/null || :
+# POSIX sh has no process substitution — use plain redirection. All step
+# output goes into $_LOG_FILE; on failure the EXIT trap dumps a tail to
+# stderr (which projctl captures into state.json:last_stderr) so the
+# diagnostic isn't lost.
+exec >> "$_LOG_FILE" 2>&1
+trap '_rc=$?; if [ "$_rc" -ne 0 ]; then
+  exec >&2
+  echo ""
+  echo "=== _variant.sh FAILED step=$STEP variant=$VARIANT exit=$_rc ==="
+  echo "--- env (filtered) ---"
+  env | grep -E "^(INSTANCE_HOST|APP_KEY|DB_PASSWORD|PROJECT_VARIANT|COMPOSER_AUTH|GITHUB_TOKEN)=" | sed "s/=.*/=<set>/"
+  echo "--- last 80 lines of $_LOG_FILE ---"
+  tail -80 "$_LOG_FILE" 2>/dev/null || echo "(no log captured)"
+  echo "=== end _variant.sh failure ==="
+fi' EXIT
+set -x
+
 # Some projects override Laravel's environmentPath in bootstrap/app.php
 # to read .env files from /var/www/html/envs/ instead of the root.
 # Detect that and mirror every .env / .env.<host> file we write into
@@ -29,15 +57,20 @@ VARIANT="${PROJECT_VARIANT:-normal}"
 # loads. (Caught on tagh-test 2026-04-29: env() returned null because
 # the project sets `dirname(__DIR__).'/envs'` as the second arg to
 # Application::__construct.)
-ENV_PATHS=( "." )
+# POSIX sh (busybox ash on alpine, dash on debian) has no arrays. Use a
+# space-separated string and rely on word-splitting in `for d in $ENV_PATHS`.
+# (Caught 2026-04-29: bash `ENV_PATHS=( "." )` blew up the whole script
+# with "syntax error: unexpected (" before any case arm could run, so
+# every multidomain provision failed at setup-env with exit 2 and no log.)
+ENV_PATHS="."
 if grep -qE "envs|environmentPath" bootstrap/app.php 2>/dev/null && [ -d envs ]; then
-    ENV_PATHS=( "." "envs" )
+    ENV_PATHS=". envs"
 fi
 mirror_env() {
     src="$1"
     [ -f "$src" ] || return 0
     base="$(basename "$src")"
-    for d in "${ENV_PATHS[@]}"; do
+    for d in $ENV_PATHS; do
         target="$d/$base"
         [ "$(realpath "$src" 2>/dev/null)" = "$(realpath "$target" 2>/dev/null)" ] && continue
         cp -f "$src" "$target" 2>/dev/null || :

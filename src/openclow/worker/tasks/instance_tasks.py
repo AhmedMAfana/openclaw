@@ -928,6 +928,22 @@ async def _mark_failed(
                 "failure_message": message[:500],
             })
 
+        # Diagnostic capture BEFORE teardown wipes the volume. The
+        # projctl-state volume holds state.json (with the last failed
+        # step's stderrTail) and our _variant.sh tee'd per-step logs.
+        # Once teardown runs `docker compose down --volumes`, it's gone —
+        # and the chat UI only shows the failure_code, not the actual
+        # error. Copying state + logs to a host path here is the only
+        # way to keep the post-mortem alive across instance teardown.
+        if slug_for_emit and failure_code == FailureCode.PROJCTL_UP:
+            try:
+                await _capture_projctl_diagnostics(slug=slug_for_emit)
+            except Exception as cap_err:  # pragma: no cover
+                log.warning(
+                    "_mark_failed.capture_failed",
+                    slug=slug_for_emit, error=str(cap_err),
+                )
+
         # Auto-cleanup: enqueue teardown_instance to free the partial
         # state we created so far (workspace dir, git worktree, compose
         # stack, CF tunnel, DNS record). Without this, every failed
@@ -946,6 +962,109 @@ async def _mark_failed(
         )
     except Exception as e:  # pragma: no cover
         log.exception("_mark_failed.error", error=str(e))
+
+
+async def _capture_projctl_diagnostics(*, slug: str) -> None:
+    """Dump projctl state.json + _variant.sh logs out of the doomed
+    instance's projctl-state volume to a persistent host path.
+
+    Why: when projctl_up fails, ``_mark_failed`` enqueues teardown which
+    runs ``docker compose down --volumes`` — destroying the
+    projctl-state volume that holds the last failed step's stderr
+    (``state.json:steps.<name>.last_stderr``) AND our ``_variant.sh``
+    tee'd per-step logs. The chat UI is left showing only an opaque
+    failure_code. This dump preserves the diagnostic so an operator can
+    look at /var/log/openclow/failed-instances/<slug>-<ts>/ and see
+    *why* the step failed.
+
+    Best-effort: any docker error logs and returns (the caller already
+    has bigger problems than missing post-mortem files).
+    """
+    import shutil
+    from datetime import datetime, timezone as _tz
+
+    ts = datetime.now(_tz.utc).strftime("%Y%m%d-%H%M%S")
+    # /app/logs is the activity-logs volume that's already mounted into
+    # the worker container (see docker-compose.yml::app_activity_logs).
+    # Writing diagnostics there means they survive container restarts and
+    # are accessible via `docker exec app-worker-1 ls /app/logs/...` or
+    # the host volume path. Avoids needing a new bind mount.
+    out_dir = pathlib.Path("/app/logs/failed-instances") / f"{slug}-{ts}"
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        log.warning("capture_diag.mkdir_failed", path=str(out_dir), error=str(e))
+        return
+
+    # The volume is named "<compose_project>-projctl-state" per compose.yml.
+    volume_name = f"tagh-{slug}-projctl-state"
+
+    # `docker run --rm -v <volume>:/state alpine` reads the volume without
+    # touching the (failing/dead) per-instance compose stack. We tarball
+    # /state to /dev/stdout, then untar into out_dir on the host.
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "run", "--rm",
+        "-v", f"{volume_name}:/state:ro",
+        "alpine", "sh", "-c",
+        "cd /state && tar c .",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=get_docker_env(),
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        log.warning("capture_diag.docker_run_timeout", slug=slug)
+        return
+
+    if proc.returncode != 0:
+        log.warning(
+            "capture_diag.docker_run_failed",
+            slug=slug, rc=proc.returncode,
+            stderr=stderr.decode(errors="replace")[:300],
+        )
+        return
+
+    # Untar the captured tree into out_dir.
+    untar = await asyncio.create_subprocess_exec(
+        "tar", "x", "-C", str(out_dir),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    untar_stdout, untar_stderr = await untar.communicate(input=stdout)
+    if untar.returncode != 0:
+        log.warning(
+            "capture_diag.untar_failed",
+            slug=slug, rc=untar.returncode,
+            stderr=untar_stderr.decode(errors="replace")[:300],
+        )
+        return
+
+    # Surface the captured stderr inline so it shows in the worker log
+    # without an operator having to ssh + cat. State.json has, per
+    # projctl/internal/state, ``steps.<name>.last_stderr`` populated by
+    # RecordFailure on the failing step.
+    state_path = out_dir / "state.json"
+    if state_path.is_file():
+        try:
+            state = json.loads(state_path.read_text())
+            for step_name, step_data in (state.get("steps") or {}).items():
+                if step_data.get("status") == "failed":
+                    log.error(
+                        "capture_diag.step_failed",
+                        slug=slug, step=step_name,
+                        last_stderr=(step_data.get("last_stderr") or "")[:1500],
+                    )
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning(
+                "capture_diag.state_parse_failed",
+                slug=slug, error=str(e),
+            )
+
+    log.info("capture_diag.done", slug=slug, path=str(out_dir))
 
 
 async def _load_cloudflare_config() -> CloudflareConfig:
