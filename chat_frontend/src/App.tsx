@@ -597,12 +597,21 @@ export default function App() {
           }
         } else if (data.type === "progress_card" && data.card) {
           // Inject session_id so WorkerProgressCard can render a Stop button.
-          // Preserve stream_buffer accumulated by agent_token events.
           const cardWithSession: Record<string, unknown> = { ...(data.card as Record<string, unknown>), session_id: sessionId };
           setMessages((prev) => {
             const existing = prev.find((m) => matchesMsg(m.id));
-            // Carry over stream_buffer so progress_card updates don't wipe the log
-            if (existing?.content.startsWith("__PROGRESS_CARD__")) {
+            // Server-sent stream_buffer is the canonical log (the worker
+            // accumulates it server-side and tails to 4KB). Only fall
+            // back to a locally-accumulated buffer if the server snapshot
+            // hasn't started carrying one yet — otherwise we'd freeze on
+            // the very first line and ignore every subsequent update,
+            // which is exactly the "agent log only refreshes on hard reload"
+            // bug. agent_token / tool_output events still append locally;
+            // those updates survive because they're applied AFTER this
+            // handler runs (later progress_card frames overwrite, but the
+            // server picks them up via _publish_progress_step).
+            const serverBuf = (cardWithSession.stream_buffer as string | undefined) ?? "";
+            if (!serverBuf && existing?.content.startsWith("__PROGRESS_CARD__")) {
               try {
                 const old = JSON.parse(existing.content.slice("__PROGRESS_CARD__".length));
                 if (old.stream_buffer) cardWithSession.stream_buffer = old.stream_buffer;

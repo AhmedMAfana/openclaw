@@ -361,12 +361,22 @@ case "${STEP}:${VARIANT}" in
                 "SELECT CONCAT('  seeded ', COUNT(*), ' user row(s)') FROM users;" 2>/dev/null
         fi
 
-        # If the project uses Spatie laravel-permission, grant the
-        # seeded user every available role + permission. Without this,
-        # the user logs in successfully but every controller's
-        # role/permission gate rejects with
-        # "User does not have the right roles" (UnauthorizedException).
-        # Best-effort: only runs if the spatie tables actually exist.
+        # NOTE: Spatie role-grant is in the SEPARATE `grant-admin-roles`
+        # step which runs AFTER `seed`. Reason: the project's DatabaseSeeder
+        # typically truncates spatie tables (model_has_roles,
+        # role_has_permissions) and re-creates roles fresh. If we granted
+        # roles here (before seed), the seed step would wipe them and we'd
+        # be back to UnauthorizedException. Order today is:
+        #   seed-admin           → INSERT user row (so seeders can FK to user_id=1)
+        #   seed                 → project's DatabaseSeeder (may rebuild roles)
+        #   grant-admin-roles    → assign every role/permission to user_id=1
+        ;;
+
+    # grant-admin-roles: post-seed Spatie role grant. Idempotent. Runs
+    # after `seed` has finished mucking with roles/permissions tables so
+    # the assignments stick. Skippable; if the project doesn't ship
+    # spatie/laravel-permission, this is a no-op.
+    grant-admin-roles:*)
         if [ -d vendor/spatie/laravel-permission ]; then
             php artisan tinker --execute="
                 try {
@@ -384,6 +394,8 @@ case "${STEP}:${VARIANT}" in
                     echo '  (spatie role-grant skipped: ' . \$e->getMessage() . ')';
                 }
             " 2>/dev/null || echo "  (tinker for role grant unavailable)"
+        else
+            echo "  (no spatie/laravel-permission — nothing to grant)"
         fi
         ;;
 

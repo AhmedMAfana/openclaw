@@ -25,6 +25,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import pathlib
 import secrets
 import shutil
@@ -132,6 +133,13 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
         db_password = inst.db_password
         heartbeat_secret = inst.heartbeat_secret
         github_repo = (inst.project.github_repo if inst.project else None)
+        # Project-scoped cache key: every chat for the same project shares
+        # one npm cache + one composer cache, so the second instance for
+        # tagh-test doesn't re-download 1239 npm packages (3 min) — it
+        # hits the warm cache instead. Sanitised to fit docker volume
+        # naming rules: [a-z0-9_-]+. Falls back to "default" if unset.
+        _proj_name = (inst.project.name if inst.project else "") or "default"
+        project_slug = re.sub(r"[^a-z0-9_-]+", "-", _proj_name.lower()).strip("-") or "default"
 
     started_at = datetime.now(timezone.utc)
     # Stamp started_at upfront so the progress card's elapsed counter
@@ -300,6 +308,26 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
             slug=slug, variant=project_variant,
         )
 
+        # 4a. Ensure project-scoped cache volumes exist. compose.yml
+        # declares them external=true so a teardown's `--volumes` won't
+        # touch them; that means we must pre-create them here. `docker
+        # volume create` is idempotent — creates if missing, no-op if
+        # present.
+        for cache_kind in ("npm", "composer"):
+            vol_name = f"tagh-{cache_kind}-cache-{project_slug}"
+            _vc = await asyncio.create_subprocess_exec(
+                "docker", "volume", "create", vol_name,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+                env=get_docker_env(),
+            )
+            _, _vc_err = await _vc.communicate()
+            if _vc.returncode != 0:
+                log.warning(
+                    "provision_instance.cache_volume_create_failed",
+                    volume=vol_name, error=_vc_err.decode(errors="replace")[:200],
+                )
+
         # 4. docker compose up -p <compose_project> -f _compose.yml -d.
         # Secrets injected via env; never touch disk.
         await _compose_up(
@@ -321,6 +349,12 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
                 # per-step commands (e.g. domain:add + domain:migrate
                 # for gecche/laravel-multidomain).
                 "PROJECT_VARIANT": project_variant,
+                # Project slug — drives the project-scoped npm + composer
+                # cache volume names in compose.yml. Every chat for this
+                # project shares the same caches; first instance pays the
+                # 3-min npm install cost, every later instance hits the
+                # warm cache (~30s).
+                "PROJECT_SLUG": project_slug,
             },
         )
 
@@ -335,7 +369,13 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
 
         # 5. projctl up inside the app container. Poll its JSON-line
         # stdout for step_success / fatal events per the stdout schema.
-        await _projctl_up(compose_project=compose_project, slug=slug)
+        # instance_id passed so per-substep events can be tee'd into the
+        # chat UI's agent-log panel — without it the user stares at
+        # "App bootstrap (composer + npm)" for 5 minutes with no signal.
+        await _projctl_up(
+            compose_project=compose_project, slug=slug,
+            instance_id=instance_id,
+        )
 
         # Step 2 done: app bootstrap (composer install + npm ci + migrations)
         # finished. Step 3 ("Health check") next.

@@ -116,6 +116,25 @@ projects that want stricter verification can override it with a
 project-specific assertion (e.g.
 `php artisan tinker --execute='exit(\App\Models\User::count() ? 0 : 1)'`).
 
+## grant-admin-roles
+
+```projctl
+cmd: sh /var/www/html/_variant.sh grant-admin-roles
+cwd: /var/www/html
+success_check: test 1 -eq 1
+skippable: true
+max_attempts: 1
+timeout_seconds: 60
+```
+
+Post-seed Spatie role grant. Must run AFTER `seed` because the project's
+DatabaseSeeder commonly truncates `model_has_roles` / `role_has_permissions`
+to rebuild role catalogs — wiping any pre-seed grant. This step assigns
+every existing Role + Permission to `user_id=1` (the admin row inserted
+by `seed-admin`) so the SSO/fake-auth user can hit role-gated controllers
+without the "User does not have the right roles" UnauthorizedException.
+No-op for projects without spatie/laravel-permission.
+
 ## storage-link
 
 ```projctl

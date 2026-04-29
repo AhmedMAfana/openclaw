@@ -69,9 +69,14 @@ services:
       # "normal", "multidomain-gecche", "multidomain-spatie",
       # "multidomain-stancl". Default "normal" if unset.
       - PROJECT_VARIANT=${PROJECT_VARIANT:-normal}
+      # Composer caches downloaded packages here. Same project-wide
+      # cache trick as npm: first instance pays the cost, every
+      # subsequent instance hits the cache. ~60s → ~10s on rerun.
+      - COMPOSER_HOME=/host-composer-cache
     volumes:
       - ${WORKSPACE_HOST_DIR}/${INSTANCE_SLUG}:/var/www/html
       - projctl-state:/var/lib/projctl
+      - composer-cache:/host-composer-cache
     depends_on:
       db:
         condition: service_healthy
@@ -155,8 +160,22 @@ services:
       - INSTANCE_HOST=${INSTANCE_HOST}
       - INSTANCE_HMR_HOST=${INSTANCE_HMR_HOST}
       - NODE_ENV=development
+      # Override npm cache to a shared volume that survives container
+      # destruction and is reused across instances. Without this, every
+      # `npm ci` re-downloads ~1200 packages from registry (3+ minutes
+      # on the Vuexy template). With it, first instance warms the
+      # cache; subsequent instances for the same project pull from disk
+      # (~30s). Per project, not per instance — same lockfile = same
+      # cache hit shape.
+      - npm_config_cache=/host-npm-cache
     volumes:
       - ${WORKSPACE_HOST_DIR}/${INSTANCE_SLUG}:/var/www/html
+      # Shared npm download cache. Named volume scoped to PROJECT (not
+      # the instance), so all chats for the same project hit the same
+      # cache. Created lazily on first use; survives compose teardown
+      # because it's NOT cleaned by `docker compose down --volumes` for
+      # external volumes. The orchestrator pre-creates it.
+      - npm-cache:/host-npm-cache
     networks:
       - instance
 
@@ -277,3 +296,16 @@ volumes:
     name: ${COMPOSE_PROJECT}-meili
   mailpit-data:
     name: ${COMPOSE_PROJECT}-mailpit
+  # Project-scoped (NOT instance-scoped) caches. Reused across every
+  # chat for the same project so npm/composer don't redownload the
+  # world on each provision. external=true so `docker compose down
+  # --volumes` leaves them alone. The orchestrator's
+  # provision_instance pre-creates them with the project-slug suffix
+  # before compose-up. Compose interpolates ${PROJECT_SLUG} in `name:`
+  # but NOT in the volume KEY, so keys are static here.
+  npm-cache:
+    external: true
+    name: tagh-npm-cache-${PROJECT_SLUG:-default}
+  composer-cache:
+    external: true
+    name: tagh-composer-cache-${PROJECT_SLUG:-default}
