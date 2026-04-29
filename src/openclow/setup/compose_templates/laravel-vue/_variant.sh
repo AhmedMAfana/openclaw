@@ -327,6 +327,31 @@ case "${STEP}:${VARIANT}" in
             mysql -h db -u app -p"${DB_PASSWORD}" -N -B app -e \
                 "SELECT CONCAT('  seeded ', COUNT(*), ' user row(s)') FROM users;" 2>/dev/null
         fi
+
+        # If the project uses Spatie laravel-permission, grant the
+        # seeded user every available role + permission. Without this,
+        # the user logs in successfully but every controller's
+        # role/permission gate rejects with
+        # "User does not have the right roles" (UnauthorizedException).
+        # Best-effort: only runs if the spatie tables actually exist.
+        if [ -d vendor/spatie/laravel-permission ]; then
+            php artisan tinker --execute="
+                try {
+                    \$u = App\\Models\\User::find(1);
+                    if (!\$u) { echo 'no-user-1'; return; }
+                    if (class_exists(\\Spatie\\Permission\\Models\\Role::class)) {
+                        foreach (\\Spatie\\Permission\\Models\\Role::all() as \$r) { \$u->assignRole(\$r); }
+                    }
+                    if (class_exists(\\Spatie\\Permission\\Models\\Permission::class)) {
+                        foreach (\\Spatie\\Permission\\Models\\Permission::all() as \$p) { \$u->givePermissionTo(\$p); }
+                    }
+                    echo '  granted roles: ' . \$u->roles()->pluck('name')->implode(',');
+                    \\Artisan::call('permission:cache-reset');
+                } catch (\\Throwable \$e) {
+                    echo '  (spatie role-grant skipped: ' . \$e->getMessage() . ')';
+                }
+            " 2>/dev/null || echo "  (tinker for role grant unavailable)"
+        fi
         ;;
 
     # storage-link: gecche docs note that --domain is honored on this
