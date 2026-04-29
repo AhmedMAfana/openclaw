@@ -76,9 +76,14 @@ apply_app_env() {
     upsert_env "$target" PUSHER_APP_SECRET e315dd664caa7dedee07
     upsert_env "$target" PUSHER_SCHEME https
     upsert_env "$target" PUSHER_APP_CLUSTER ap2
-    # AMI SSO endpoints (staging) — used by the fake-auth /webapi/set flow.
-    upsert_env "$target" AUTH_SERVER_URL "https://sso-back.staging-ami.com/"
-    upsert_env "$target" AUTH_FE_SERVER_URL "https://sso.staging-ami.com/#/"
+    # AMI SSO endpoints — point at the new sso.tagh.uk deployment
+    # (sso-new codebase). The legacy sso-back.staging-ami.com /
+    # sso.staging-ami.com pair is deprecated. The /webapi/set fake-auth
+    # flow now hits sso.tagh.uk/sso/dev-token, which validates the
+    # Origin against an *.tagh.co.uk allowlist and mints a fresh
+    # Passport token without any redirect dance.
+    upsert_env "$target" AUTH_SERVER_URL "https://sso.tagh.uk/"
+    upsert_env "$target" AUTH_FE_SERVER_URL "https://sso.tagh.uk/"
     upsert_env "$target" AUTH_SERVER_CLIENT_ID 0199bf2e-1a90-727e-b305-c71284ee9044
     upsert_env "$target" AUTH_SERVER_CLIENT_SECRET lFNaMPhHykAWL9Wpl3JKKKoWYvYrTR9gOcsrQIFI
     # serversideup/php image honors WWWUSER/WWWGROUP for the runtime user
