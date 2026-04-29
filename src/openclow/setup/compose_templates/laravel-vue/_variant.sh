@@ -123,7 +123,42 @@ gecche_setup_env() {
     # an earlier provision attempt left a stale config/domain.php
     # entry from the cloned repo).
     php artisan domain:add "${INSTANCE_HOST}" 2>&1 || \
-        echo "  (domain:add returned non-zero — assuming domain already registered)"
+        echo "  (domain:add returned non-zero — falling back to manual provisioning)"
+
+    # FALLBACK: gecche's domain:add can fail silently for several reasons
+    # (artisan boot error from broken project code, migrations not yet
+    # run, file permission quirks, cached config, …). Without it,
+    # config/domain.php has no mapping for INSTANCE_HOST and incoming
+    # HTTP requests get an empty env() — every Laravel call that depends
+    # on env vars (auth, db host, AUTH_SERVER_*) breaks.
+    # Defence in depth: always ensure
+    #   1) .env.<INSTANCE_HOST> exists with a copy of .env
+    #   2) config/domain.php has a mapping for the host
+    # so the project boots correctly even when gecche's command path is
+    # bricked by some other layer.
+    if [ ! -f ".env.${INSTANCE_HOST}" ]; then
+        cp .env ".env.${INSTANCE_HOST}"
+        echo "  fallback: created .env.${INSTANCE_HOST} from .env"
+    fi
+    if [ -f config/domain.php ] && ! grep -q "'${INSTANCE_HOST}'" config/domain.php; then
+        # Insert a mapping line into the 'domains' array. Use a sentinel
+        # comment so the same instance can't be added twice on re-run.
+        php -r '
+            $f = "config/domain.php";
+            $s = file_get_contents($f);
+            $host = $argv[1];
+            $key  = "tagh_dev_" . preg_replace("/[^a-z0-9]/i","_",$host);
+            $line = "    \x27" . $host . "\x27 => \x27" . $key . "\x27, // tagh-platform-injected\n";
+            $s = preg_replace(
+                "/(\x27domains\x27\s*=>\s*\[\s*)/",
+                "$1" . $line,
+                $s,
+                1
+            );
+            file_put_contents($f, $s);
+        ' "${INSTANCE_HOST}" && echo "  fallback: registered ${INSTANCE_HOST} in config/domain.php"
+    fi
+
     # Re-apply infra + app config to the per-domain file too. domain:add
     # may not propagate keys that weren't in .env at copy time (e.g. if
     # a previous run left a stale .env.<host>); upsert_env handles both
