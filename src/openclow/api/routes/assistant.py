@@ -1271,6 +1271,17 @@ async def assistant_endpoint(
                 prompt_arg = llm_prompt
 
             # 9. Run agent INLINE
+            import os as _os
+            _claude_stderr_lines: list[str] = []
+
+            def _capture_stderr(line: str) -> None:
+                _claude_stderr_lines.append(line)
+                log.warning("claude.stderr", line=line.strip())
+
+            _claude_env: dict[str, str] = {}
+            if _os.getenv("ANTHROPIC_API_KEY"):
+                _claude_env["ANTHROPIC_API_KEY"] = _os.environ["ANTHROPIC_API_KEY"]
+
             options = ClaudeAgentOptions(
                 cwd=workspace,
                 system_prompt=system_prompt,
@@ -1285,6 +1296,8 @@ async def assistant_endpoint(
                 max_turns=80,
                 include_partial_messages=True,
                 betas=["pdfs-2024-09-25"] if has_pdf else [],
+                stderr=_capture_stderr,
+                env=_claude_env,
             )
 
             controller.add_data({"type": "message_id", "id": asst_msg_id})
@@ -1404,10 +1417,25 @@ async def assistant_endpoint(
                         await db.commit()
 
         except Exception as e:
-            log.error("assistant.error", error=str(e), exc_info=True)
+            err_str = str(e)
+            # Detect Claude "not logged in" — surface a clear action instead of raw SDK error
+            stderr_joined = " ".join(_claude_stderr_lines) if "_claude_stderr_lines" in dir() else ""
+            if "Not logged in" in stderr_joined or "Not logged in" in err_str or (
+                "exit code: 1" in err_str and "Command failed" in err_str
+            ):
+                user_msg = (
+                    "Claude is not authenticated. Run this command then restart:\n"
+                    "docker exec -it tagh-dev-api-1 "
+                    "/usr/local/lib/python3.12/site-packages/claude_agent_sdk/_bundled/claude login\n\n"
+                    "Or add ANTHROPIC_API_KEY=sk-ant-... to your .env file."
+                )
+                log.error("assistant.claude_not_authenticated", stderr=stderr_joined)
+            else:
+                user_msg = err_str[:500] or "Unhandled assistant error."
+                log.error("assistant.error", error=err_str, exc_info=True)
             controller.add_data({
                 "type": "error",
-                "message": str(e)[:500] or "Unhandled assistant error.",
+                "message": user_msg,
             })
 
     stream = create_run(run)
