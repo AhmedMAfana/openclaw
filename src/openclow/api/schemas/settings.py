@@ -68,6 +68,7 @@ class ProjectCreate(BaseModel):
     tech_stack: str | None = None
     agent_system_prompt: str | None = None
     setup_commands: str | None = None
+    mode: str = "docker"
     is_dockerized: bool = True
     docker_compose_file: str | None = "docker-compose.yml"
     app_container_name: str | None = None

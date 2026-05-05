@@ -183,7 +183,62 @@ async function readStream(
 
 // ── App ──────────────────────────────────────────────────────────────────────
 
+// ── 404 page ──────────────────────────────────────────────────────────────────
+
+function NotFoundPage() {
+  return (
+    <div className="h-screen flex items-center justify-center bg-background">
+      <div className="text-center space-y-4 max-w-sm px-6">
+        <p className="text-6xl font-bold text-muted-foreground/20">404</p>
+        <p className="text-lg font-semibold text-foreground">Page not found</p>
+        <p className="text-sm text-muted-foreground">The page you're looking for doesn't exist.</p>
+        <a
+          href="/chat"
+          className="inline-block mt-2 px-4 py-2 rounded-lg text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+        >
+          Go to chat
+        </a>
+      </div>
+    </div>
+  );
+}
+
+// ── Auth guard wrapper ────────────────────────────────────────────────────────
+
+const KNOWN_PATHS = new Set(["/chat", "/chat/"]);
+
 export default function App() {
+  const [authStatus, setAuthStatus] = useState<"checking" | "ok" | "unauth">("checking");
+  const isUnknownRoute = !KNOWN_PATHS.has(window.location.pathname);
+
+  useEffect(() => {
+    fetch("/api/me", { credentials: "include" })
+      .then((r) => {
+        if (r.status === 401) {
+          window.location.href = "/chat/login";
+          setAuthStatus("unauth");
+        } else {
+          setAuthStatus("ok");
+        }
+      })
+      .catch(() => { setAuthStatus("ok"); });
+  }, []);
+
+  if (authStatus === "checking") {
+    return (
+      <div className="h-screen flex items-center justify-center bg-background">
+        <div className="size-8 rounded-full border-2 border-white/10 border-t-white/70 animate-spin" />
+      </div>
+    );
+  }
+  if (authStatus === "unauth") return null;
+  if (isUnknownRoute) return <NotFoundPage />;
+  return <ChatApp />;
+}
+
+// ── Main chat application ─────────────────────────────────────────────────────
+
+function ChatApp() {
   const [threads, setThreads] = useState<ChatThread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);

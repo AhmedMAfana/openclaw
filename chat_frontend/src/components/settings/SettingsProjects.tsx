@@ -28,8 +28,8 @@ const EMPTY = {
   github_repo: "",
   name: "",
   default_branch: "main",
-  tech_stack: "",
   description: "",
+  mode: "docker",
   is_dockerized: false,
   docker_compose_file: "docker-compose.yml",
   app_container_name: "",
@@ -56,6 +56,7 @@ export function SettingsProjects() {
   const [ghLoading, setGhLoading] = useState(false);
   const [ghError, setGhError] = useState("");
   const [ghQuery, setGhQuery] = useState("");
+  const [showRepoDropdown, setShowRepoDropdown] = useState(false);
 
   useEffect(() => {
     load();
@@ -172,8 +173,8 @@ export function SettingsProjects() {
       github_repo: form.github_repo,
       name: form.name,
       default_branch: form.default_branch || "main",
-      tech_stack: form.tech_stack || null,
       description: form.description || null,
+      mode: form.mode,
       is_dockerized: form.is_dockerized,
     };
     if (form.is_dockerized) {
@@ -363,126 +364,135 @@ export function SettingsProjects() {
               Add Project
             </Dialog.Title>
             <div className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className={lc}>
-                    Repository <span className="text-red-400">*</span>
-                  </label>
+              {/* Repository combobox */}
+              <div>
+                <label className={lc}>
+                  Repository <span className="text-red-400">*</span>
+                </label>
+                <div className="relative">
                   {ghLoading ? (
                     <div className={`${ic} text-muted-foreground`}>Loading repos…</div>
-                  ) : ghError ? (
+                  ) : (
                     <input
                       type="text"
-                      placeholder="owner/repo"
+                      placeholder={
+                        ghRepos && ghRepos.length
+                          ? `Search ${ghRepos.length} repos…`
+                          : "owner/repo"
+                      }
                       value={form.github_repo}
-                      onChange={(e) => setForm((f) => ({ ...f, github_repo: e.target.value }))}
+                      onFocus={() => setShowRepoDropdown(true)}
+                      onBlur={() => setTimeout(() => setShowRepoDropdown(false), 150)}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setGhQuery(v);
+                        setForm((f) => ({ ...f, github_repo: v }));
+                        setShowRepoDropdown(true);
+                      }}
                       className={ic}
                     />
-                  ) : (
-                    <>
-                      <input
-                        type="text"
-                        list="gh-repo-list"
-                        placeholder={
-                          ghRepos && ghRepos.length
-                            ? `Search ${ghRepos.length} repos…`
-                            : "owner/repo"
-                        }
-                        value={form.github_repo}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          setGhQuery(v);
-                          const match = ghRepos?.find((r) => r.full_name === v);
-                          setForm((f) => ({
-                            ...f,
-                            github_repo: v,
-                            default_branch: match?.default_branch || f.default_branch,
-                            name: match && !f.name
-                              ? (match.full_name.split("/")[1] || "")
-                              : f.name,
-                          }));
-                        }}
-                        className={ic}
-                      />
-                      <datalist id="gh-repo-list">
-                        {(ghRepos || [])
-                          .filter((r) =>
-                            !ghQuery || r.full_name.toLowerCase().includes(ghQuery.toLowerCase())
-                          )
-                          .slice(0, 200)
-                          .map((r) => (
-                            <option key={r.full_name} value={r.full_name}>
-                              {r.private ? "🔒 " : ""}
-                              {r.description || r.default_branch}
-                            </option>
-                          ))}
-                      </datalist>
-                    </>
                   )}
-                  {ghError && (
-                    <div className="text-xs text-amber-500 mt-1">
-                      {ghError} — type the repo manually
-                    </div>
+                  {showRepoDropdown && !ghLoading && (ghRepos?.length ?? 0) > 0 && (
+                    <ul className="absolute z-50 mt-1 w-full max-h-52 overflow-y-auto rounded-lg border border-border bg-card shadow-lg text-sm">
+                      {(ghRepos || [])
+                        .filter(
+                          (r) =>
+                            !ghQuery ||
+                            r.full_name.toLowerCase().includes(ghQuery.toLowerCase()),
+                        )
+                        .slice(0, 50)
+                        .map((r) => (
+                          <li
+                            key={r.full_name}
+                            onMouseDown={() => {
+                              setForm((f) => ({
+                                ...f,
+                                github_repo: r.full_name,
+                                default_branch: r.default_branch || f.default_branch,
+                                name: f.name || r.full_name.split("/")[1] || "",
+                              }));
+                              setGhQuery(r.full_name);
+                              setShowRepoDropdown(false);
+                            }}
+                            className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-accent transition-colors"
+                          >
+                            {r.private && (
+                              <span className="text-xs text-muted-foreground">🔒</span>
+                            )}
+                            <span className="font-mono text-foreground">{r.full_name}</span>
+                            {r.description && (
+                              <span className="ml-auto text-xs text-muted-foreground truncate max-w-[160px]">
+                                {r.description}
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                    </ul>
                   )}
                 </div>
-                <div>
-                  <label className={lc}>
-                    Project Name <span className="text-red-400">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="My App"
-                    value={form.name}
-                    onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                    className={ic}
-                  />
-                </div>
+                {ghError && (
+                  <div className="text-xs text-amber-500 mt-1">
+                    {ghError} — type the repo manually
+                  </div>
+                )}
               </div>
+
+              {/* Project Name */}
+              <div>
+                <label className={lc}>
+                  Project Name <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="My App"
+                  value={form.name}
+                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                  className={ic}
+                />
+              </div>
+
+              {/* Mode + Default Branch row */}
               <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={lc}>Mode</label>
+                  <select
+                    className={ic}
+                    value={form.mode}
+                    onChange={(e) => setForm((f) => ({ ...f, mode: e.target.value }))}
+                  >
+                    <option value="docker">docker</option>
+                    <option value="host">host (running on VPS)</option>
+                    <option value="container">container (per-chat)</option>
+                  </select>
+                </div>
                 <div>
                   <label className={lc}>Default Branch</label>
                   {addBranchesLoading ? (
                     <div className={`${ic} text-muted-foreground`}>Loading branches…</div>
                   ) : (
-                    <>
-                      <input
-                        type="text"
-                        list="add-branch-list"
-                        placeholder={
-                          addBranches && addBranches.length
-                            ? `Search ${addBranches.length} branches…`
-                            : "main"
-                        }
-                        value={form.default_branch}
-                        onChange={(e) => setForm((f) => ({ ...f, default_branch: e.target.value }))}
-                        className={ic}
-                      />
-                      <datalist id="add-branch-list">
-                        {(addBranches || []).map((b) => (
-                          <option key={b.name} value={b.name}>
-                            {b.protected ? "🔒 protected" : ""}
-                          </option>
-                        ))}
-                      </datalist>
-                    </>
+                    <select
+                      className={ic}
+                      value={form.default_branch}
+                      onChange={(e) => setForm((f) => ({ ...f, default_branch: e.target.value }))}
+                    >
+                      {(addBranches && addBranches.length > 0
+                        ? addBranches.map((b) => b.name)
+                        : [form.default_branch || "main"]
+                      ).map((b) => (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      ))}
+                    </select>
                   )}
                   {addBranchesError && (
                     <div className="text-xs text-amber-500 mt-1">
-                      {addBranchesError} — type the branch manually
+                      {addBranchesError}
                     </div>
                   )}
                 </div>
-                <div>
-                  <label className={lc}>Tech Stack</label>
-                  <input
-                    type="text"
-                    placeholder="Laravel 11, Vue 3"
-                    value={form.tech_stack}
-                    onChange={(e) => setForm((f) => ({ ...f, tech_stack: e.target.value }))}
-                    className={ic}
-                  />
-                </div>
               </div>
+
               <div>
                 <label className={lc}>Description</label>
                 <textarea
