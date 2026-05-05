@@ -1154,18 +1154,23 @@ async def _capture_projctl_diagnostics(*, slug: str) -> None:
 
 
 async def _load_cloudflare_config() -> CloudflareConfig:
-    """Read platform_config → CloudflareConfig. Fresh per provision."""
+    """Read platform_config → CloudflareConfig, falling back to env vars."""
+    import os as _os
     cfg = await get_config("cloudflare", "settings")
-    if not cfg:
+    account_id = (cfg or {}).get("account_id") or _os.getenv("CF_ACCOUNT_ID", "")
+    zone_id = (cfg or {}).get("zone_id") or _os.getenv("CF_ZONE_ID", "")
+    zone_domain = (cfg or {}).get("zone_domain") or _os.getenv("CF_ZONE_DOMAIN", "")
+    api_token = (cfg or {}).get("api_token") or _os.getenv("CF_API_TOKEN", "")
+    if not all([account_id, zone_id, zone_domain, api_token]):
         raise _ProvisionFailure(
             FailureCode.TUNNEL_PROVISION,
-            "platform_config cloudflare/settings is not configured",
+            "Cloudflare not configured — set CF_ACCOUNT_ID, CF_ZONE_ID, CF_ZONE_DOMAIN, CF_API_TOKEN in .env",
         )
     return CloudflareConfig(
-        account_id=cfg["account_id"],
-        zone_id=cfg["zone_id"],
-        zone_domain=cfg["zone_domain"],
-        api_token=cfg["api_token"],
+        account_id=account_id,
+        zone_id=zone_id,
+        zone_domain=zone_domain,
+        api_token=api_token,
     )
 
 

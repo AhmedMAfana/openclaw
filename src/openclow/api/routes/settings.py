@@ -1270,15 +1270,21 @@ def _mask_secret(val: str, keep: int = 6) -> str:
 
 @router.get("/cloudflare")
 async def get_cloudflare_config():
+    import os as _os
     cfg = await config_service.get_config("cloudflare", "settings") or {}
-    if not cfg:
+    # Fall back to env vars so fresh-deploy servers work out of the box
+    account_id = cfg.get("account_id") or _os.getenv("CF_ACCOUNT_ID", "")
+    zone_id = cfg.get("zone_id") or _os.getenv("CF_ZONE_ID", "")
+    zone_domain = cfg.get("zone_domain") or _os.getenv("CF_ZONE_DOMAIN", "")
+    api_token = cfg.get("api_token") or _os.getenv("CF_API_TOKEN", "")
+    if not any([account_id, zone_id, zone_domain, api_token]):
         return {"configured": False}
     return {
         "configured": True,
-        "account_id": cfg.get("account_id", ""),
-        "zone_id": cfg.get("zone_id", ""),
-        "zone_domain": cfg.get("zone_domain", ""),
-        "api_token": _mask_secret(cfg.get("api_token", "")),
+        "account_id": account_id,
+        "zone_id": zone_id,
+        "zone_domain": zone_domain,
+        "api_token": _mask_secret(api_token),
     }
 
 
