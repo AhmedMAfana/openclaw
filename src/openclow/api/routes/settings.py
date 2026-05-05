@@ -219,6 +219,10 @@ async def test_connection(request: Request, category: str):
         result = await _test_git(config)
     elif category == "llm":
         result = await _test_llm(config)
+    elif category == "cloudflare":
+        result = await _test_cloudflare_connection()
+    elif category == "github-app":
+        result = await _test_github_app_connection()
     else:
         raise HTTPException(400, f"Unknown test category: {category}")
 
@@ -499,6 +503,50 @@ async def _test_llm(config: dict) -> TestResult:
     return TestResult(status="error", message=f"Unknown LLM provider: {provider_type}")
 
 
+async def _test_cloudflare_connection() -> TestResult:
+    cfg = await config_service.get_config("cloudflare", "settings") or {}
+    if not cfg.get("api_token"):
+        return TestResult(status="error", message="Cloudflare not configured")
+    import urllib.request, urllib.error, json as _json
+    req = urllib.request.Request(
+        "https://api.cloudflare.com/client/v4/user/tokens/verify",
+        headers={"Authorization": f"Bearer {cfg['api_token']}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = _json.loads(r.read())
+            if data.get("success"):
+                return TestResult(status="ok", message=f"Token active · zone: {cfg.get('zone_domain')}")
+    except Exception as e:
+        return TestResult(status="error", message=str(e))
+    return TestResult(status="error", message="Token invalid")
+
+
+async def _test_github_app_connection() -> TestResult:
+    cfg = await config_service.get_config("github_app", "settings") or {}
+    if not cfg.get("app_id") or not cfg.get("private_key_pem"):
+        return TestResult(status="error", message="GitHub App not configured")
+    try:
+        import time, jwt  # type: ignore
+        import urllib.request, json as _json
+        now = int(time.time())
+        token = jwt.encode(
+            {"iat": now - 60, "exp": now + 300, "iss": int(cfg["app_id"])},
+            cfg["private_key_pem"], algorithm="RS256",
+        )
+        req = urllib.request.Request(
+            "https://api.github.com/app",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = _json.loads(r.read())
+            return TestResult(status="ok", message=f"App: {data.get('name')} · id={data.get('id')}")
+    except ImportError:
+        return TestResult(status="error", message="pyjwt not installed — install it to test")
+    except Exception as e:
+        return TestResult(status="error", message=str(e))
+
+
 # ---------------------------------------------------------------------------
 # Claude Auth
 # ---------------------------------------------------------------------------
@@ -584,6 +632,17 @@ async def setup_status():
         if cat in categories:
             configured.add(cat)
 
+    # LLM uses Claude credentials file, not platform_config — check auth status
+    if "llm" not in configured:
+        try:
+            from openclow.services import bot_actions
+            job = await bot_actions.enqueue_job("claude_auth_check")
+            result = await job.result(timeout=10)
+            if result and result.get("loggedIn"):
+                configured.add("llm")
+        except Exception:
+            pass  # worker unavailable — leave llm as unconfigured
+
     # Count projects and users
     async with async_session() as session:
         project_count = (await session.execute(
@@ -617,7 +676,7 @@ async def get_host_settings():
 @router.put("/host")
 async def update_host_settings(body: dict):
     """Update host-mode settings. Accepts any subset of:
-    projects_base (str), mode_default ("docker"|"host"), auto_clone (bool)."""
+    projects_base (str), mode_default ("docker"|"host"|"container"), auto_clone (bool)."""
     from openclow.services import config_service as _cs
 
     allowed = {"projects_base", "mode_default", "auto_clone"}
@@ -625,8 +684,11 @@ async def update_host_settings(body: dict):
     if bad:
         raise HTTPException(400, f"Unknown keys: {sorted(bad)}")
 
-    if "mode_default" in body and body["mode_default"] not in ("docker", "host"):
-        raise HTTPException(400, "mode_default must be 'docker' or 'host'")
+    # Accept "container" — spec 001 added per-chat container mode (see
+    # bootstrap.py routing). Old check rejected it, so the Settings UI
+    # couldn't pick container as the default-for-new-projects.
+    if "mode_default" in body and body["mode_default"] not in ("docker", "host", "container"):
+        raise HTTPException(400, "mode_default must be 'docker', 'host', or 'container'")
 
     if "projects_base" in body:
         path = (body["projects_base"] or "").strip()
@@ -650,6 +712,149 @@ async def list_projects():
             select(Project).where(Project.status == "active").order_by(Project.id)
         )
         return result.scalars().all()
+
+
+@router.get("/projects/github-repos")
+async def list_github_repos():
+    """List repos the configured GitHub PAT can see — owner + collaborator
+    + org-member affiliated. Used by the Settings → Add Project modal so
+    the user picks from a dropdown instead of typing `owner/repo` by hand.
+
+    Defined BEFORE `/projects/{project_id}` routes so FastAPI doesn't
+    interpret `github-repos` as a project_id path parameter and return
+    405. (Static-segment routes must precede `{param}` routes that share
+    the same prefix.)
+
+    Reads `git/provider.github.token` from platform_config. Returns a
+    flat list of `{full_name, default_branch, private, description}`
+    sorted by full_name. Up to 300 repos (3 pages × 100).
+    """
+    cfg = await config_service.get_config("git", "provider.github")
+    token = (cfg or {}).get("token") if cfg else None
+    if not token:
+        raise HTTPException(
+            400,
+            "git/provider.github not configured — add a GitHub token in "
+            "platform_config first",
+        )
+    repos: list[dict] = []
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+        for page in (1, 2, 3):
+            try:
+                resp = await client.get(
+                    "https://api.github.com/user/repos",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                    params={
+                        "per_page": 100, "page": page,
+                        "sort": "full_name", "affiliation": "owner,collaborator,organization_member",
+                    },
+                )
+            except httpx.HTTPError as e:
+                raise HTTPException(502, f"GitHub request failed: {e}")
+            if resp.status_code == 401:
+                raise HTTPException(
+                    401,
+                    "GitHub token rejected — check git/provider.github in "
+                    "platform_config",
+                )
+            if resp.status_code != 200:
+                raise HTTPException(
+                    502, f"GitHub returned {resp.status_code}: {resp.text[:200]}"
+                )
+            page_repos = resp.json()
+            if not page_repos:
+                break
+            for r in page_repos:
+                repos.append({
+                    "full_name": r.get("full_name"),
+                    "default_branch": r.get("default_branch") or "main",
+                    "private": bool(r.get("private")),
+                    "description": r.get("description"),
+                })
+            if len(page_repos) < 100:
+                break
+    repos.sort(key=lambda r: (r["full_name"] or "").lower())
+    return {"repos": repos, "count": len(repos)}
+
+
+async def _fetch_branches_by_repo(repo: str, current_default: str | None = None) -> list[dict]:
+    """Shared GitHub branches fetcher — used by both the project-id route
+    (Edit modal) and the repo-keyed route (Add modal, where no project
+    row exists yet)."""
+    cfg = await config_service.get_config("git", "provider.github")
+    token = (cfg or {}).get("token") if cfg else None
+    if not token:
+        raise HTTPException(400, "git/provider.github not configured")
+    branches: list[dict] = []
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+        for page in (1, 2, 3):
+            try:
+                resp = await client.get(
+                    f"https://api.github.com/repos/{repo}/branches",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                    params={"per_page": 100, "page": page},
+                )
+            except httpx.HTTPError as e:
+                raise HTTPException(502, f"GitHub request failed: {e}")
+            if resp.status_code == 404:
+                raise HTTPException(404, f"Repo {repo} not found or token lacks access")
+            if resp.status_code != 200:
+                raise HTTPException(502, f"GitHub {resp.status_code}: {resp.text[:200]}")
+            page_data = resp.json()
+            if not page_data:
+                break
+            for b in page_data:
+                branches.append({
+                    "name": b.get("name"),
+                    "is_default": current_default is not None and b.get("name") == current_default,
+                    "protected": bool(b.get("protected")),
+                })
+            if len(page_data) < 100:
+                break
+    branches.sort(key=lambda b: (b["name"] or "").lower())
+    return branches
+
+
+@router.get("/projects/branches")
+async def list_branches_for_repo(repo: str):
+    """Branches for an arbitrary `owner/name` repo. Used by the Add Project
+    modal where no DB row exists yet — the user picks a repo first, then
+    the Default Branch field populates from this. Defined BEFORE
+    /projects/{project_id}/branches and /projects/{project_id} so the
+    static `branches` segment doesn't get swallowed as a project_id."""
+    if not repo or "/" not in repo:
+        raise HTTPException(400, "repo query param must be 'owner/name'")
+    branches = await _fetch_branches_by_repo(repo)
+    return {"repo": repo, "branches": branches, "count": len(branches)}
+
+
+@router.get("/projects/{project_id}/branches")
+async def list_project_branches(project_id: int):
+    """List branches on the project's GitHub repo using the configured PAT.
+
+    Defined BEFORE the generic /projects/{project_id} PUT/DELETE so static
+    sub-segments are matched first. Returns up to 100 branches sorted
+    name-asc with the project's current default_branch flagged.
+    """
+    async with async_session() as session:
+        project = await session.get(Project, project_id)
+        if not project:
+            raise HTTPException(404, "Project not found")
+        if not project.github_repo:
+            raise HTTPException(400, "Project has no github_repo")
+        repo = project.github_repo
+        current_default = project.default_branch
+    branches = await _fetch_branches_by_repo(repo, current_default)
+    return {"repo": repo, "current_default": current_default,
+            "branches": branches, "count": len(branches)}
 
 
 @router.post("/projects", response_model=ProjectResponse)
@@ -742,6 +947,47 @@ async def toggle_user_allowed(user_id: int, body: dict):
         user.is_allowed = bool(body.get("is_allowed", False))
         await session.commit()
     return {"status": "ok", "is_allowed": user.is_allowed}
+
+
+@router.patch("/users/{user_id}/admin")
+async def toggle_user_admin(user_id: int, body: dict):
+    """Set is_admin flag for a user."""
+    async with async_session() as session:
+        user = await session.get(User, user_id)
+        if not user:
+            raise HTTPException(404, "User not found")
+        user.is_admin = bool(body.get("is_admin", False))
+        await session.commit()
+    return {"status": "ok", "is_admin": user.is_admin}
+
+
+@router.post("/users/web", response_model=UserResponse)
+async def create_web_user(body: dict):
+    """Create a web-login user (username + password). Admin use only."""
+    from openclow.api.web_auth import hash_password
+    username = (body.get("username") or "").strip()
+    password = (body.get("password") or "").strip()
+    if not username or not password:
+        raise HTTPException(400, "username and password are required")
+    if len(password) < 6:
+        raise HTTPException(400, "password must be at least 6 characters")
+    uid = f"web:{username}"
+    async with async_session() as session:
+        existing = await session.execute(select(User).where(User.chat_provider_uid == uid))
+        if existing.scalar_one_or_none():
+            raise HTTPException(409, f"Web user '{username}' already exists")
+        user = User(
+            chat_provider_type="web",
+            chat_provider_uid=uid,
+            username=username,
+            is_allowed=True,
+            is_admin=bool(body.get("is_admin", False)),
+            web_password_hash=hash_password(password),
+        )
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        return user
 
 
 # ---------------------------------------------------------------------------
@@ -1010,6 +1256,200 @@ async def set_dev_password(body: dict):
         # Clear the password (disable dev mode)
         await config_service.set_config("system", "dev_password", {"value": ""})
         return {"status": "ok", "message": "Dev password cleared — dev mode disabled"}
+
+
+# ---------------------------------------------------------------------------
+# Cloudflare settings (per-chat container tunnel provisioning)
+# ---------------------------------------------------------------------------
+
+def _mask_secret(val: str, keep: int = 6) -> str:
+    if not val or len(val) <= keep * 2:
+        return "****"
+    return val[:keep] + "****" + val[-keep:]
+
+
+@router.get("/cloudflare")
+async def get_cloudflare_config():
+    import os as _os
+    cfg = await config_service.get_config("cloudflare", "settings") or {}
+    # Fall back to env vars so fresh-deploy servers work out of the box
+    account_id = cfg.get("account_id") or _os.getenv("CF_ACCOUNT_ID", "")
+    zone_id = cfg.get("zone_id") or _os.getenv("CF_ZONE_ID", "")
+    zone_domain = cfg.get("zone_domain") or _os.getenv("CF_ZONE_DOMAIN", "")
+    api_token = cfg.get("api_token") or _os.getenv("CF_API_TOKEN", "")
+    if not any([account_id, zone_id, zone_domain, api_token]):
+        return {"configured": False}
+    return {
+        "configured": True,
+        "account_id": account_id,
+        "zone_id": zone_id,
+        "zone_domain": zone_domain,
+        "api_token": _mask_secret(api_token),
+    }
+
+
+@router.put("/cloudflare")
+async def update_cloudflare_config(body: dict):
+    account_id = (body.get("account_id") or "").strip()
+    zone_id = (body.get("zone_id") or "").strip()
+    zone_domain = (body.get("zone_domain") or "").strip()
+    api_token = (body.get("api_token") or "").strip()
+
+    if not all([account_id, zone_id, zone_domain]):
+        raise HTTPException(400, "account_id, zone_id, and zone_domain are required")
+
+    existing = await config_service.get_config("cloudflare", "settings") or {}
+
+    # Preserve existing token if masked value sent back
+    if "****" in api_token or not api_token:
+        api_token = existing.get("api_token", "")
+    if not api_token:
+        raise HTTPException(400, "api_token is required")
+
+    # Validate token against Cloudflare API
+    import urllib.request, urllib.error
+    def _cf_get(url: str):
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                import json as _json
+                return r.status, _json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            import json as _json
+            return e.code, _json.loads(e.read() or b"{}")
+        except Exception as exc:
+            return 0, {"error": str(exc)}
+
+    status, body_resp = _cf_get("https://api.cloudflare.com/client/v4/user/tokens/verify")
+    if status != 200 or not (body_resp or {}).get("success"):
+        raise HTTPException(400, f"Token invalid: {body_resp.get('errors', body_resp)}")
+
+    status, body_resp = _cf_get(f"https://api.cloudflare.com/client/v4/zones/{zone_id}")
+    if status != 200 or not (body_resp or {}).get("success"):
+        raise HTTPException(400, f"zone_id invalid or token lacks Zone:Read — {body_resp.get('errors', body_resp)}")
+
+    zone_name = (body_resp.get("result") or {}).get("name", "")
+
+    await config_service.set_config("cloudflare", "settings", {
+        "account_id": account_id,
+        "zone_id": zone_id,
+        "zone_domain": zone_domain,
+        "zone_name": zone_name,
+        "api_token": api_token,
+    })
+    return {"status": "ok", "message": f"Cloudflare configured (zone: {zone_name})"}
+
+
+@router.post("/test/cloudflare")
+async def test_cloudflare():
+    cfg = await config_service.get_config("cloudflare", "settings") or {}
+    if not cfg.get("api_token"):
+        raise HTTPException(400, "Cloudflare not configured")
+    import urllib.request, urllib.error
+    req = urllib.request.Request(
+        "https://api.cloudflare.com/client/v4/user/tokens/verify",
+        headers={"Authorization": f"Bearer {cfg['api_token']}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            import json as _json
+            data = _json.loads(r.read())
+            if data.get("success"):
+                return {"status": "ok", "message": f"Token active · zone: {cfg.get('zone_domain')}"}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+    raise HTTPException(400, "Token invalid")
+
+
+# ---------------------------------------------------------------------------
+# GitHub App settings (per-instance git token rotation)
+# ---------------------------------------------------------------------------
+
+@router.get("/github-app")
+async def get_github_app_config():
+    cfg = await config_service.get_config("github_app", "settings") or {}
+    if not cfg:
+        return {"configured": False}
+    return {
+        "configured": True,
+        "app_id": cfg.get("app_id", ""),
+        "installation_id": cfg.get("installation_id", ""),
+        "private_key_pem": _mask_secret(cfg.get("private_key_pem", ""), keep=10),
+    }
+
+
+@router.put("/github-app")
+async def update_github_app_config(body: dict):
+    app_id = str(body.get("app_id") or "").strip()
+    installation_id = str(body.get("installation_id") or "").strip()
+    private_key_pem = (body.get("private_key_pem") or "").strip()
+
+    if not app_id:
+        raise HTTPException(400, "app_id is required")
+
+    existing = await config_service.get_config("github_app", "settings") or {}
+
+    if "****" in private_key_pem or not private_key_pem:
+        private_key_pem = existing.get("private_key_pem", "")
+    if not private_key_pem:
+        raise HTTPException(400, "private_key_pem is required")
+
+    # Validate by minting a JWT and calling /app
+    try:
+        import time, jwt  # type: ignore
+        now = int(time.time())
+        token = jwt.encode(
+            {"iat": now - 60, "exp": now + 300, "iss": int(app_id)},
+            private_key_pem, algorithm="RS256",
+        )
+        import urllib.request
+        req = urllib.request.Request(
+            "https://api.github.com/app",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            import json as _json
+            data = _json.loads(r.read())
+            app_name = data.get("name", "?")
+    except ImportError:
+        app_name = None  # pyjwt not installed — skip validation, just save
+    except Exception as e:
+        raise HTTPException(400, f"GitHub App validation failed: {e}")
+
+    await config_service.set_config("github_app", "settings", {
+        "app_id": app_id,
+        "installation_id": installation_id,
+        "private_key_pem": private_key_pem,
+    })
+    msg = f"GitHub App configured" + (f" ({app_name})" if app_name else " (JWT validation skipped — install pyjwt)")
+    return {"status": "ok", "message": msg}
+
+
+@router.post("/test/github-app")
+async def test_github_app():
+    cfg = await config_service.get_config("github_app", "settings") or {}
+    if not cfg.get("app_id") or not cfg.get("private_key_pem"):
+        raise HTTPException(400, "GitHub App not configured")
+    try:
+        import time, jwt  # type: ignore
+        now = int(time.time())
+        token = jwt.encode(
+            {"iat": now - 60, "exp": now + 300, "iss": int(cfg["app_id"])},
+            cfg["private_key_pem"], algorithm="RS256",
+        )
+        import urllib.request
+        req = urllib.request.Request(
+            "https://api.github.com/app",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            import json as _json
+            data = _json.loads(r.read())
+            return {"status": "ok", "message": f"App: {data.get('name')} · id={data.get('id')}"}
+    except ImportError:
+        raise HTTPException(400, "pyjwt not installed in this container — install it to test")
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
 
 @router.post("/login")

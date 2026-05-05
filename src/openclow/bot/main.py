@@ -1,10 +1,28 @@
 """Bot entrypoint — starts ALL configured chat providers concurrently."""
 import asyncio
+import time
+from pathlib import Path
 
 from openclow.providers import factory
 from openclow.utils.logging import get_logger
 
 log = get_logger()
+
+_HEALTH_FILE = Path("/tmp/bot_health")
+_POLL_INTERVAL = 15  # seconds between provider re-checks when none configured
+
+
+async def _wait_for_providers():
+    """Block until at least one provider is configured, writing the health file
+    every poll cycle so the Docker healthcheck doesn't evict us."""
+    log.warning("bot.no_providers_configured", hint="Use the Settings Dashboard to add one.")
+    while True:
+        _HEALTH_FILE.write_text(str(time.time()))
+        await asyncio.sleep(_POLL_INTERVAL)
+        providers = await factory.get_all_configured_chat_providers()
+        if providers:
+            return providers
+        log.info("bot.waiting_for_providers")
 
 
 async def main():
@@ -12,8 +30,7 @@ async def main():
     providers = await factory.get_all_configured_chat_providers()
 
     if not providers:
-        log.error("bot.no_providers_configured")
-        raise SystemExit("No chat providers configured. Use the Settings Dashboard to add one.")
+        providers = await _wait_for_providers()
 
     log.info("bot.providers_found", types=[p[0] for p in providers])
 

@@ -166,6 +166,17 @@ class WebChatProvider(ChatProvider):
             "status": status,
         })
 
+    async def send_tool_use(
+        self,
+        chat_id: str,
+        message_id: str,
+        tool_name: str,
+        tool_input: str,
+        status: str = "running",
+    ) -> None:
+        """Alias so orchestrator's send_tool_use calls reach send_tool_event."""
+        await self.send_tool_event(chat_id, message_id, tool_name, tool_input, status)
+
     async def send_tool_output(
         self,
         chat_id: str,

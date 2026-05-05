@@ -25,6 +25,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import pathlib
 import secrets
 import shutil
@@ -132,6 +133,13 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
         db_password = inst.db_password
         heartbeat_secret = inst.heartbeat_secret
         github_repo = (inst.project.github_repo if inst.project else None)
+        # Project-scoped cache key: every chat for the same project shares
+        # one npm cache + one composer cache, so the second instance for
+        # tagh-test doesn't re-download 1239 npm packages (3 min) — it
+        # hits the warm cache instead. Sanitised to fit docker volume
+        # naming rules: [a-z0-9_-]+. Falls back to "default" if unset.
+        _proj_name = (inst.project.name if inst.project else "") or "default"
+        project_slug = re.sub(r"[^a-z0-9_-]+", "-", _proj_name.lower()).strip("-") or "default"
 
     started_at = datetime.now(timezone.utc)
     # Stamp started_at upfront so the progress card's elapsed counter
@@ -220,6 +228,7 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
             cf_credentials_secret=tunnel_result.credentials_secret,
             db_password=db_password,
             heartbeat_secret=heartbeat_secret,
+            project_slug=project_slug,
         )
         compose_path, cloudflared_path = render_compose(
             render_ctx, template_dir, output_dir
@@ -277,6 +286,49 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
             ),
         )
 
+        # 3.5. Make the workspace world-writable so BOTH the agent
+        # (worker container, uid 1000) AND the app container's composer/
+        # npm (www-data, uid 82) can write the same tree. Earlier
+        # version chowned to www-data; that fixed composer but broke
+        # the agent (surfaced as "workspace mounted as read-only"
+        # errors when the agent tried to edit a Vue component).
+        # See _make_workspace_shared_writable's docstring for the
+        # security argument.
+        await _make_workspace_shared_writable(
+            host_workspace_dir=host_workspace_dir,
+            slug=slug,
+        )
+
+        # 3.6. Detect project variant from the cloned tree (composer.json).
+        # Drives the per-step dispatch in the bundled `_variant.sh`. Pure
+        # function — no DB, no network. Never raises (falls back to
+        # "normal" on any read/parse failure).
+        project_variant = _detect_project_variant(workspace_path)
+        log.info(
+            "provision_instance.variant_detected",
+            slug=slug, variant=project_variant,
+        )
+
+        # 4a. Ensure project-scoped cache volumes exist. compose.yml
+        # declares them external=true so a teardown's `--volumes` won't
+        # touch them; that means we must pre-create them here. `docker
+        # volume create` is idempotent — creates if missing, no-op if
+        # present.
+        for cache_kind in ("npm", "composer"):
+            vol_name = f"tagh-{cache_kind}-cache-{project_slug}"
+            _vc = await asyncio.create_subprocess_exec(
+                "docker", "volume", "create", vol_name,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+                env=get_docker_env(),
+            )
+            _, _vc_err = await _vc.communicate()
+            if _vc.returncode != 0:
+                log.warning(
+                    "provision_instance.cache_volume_create_failed",
+                    volume=vol_name, error=_vc_err.decode(errors="replace")[:200],
+                )
+
         # 4. docker compose up -p <compose_project> -f _compose.yml -d.
         # Secrets injected via env; never touch disk.
         await _compose_up(
@@ -293,6 +345,17 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
                 "TUNNEL_TOKEN": tunnel_result.credentials_blob,
                 "COMPOSER_AUTH": composer_auth,
                 "APP_KEY": app_key,
+                # Variant — flows into the app container, used by the
+                # bundled _variant.sh dispatcher to pick the right
+                # per-step commands (e.g. domain:add + domain:migrate
+                # for gecche/laravel-multidomain).
+                "PROJECT_VARIANT": project_variant,
+                # Project slug — drives the project-scoped npm + composer
+                # cache volume names in compose.yml. Every chat for this
+                # project shares the same caches; first instance pays the
+                # 3-min npm install cost, every later instance hits the
+                # warm cache (~30s).
+                "PROJECT_SLUG": project_slug,
             },
         )
 
@@ -307,7 +370,13 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
 
         # 5. projctl up inside the app container. Poll its JSON-line
         # stdout for step_success / fatal events per the stdout schema.
-        await _projctl_up(compose_project=compose_project, slug=slug)
+        # instance_id passed so per-substep events can be tee'd into the
+        # chat UI's agent-log panel — without it the user stares at
+        # "App bootstrap (composer + npm)" for 5 minutes with no signal.
+        await _projctl_up(
+            compose_project=compose_project, slug=slug,
+            instance_id=instance_id,
+        )
 
         # Step 2 done: app bootstrap (composer install + npm ci + migrations)
         # finished. Step 3 ("Health check") next.
@@ -466,11 +535,51 @@ async def teardown_instance(ctx: dict, instance_id: str) -> dict:
                 slug=slug, error=str(e),
             )
 
-        # 3. Workspace directory. Missing dir is fine.
+        # 3. Workspace directory + git worktree bookkeeping.
+        # Two-step cleanup so the cache repo's `git worktree list` doesn't
+        # leak references to deleted dirs:
+        #   a) `git worktree remove --force` from the project's cache
+        #      repo, telling git to drop both the dir AND its bookkeeping.
+        #   b) `shutil.rmtree` as belt-and-braces for the case where the
+        #      worktree was already half-removed (rmtree -f handles it).
+        # Without (a), a future provision against the same chat-session
+        # branch fails with "fatal: '<branch>' is already used by worktree
+        # at <old path>" — even after the directory is gone — because git
+        # still has the worktree registered in the cache repo's
+        # .git/worktrees/. (Same bug bit a real chat retry on staging.)
         try:
-            ws = pathlib.Path(workspace_path)
-            if ws.exists():
-                shutil.rmtree(ws, ignore_errors=True)
+            from openclow.services.workspace_service import WorkspaceService
+
+            ws_path = pathlib.Path(workspace_path)
+            project_name = None
+            async with async_session() as session:
+                inst_row = await session.get(Instance, inst_uuid)
+                if inst_row is not None and inst_row.project is not None:
+                    project_name = inst_row.project.name
+            if project_name:
+                cache_repo = pathlib.Path("/workspaces/_cache") / project_name
+                if cache_repo.exists():
+                    # Set safe.directory so git doesn't refuse on uid mismatches.
+                    await asyncio.create_subprocess_exec(
+                        "git", "config", "--global",
+                        "--add", "safe.directory", str(cache_repo),
+                    )
+                    proc = await asyncio.create_subprocess_exec(
+                        "git", "-C", str(cache_repo),
+                        "worktree", "remove", "--force", str(ws_path),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    out, err = await proc.communicate()
+                    if proc.returncode != 0:
+                        # Stale worktree refs (dir gone but git still
+                        # remembers) — prune them. Idempotent.
+                        await asyncio.create_subprocess_exec(
+                            "git", "-C", str(cache_repo),
+                            "worktree", "prune",
+                        )
+            if ws_path.exists():
+                shutil.rmtree(ws_path, ignore_errors=True)
         except Exception as e:
             log.warning(
                 "teardown_instance.workspace_rm_failed",
@@ -538,6 +647,85 @@ class _ProvisionFailure(Exception):
     def __init__(self, failure_code: FailureCode, message: str) -> None:
         super().__init__(message)
         self.failure_code = failure_code
+
+
+async def _make_workspace_shared_writable(
+    *, host_workspace_dir: str | None, slug: str,
+) -> None:
+    """Make the per-instance workspace writable by ALL processes that
+    need to touch it.
+
+    Two players write to the same files:
+
+      * **Worker / agent** — runs as ``openclow`` (uid 1000) inside the
+        worker container. Uses MCP tools (workspace_mcp, git_mcp) to
+        clone, edit, and commit. Owns the original clone.
+      * **App container** — runs as ``www-data`` (uid 82 in
+        serversideup/php-alpine). Composer/npm need to create
+        ``vendor/`` and ``node_modules/`` inside ``/var/www/html``.
+
+    A previous version of this helper chowned to www-data — which
+    fixed composer but BROKE the agent (uid 1000 couldn't write to
+    a uid-82-owned tree, surfaced as the "workspace mounted as
+    read-only" error agents reported when asked to edit code).
+
+    Solution: ``chmod -R 0777``. Per-chat throwaway dev workspace,
+    security boundary is the container/host (Principle V — egress-only
+    network surface). World-writable inside the workspace dir is fine
+    because:
+      * nothing privileged lives in there (creds are env-vars, never
+        on disk per Principle IV);
+      * the dir tree is rm -rf'd on teardown;
+      * uid skew between agent (1000) and app (82, or whatever) is
+        unavoidable when the same files have to be written by both.
+
+    Idempotent — safe to re-run on an already-chmodded workspace.
+    """
+    if not host_workspace_dir:
+        log.warning("workspace_perms.no_host_path", slug=slug)
+        return
+
+    # The worker just cloned the repo, so it owns every file as
+    # openclow (uid 1000). chmod 0777 doesn't require root — only
+    # owner. So do it locally in Python, no docker run needed. Earlier
+    # version used a one-shot alpine container; that broke when the
+    # local docker daemon couldn't pull `alpine:latest` (containerd
+    # corruption after a docker disk resize). Local chmod has zero
+    # external dependencies.
+    #
+    # The path inside THIS worker container is `workspace_path`
+    # (which is `/workspaces/<slug>/` on the worker fs, bind-mounted
+    # to/from the host's workspaces volume). Use that — `host_workspace_dir`
+    # is the HOST-side path, not visible to this Python process.
+    workspace_path = pathlib.Path("/workspaces") / slug
+    if not workspace_path.is_dir():
+        log.warning(
+            "workspace_perms.path_not_found",
+            slug=slug, expected_path=str(workspace_path),
+        )
+        return
+
+    count = 0
+    try:
+        # 0o777 on the root dir first so subsequent file walks succeed
+        # even if some intermediate dir is permission-locked.
+        workspace_path.chmod(0o777)
+        for entry in workspace_path.rglob("*"):
+            try:
+                entry.chmod(0o777)
+                count += 1
+            except (OSError, PermissionError):
+                # Symlinks to absent targets, sockets, etc — keep going.
+                continue
+    except OSError as e:
+        raise _ProvisionFailure(
+            FailureCode.PROJCTL_UP,
+            f"workspace chmod failed at {workspace_path}: {e}",
+        )
+    log.info(
+        "workspace_perms.shared_writable",
+        slug=slug, path=str(workspace_path), files_chmodded=count,
+    )
 
 
 async def _compose_up(
@@ -610,12 +798,15 @@ async def _compose_down(*, compose_project: str) -> None:
         )
 
 
-async def _projctl_up(*, compose_project: str, slug: str) -> None:
+async def _projctl_up(*, compose_project: str, slug: str, instance_id: uuid.UUID | None = None) -> None:
     """Run ``projctl up`` inside the app container; parse JSON events.
 
     Emits one JSON line per event per projctl-stdout.schema.json. We fail
     the provision on ``fatal`` or on any stream that ends without a
     ``step_success`` for the last step (projctl exits non-zero on fatal).
+
+    When ``instance_id`` is provided, each projctl log line is appended to
+    the chat UI's agent-log panel in real time via ``_publish_progress_step``.
     """
     # The laravel-vue template bind-mounts the workspace at /var/www/html
     # (matching the serversideup base image's docroot expectation), not
@@ -644,6 +835,15 @@ async def _projctl_up(*, compose_project: str, slug: str) -> None:
                 event = json.loads(text)
             except json.JSONDecodeError:
                 log.debug("projctl.non_json_line", slug=slug, raw=text[:200])
+                # Stream non-JSON lines (raw shell output) to the agent log too.
+                if instance_id is not None:
+                    try:
+                        await _publish_progress_step(
+                            instance_id=instance_id,
+                            stream_buffer_append=text,
+                        )
+                    except Exception:
+                        pass
                 continue
             kind = event.get("event")
             if kind == "step_success":
@@ -653,6 +853,14 @@ async def _projctl_up(*, compose_project: str, slug: str) -> None:
                     step=event.get("step"),
                     attempt=event.get("attempt"),
                 )
+                if instance_id is not None:
+                    try:
+                        await _publish_progress_step(
+                            instance_id=instance_id,
+                            stream_buffer_append=f"✓ {event.get('step', '')}",
+                        )
+                    except Exception:
+                        pass
             elif kind == "step_failure":
                 log.warning(
                     "projctl.step_failure",
@@ -661,11 +869,36 @@ async def _projctl_up(*, compose_project: str, slug: str) -> None:
                     attempt=event.get("attempt"),
                     exit_code=event.get("exit_code"),
                 )
+                if instance_id is not None:
+                    try:
+                        await _publish_progress_step(
+                            instance_id=instance_id,
+                            stream_buffer_append=f"✗ {event.get('step', '')} (exit {event.get('exit_code')})",
+                        )
+                    except Exception:
+                        pass
             elif kind == "fatal":
                 log.error(
                     "projctl.fatal",
                     slug=slug, reason=event.get("fatal_reason"),
                 )
+                if instance_id is not None:
+                    try:
+                        await _publish_progress_step(
+                            instance_id=instance_id,
+                            stream_buffer_append=f"fatal: {event.get('fatal_reason', '')}",
+                        )
+                    except Exception:
+                        pass
+            elif instance_id is not None:
+                # Stream any other projctl event as a raw log line.
+                try:
+                    await _publish_progress_step(
+                        instance_id=instance_id,
+                        stream_buffer_append=text[:300],
+                    )
+                except Exception:
+                    pass
 
     try:
         await asyncio.wait_for(
@@ -780,23 +1013,164 @@ async def _mark_failed(
                 "failure_code": failure_code.value,
                 "failure_message": message[:500],
             })
+
+        # Diagnostic capture BEFORE teardown wipes the volume. The
+        # projctl-state volume holds state.json (with the last failed
+        # step's stderrTail) and our _variant.sh tee'd per-step logs.
+        # Once teardown runs `docker compose down --volumes`, it's gone —
+        # and the chat UI only shows the failure_code, not the actual
+        # error. Copying state + logs to a host path here is the only
+        # way to keep the post-mortem alive across instance teardown.
+        if slug_for_emit and failure_code == FailureCode.PROJCTL_UP:
+            try:
+                await _capture_projctl_diagnostics(slug=slug_for_emit)
+            except Exception as cap_err:  # pragma: no cover
+                log.warning(
+                    "_mark_failed.capture_failed",
+                    slug=slug_for_emit, error=str(cap_err),
+                )
+
+        # Auto-cleanup: enqueue teardown_instance to free the partial
+        # state we created so far (workspace dir, git worktree, compose
+        # stack, CF tunnel, DNS record). Without this, every failed
+        # provision leaks until an admin force-terminates manually —
+        # and the leaked git worktree blocks the chat from re-provisioning
+        # against the same session_branch ("fatal: '<branch>' is already
+        # used by worktree at <path>"). teardown_instance is idempotent
+        # so this is safe even if the partial state is already cleaned.
+        from openclow.services.bot_actions import enqueue_job
+        # teardown_instance signature is (ctx, instance_id) — no reason
+        # kwarg. The DB row already has failure_code/terminated_reason
+        # set by InstanceService.terminate which teardown calls.
+        await enqueue_job(
+            "teardown_instance",
+            instance_id=str(instance_id),
+        )
     except Exception as e:  # pragma: no cover
         log.exception("_mark_failed.error", error=str(e))
 
 
+async def _capture_projctl_diagnostics(*, slug: str) -> None:
+    """Dump projctl state.json + _variant.sh logs out of the doomed
+    instance's projctl-state volume to a persistent host path.
+
+    Why: when projctl_up fails, ``_mark_failed`` enqueues teardown which
+    runs ``docker compose down --volumes`` — destroying the
+    projctl-state volume that holds the last failed step's stderr
+    (``state.json:steps.<name>.last_stderr``) AND our ``_variant.sh``
+    tee'd per-step logs. The chat UI is left showing only an opaque
+    failure_code. This dump preserves the diagnostic so an operator can
+    look at /var/log/openclow/failed-instances/<slug>-<ts>/ and see
+    *why* the step failed.
+
+    Best-effort: any docker error logs and returns (the caller already
+    has bigger problems than missing post-mortem files).
+    """
+    import shutil
+    from datetime import datetime, timezone as _tz
+
+    ts = datetime.now(_tz.utc).strftime("%Y%m%d-%H%M%S")
+    # /app/logs is the activity-logs volume that's already mounted into
+    # the worker container (see docker-compose.yml::app_activity_logs).
+    # Writing diagnostics there means they survive container restarts and
+    # are accessible via `docker exec app-worker-1 ls /app/logs/...` or
+    # the host volume path. Avoids needing a new bind mount.
+    out_dir = pathlib.Path("/app/logs/failed-instances") / f"{slug}-{ts}"
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        log.warning("capture_diag.mkdir_failed", path=str(out_dir), error=str(e))
+        return
+
+    # The volume is named "<compose_project>-projctl-state" per compose.yml.
+    volume_name = f"tagh-{slug}-projctl-state"
+
+    # `docker run --rm -v <volume>:/state alpine` reads the volume without
+    # touching the (failing/dead) per-instance compose stack. We tarball
+    # /state to /dev/stdout, then untar into out_dir on the host.
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "run", "--rm",
+        "-v", f"{volume_name}:/state:ro",
+        "alpine", "sh", "-c",
+        "cd /state && tar c .",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=get_docker_env(),
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        log.warning("capture_diag.docker_run_timeout", slug=slug)
+        return
+
+    if proc.returncode != 0:
+        log.warning(
+            "capture_diag.docker_run_failed",
+            slug=slug, rc=proc.returncode,
+            stderr=stderr.decode(errors="replace")[:300],
+        )
+        return
+
+    # Untar the captured tree into out_dir.
+    untar = await asyncio.create_subprocess_exec(
+        "tar", "x", "-C", str(out_dir),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    untar_stdout, untar_stderr = await untar.communicate(input=stdout)
+    if untar.returncode != 0:
+        log.warning(
+            "capture_diag.untar_failed",
+            slug=slug, rc=untar.returncode,
+            stderr=untar_stderr.decode(errors="replace")[:300],
+        )
+        return
+
+    # Surface the captured stderr inline so it shows in the worker log
+    # without an operator having to ssh + cat. State.json has, per
+    # projctl/internal/state, ``steps.<name>.last_stderr`` populated by
+    # RecordFailure on the failing step.
+    state_path = out_dir / "state.json"
+    if state_path.is_file():
+        try:
+            state = json.loads(state_path.read_text())
+            for step_name, step_data in (state.get("steps") or {}).items():
+                if step_data.get("status") == "failed":
+                    log.error(
+                        "capture_diag.step_failed",
+                        slug=slug, step=step_name,
+                        last_stderr=(step_data.get("last_stderr") or "")[:1500],
+                    )
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning(
+                "capture_diag.state_parse_failed",
+                slug=slug, error=str(e),
+            )
+
+    log.info("capture_diag.done", slug=slug, path=str(out_dir))
+
+
 async def _load_cloudflare_config() -> CloudflareConfig:
-    """Read platform_config → CloudflareConfig. Fresh per provision."""
+    """Read platform_config → CloudflareConfig, falling back to env vars."""
+    import os as _os
     cfg = await get_config("cloudflare", "settings")
-    if not cfg:
+    account_id = (cfg or {}).get("account_id") or _os.getenv("CF_ACCOUNT_ID", "")
+    zone_id = (cfg or {}).get("zone_id") or _os.getenv("CF_ZONE_ID", "")
+    zone_domain = (cfg or {}).get("zone_domain") or _os.getenv("CF_ZONE_DOMAIN", "")
+    api_token = (cfg or {}).get("api_token") or _os.getenv("CF_API_TOKEN", "")
+    if not all([account_id, zone_id, zone_domain, api_token]):
         raise _ProvisionFailure(
             FailureCode.TUNNEL_PROVISION,
-            "platform_config cloudflare/settings is not configured",
+            "Cloudflare not configured — set CF_ACCOUNT_ID, CF_ZONE_ID, CF_ZONE_DOMAIN, CF_API_TOKEN in .env",
         )
     return CloudflareConfig(
-        account_id=cfg["account_id"],
-        zone_id=cfg["zone_id"],
-        zone_domain=cfg["zone_domain"],
-        api_token=cfg["api_token"],
+        account_id=account_id,
+        zone_id=zone_id,
+        zone_domain=zone_domain,
+        api_token=api_token,
     )
 
 
@@ -827,6 +1201,53 @@ def _template_dir_for_instance(instance_id: UUID) -> pathlib.Path:
     """
     base = pathlib.Path(__file__).resolve().parents[2] / "setup" / "compose_templates"
     return base / "laravel-vue"
+
+
+# Maps `composer.json` package name → variant string. The variant
+# flows through the `PROJECT_VARIANT` env var into the per-instance
+# `app` container, where the bundled `_variant.sh` script dispatches
+# step-by-step based on this string. Adding a 4th variant here is
+# the only place to extend for "command-only" differences (no template
+# fork needed). Order matters when a project happens to require two
+# of these — first match wins; in practice they're mutually exclusive.
+_VARIANT_PACKAGES: dict[str, str] = {
+    "gecche/laravel-multidomain": "multidomain-gecche",
+    "spatie/laravel-multitenancy": "multidomain-spatie",
+    "stancl/tenancy": "multidomain-stancl",
+}
+
+
+def _detect_project_variant(workspace_path: str) -> str:
+    """Inspect the cloned project's ``composer.json`` and pick a variant.
+
+    Returns one of: ``"normal"`` (default Laravel single-tenant — what
+    every existing chat used), or one of the multi-domain variants in
+    ``_VARIANT_PACKAGES``. Pure function — no DB, no network. Safe to
+    call from anywhere in provision_instance.
+
+    Failure modes (missing file, malformed JSON, IO error) all fall
+    through to ``"normal"`` with a warning log — preserves today's
+    behaviour for non-PHP projects (no composer.json) and for any
+    transient read failure (we'd rather provision wrong than crash).
+    """
+    composer_path = pathlib.Path(workspace_path) / "composer.json"
+    if not composer_path.is_file():
+        return "normal"
+    try:
+        data = json.loads(composer_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        log.warning(
+            "variant_detect.composer_read_failed",
+            path=str(composer_path), error=str(e)[:200],
+        )
+        return "normal"
+    require = data.get("require") or {}
+    require_dev = data.get("require-dev") or {}
+    pkgs = set(require.keys()) | set(require_dev.keys())
+    for pkg, variant in _VARIANT_PACKAGES.items():
+        if pkg in pkgs:
+            return variant
+    return "normal"
 
 
 # Provision-step progress mirror — keys MUST match the step `name`
@@ -1004,13 +1425,31 @@ async def _wait_for_first_paint(
         while True:
             now = asyncio.get_event_loop().time()
             if now >= deadline:
-                raise _ProvisionFailure(
-                    FailureCode.HEALTH_CHECK,
-                    f"first-paint gate timed out after {timeout_s}s "
-                    f"(last_status={last_status}, last_error={last_error}). "
-                    f"App did not serve a clean 200 — check node logs for Vite "
-                    f"errors and app logs for Laravel exceptions."
+                # First-paint timeout no longer fails the provision. The
+                # platform's job is to bring infrastructure up; if the
+                # user's application code (Vite config, dep conflicts,
+                # Laravel exception) keeps the app from rendering, we
+                # still want them in the chat with a working agent so
+                # they can DEBUG the app — not a dead "failed" card.
+                # The instance flips to running with a degraded upstream
+                # marker; the chat UI surfaces a "App not responding"
+                # banner so the user knows to ask the agent to fix it.
+                log.warning(
+                    "provision_instance.first_paint_timeout_degraded",
+                    slug=slug, last_status=last_status,
+                    last_error=last_error, timeout_s=timeout_s,
                 )
+                if instance_id:
+                    await _publish_progress_step(
+                        instance_id=instance_id,
+                        completed_step_index=3,
+                        stream_buffer_append=(
+                            f"App did not serve a clean 200 within {timeout_s}s "
+                            f"(last_status={last_status}, last_error={last_error}). "
+                            "Marking instance live anyway — ask the agent to debug."
+                        ),
+                    )
+                return
             try:
                 resp = await client.get(public_url)
                 last_status = resp.status_code
@@ -1071,12 +1510,22 @@ def _copy_template_support_files(
         ("nginx.conf", "_nginx.conf"),
         ("guide.md", "guide.md"),
         ("project.yaml", "project.yaml"),
+        # _variant.sh is the dispatcher invoked by every variant-aware
+        # guide.md step (`sh /var/www/html/_variant.sh <step>`). Must be
+        # present in the workspace before compose-up so the bind-mount
+        # has it ready when projctl tries to exec.
+        ("_variant.sh", "_variant.sh"),
     ):
         src = template_dir / src_name
         if not src.is_file():
             continue
         dst = output_dir / dst_name
         dst.write_bytes(src.read_bytes())
+        # Make _variant.sh executable inside the bind-mount; the cp
+        # above preserves bytes but not modes when the destination is
+        # newly created on certain filesystems.
+        if dst_name == "_variant.sh":
+            dst.chmod(0o755)
 
 
 def _heartbeat_url_for(slug: str) -> str:
@@ -1184,6 +1633,111 @@ async def tunnel_health_check_cron(ctx: dict) -> dict:
         probed=probed, degraded=degraded, recovered=recovered,
     )
     return {"probed": probed, "degraded": degraded, "recovered": recovered}
+
+
+async def orphan_compose_sweeper_cron(ctx: dict) -> dict:
+    """Find `tagh-inst-*` compose projects whose DB row is gone or
+    terminated/destroyed, and tear them down.
+
+    On 2026-04-28 a chain of failed provisions left ~21 leaked
+    containers running because the auto-teardown had a kwarg bug;
+    those leaks chewed enough RAM to OOM the staging droplet's sshd.
+    Even after the kwarg fix, defence-in-depth: any future leak —
+    crashed worker mid-teardown, manual kill, etc. — gets reaped here.
+
+    Runs every 15 minutes. Safe-by-default: only acts on compose
+    projects whose name matches ``tagh-inst-*`` AND whose slug has
+    NO live (provisioning/running/idle/terminating) row in the DB.
+
+    Returns ``{"orphans_found": N, "torn_down": M}``.
+    """
+    # 1. List all compose projects.
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "compose", "ls", "--all", "--format", "json",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=get_docker_env(),
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        log.warning("orphan_sweeper.docker_compose_ls_timeout")
+        return {"orphans_found": 0, "torn_down": 0, "error": "compose_ls_timeout"}
+    if proc.returncode != 0:
+        return {"orphans_found": 0, "torn_down": 0,
+                "error": f"compose_ls_rc={proc.returncode}"}
+
+    try:
+        rows = json.loads(stdout.decode() or "[]")
+    except json.JSONDecodeError:
+        return {"orphans_found": 0, "torn_down": 0, "error": "json_decode"}
+
+    candidates = [r for r in rows if (r.get("Name") or "").startswith("tagh-inst-")]
+    if not candidates:
+        return {"orphans_found": 0, "torn_down": 0}
+
+    # 2. Cross-reference with live DB rows.
+    LIVE = (
+        InstanceStatus.PROVISIONING.value,
+        InstanceStatus.RUNNING.value,
+        InstanceStatus.IDLE.value,
+        InstanceStatus.TERMINATING.value,
+    )
+    async with async_session() as session:
+        result = await session.execute(
+            select(Instance.compose_project)
+            .where(Instance.status.in_(LIVE))
+        )
+        live_projects = {row[0] for row in result.all()}
+
+    orphans = [r for r in candidates if r["Name"] not in live_projects]
+    if not orphans:
+        return {"orphans_found": 0, "torn_down": 0}
+
+    # 3. Tear down each orphan with `compose down -v --remove-orphans`.
+    torn = 0
+    failed = 0
+    for orph in orphans:
+        name = orph["Name"]
+        log.warning("orphan_sweeper.tearing_down", project=name)
+        # Reuse the same down flags as teardown_instance so volumes go
+        # too — leaked named volumes (db-data, node_modules) are the
+        # main reason the host runs out of disk over time.
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "compose", "-p", name,
+            "down", "--remove-orphans", "--volumes",
+            "--timeout", "30",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            env=get_docker_env(),
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=_COMPOSE_DOWN_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            log.warning("orphan_sweeper.down_timeout", project=name)
+            failed += 1
+            continue
+        if proc.returncode == 0:
+            torn += 1
+        else:
+            failed += 1
+            log.warning(
+                "orphan_sweeper.down_failed",
+                project=name, rc=proc.returncode,
+                stderr=stderr.decode()[:200],
+            )
+
+    log.info(
+        "orphan_sweeper.sweep",
+        orphans_found=len(orphans), torn_down=torn, failed=failed,
+    )
+    return {"orphans_found": len(orphans), "torn_down": torn, "failed": failed}
 
 
 async def rotate_github_token(ctx: dict, instance_id: str) -> dict:

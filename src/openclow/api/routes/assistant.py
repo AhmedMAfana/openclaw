@@ -504,6 +504,9 @@ RULES — follow exactly, no exceptions:
 
 Auth knowledge: auth.json in project workspace = Composer tokens (Nova, Spark, Packagist). Copy to ~/.composer/auth.json before any composer install or Docker build. 401/403 on build = auth issue — apply auth.json and rebuild. Never expose its contents.
 
+CODE NAVIGATION — mandatory before any file edit:
+Read the CODEBASE NAVIGATION section (injected below the rules). It tells you exactly where each type of file lives for this project's tech stack. When a user asks to change a page, screen, component, or feature — consult the navigation guide first, then find the correct file using workspace search. NEVER guess a file path or assume Blade == frontend. The navigation guide is the source of truth.
+
 AVAILABLE TOOLS (use directly — do NOT search for tools):
 
 Actions tools (prefixed mcp__actions__):
@@ -839,6 +842,19 @@ async def assistant_endpoint(
                 conv_str=conv_str,
                 skip_planning_val=skip_planning_val,
             )
+
+            # Inject tech-stack hints from the compose template so the LLM
+            # knows WHERE code lives before touching any files.
+            # Uses the same template-dir lookup as the provisioner.
+            try:
+                import pathlib as _pl
+                _tpl_base = _pl.Path(__file__).resolve().parents[2] / "setup" / "compose_templates"
+                _hints_file = _tpl_base / "laravel-vue" / "stack_hints.md"
+                if _hints_file.exists():
+                    _hints = _hints_file.read_text(encoding="utf-8").strip()
+                    system_prompt += f"\n\n{'═' * 40}\nCODEBASE NAVIGATION — read before touching ANY file:\n{_hints}\n{'═' * 40}\n"
+            except Exception:
+                pass
 
             # Inject role context section if user has a restricted role
             if not is_admin and effective_role is not None:
@@ -1271,6 +1287,17 @@ async def assistant_endpoint(
                 prompt_arg = llm_prompt
 
             # 9. Run agent INLINE
+            import os as _os
+            _claude_stderr_lines: list[str] = []
+
+            def _capture_stderr(line: str) -> None:
+                _claude_stderr_lines.append(line)
+                log.warning("claude.stderr", line=line.strip())
+
+            _claude_env: dict[str, str] = {}
+            if _os.getenv("ANTHROPIC_API_KEY"):
+                _claude_env["ANTHROPIC_API_KEY"] = _os.environ["ANTHROPIC_API_KEY"]
+
             options = ClaudeAgentOptions(
                 cwd=workspace,
                 system_prompt=system_prompt,
@@ -1285,6 +1312,8 @@ async def assistant_endpoint(
                 max_turns=80,
                 include_partial_messages=True,
                 betas=["pdfs-2024-09-25"] if has_pdf else [],
+                stderr=_capture_stderr,
+                env=_claude_env,
             )
 
             controller.add_data({"type": "message_id", "id": asst_msg_id})
@@ -1322,6 +1351,7 @@ async def assistant_endpoint(
                             _update_message(asst_msg_id_int, msg)
                         )
                         return
+                _stream_cancelled = False
                 try:
                     try:
                         async with asyncio.timeout(1800):
@@ -1384,8 +1414,12 @@ async def assistant_endpoint(
                                                 })
                     except (GeneratorExit, asyncio.CancelledError):
                         log.info("assistant.cancelled", session_id=session_id)
+                        _stream_cancelled = True
                 finally:
-                    save_content = final_text or streamed_text or "(no response)"
+                    if _stream_cancelled:
+                        save_content = "__INTERRUPTED__"
+                    else:
+                        save_content = final_text or streamed_text or "(no response)"
                     try:
                         await asyncio.shield(
                             _update_message(asst_msg_id_int, save_content)
@@ -1404,10 +1438,25 @@ async def assistant_endpoint(
                         await db.commit()
 
         except Exception as e:
-            log.error("assistant.error", error=str(e), exc_info=True)
+            err_str = str(e)
+            # Detect Claude "not logged in" — surface a clear action instead of raw SDK error
+            stderr_joined = " ".join(_claude_stderr_lines) if "_claude_stderr_lines" in dir() else ""
+            if "Not logged in" in stderr_joined or "Not logged in" in err_str or (
+                "exit code: 1" in err_str and "Command failed" in err_str
+            ):
+                user_msg = (
+                    "Claude is not authenticated. Run this command then restart:\n"
+                    "docker exec -it tagh-dev-api-1 "
+                    "/usr/local/lib/python3.12/site-packages/claude_agent_sdk/_bundled/claude login\n\n"
+                    "Or add ANTHROPIC_API_KEY=sk-ant-... to your .env file."
+                )
+                log.error("assistant.claude_not_authenticated", stderr=stderr_joined)
+            else:
+                user_msg = err_str[:500] or "Unhandled assistant error."
+                log.error("assistant.error", error=err_str, exc_info=True)
             controller.add_data({
                 "type": "error",
-                "message": str(e)[:500] or "Unhandled assistant error.",
+                "message": user_msg,
             })
 
     stream = create_run(run)

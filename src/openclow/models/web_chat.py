@@ -38,11 +38,18 @@ class WebChatSession(Base):
     messages = relationship("WebChatMessage", back_populates="session", cascade="all, delete-orphan")
     # Authoritative side lives on Instance; this name is referenced from
     # Instance.chat_session back_populates to keep ORM metadata consistent.
+    # `passive_deletes=True` tells SQLAlchemy NOT to issue UPDATE child
+    # SET fk=NULL when the parent is deleted (its default for a non-
+    # cascading relationship). The Instance.chat_session_id column is
+    # NOT NULL with ondelete='CASCADE' at the DB level — Postgres
+    # cleans the rows for us. Without passive_deletes, session.delete()
+    # raises NotNullViolationError on every attempt.
     instance_bound = relationship(
         "Instance",
         foreign_keys="Instance.chat_session_id",
         back_populates="chat_session",
         uselist=False,
+        passive_deletes=True,
     )
 
 

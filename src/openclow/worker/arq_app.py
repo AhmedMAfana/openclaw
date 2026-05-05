@@ -42,6 +42,7 @@ def _load_functions():
         teardown_instance,
         rotate_github_token,
         tunnel_health_check_cron,
+        orphan_compose_sweeper_cron,
     )
     from openclow.worker.tasks.maintenance import gc_session_branch
     return [
@@ -67,6 +68,7 @@ def _load_functions():
         teardown_instance,
         rotate_github_token,
         tunnel_health_check_cron,
+        orphan_compose_sweeper_cron,
         gc_session_branch,
     ]
 
@@ -277,6 +279,102 @@ async def on_startup(ctx: dict):
     from openclow.worker.tasks.maintenance import maintenance_loop
     asyncio.create_task(maintenance_loop())
 
+    # Build any missing compose-template images (e.g. tagh/laravel-vue-app).
+    # Runs in background so worker is immediately ready for other jobs.
+    asyncio.create_task(_preflight_template_images())
+
+
+async def _preflight_template_images():
+    """Build any compose-template images that are missing locally.
+
+    Build order:
+      1. projctl binary image (ghcr.io/tagh/projctl:dev) — built from
+         projctl/ in the repo root. Must come first because the app
+         image Dockerfile copies the binary from this stage.
+      2. Template app images (tagh/*) — each compose.yml that has a
+         sibling Dockerfile is checked; missing images are built.
+
+    Public registry images (mariadb, redis, node, cloudflared, …) are
+    intentionally skipped — Docker pulls them lazily on first compose up.
+    Only images whose tag starts with "tagh/" are treated as ours.
+    """
+    import os
+
+    _denv = get_docker_env()
+
+    repo_root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    projctl_dir = os.path.join(repo_root, "projctl")
+    projctl_image = "ghcr.io/tagh/projctl:dev"
+
+    async def _image_exists(tag: str) -> bool:
+        p = await asyncio.create_subprocess_exec(
+            "docker", "image", "inspect", tag,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=_denv,
+        )
+        await p.wait()
+        return p.returncode == 0
+
+    async def _build(tag: str, build_dir: str, timeout: int = 600) -> bool:
+        log.warning("preflight_images.building", image=tag, dir=build_dir)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "build", "-t", tag, build_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=_denv,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            if proc.returncode == 0:
+                log.info("preflight_images.build_success", image=tag)
+                return True
+            log.error("preflight_images.build_failed", image=tag,
+                      output=(stdout or b"").decode()[-2000:])
+            return False
+        except asyncio.TimeoutError:
+            log.error("preflight_images.build_timeout", image=tag)
+            return False
+        except Exception as e:
+            log.error("preflight_images.build_error", image=tag, error=str(e))
+            return False
+
+    # ── Step 1: projctl binary image ──────────────────────────────────
+    if not await _image_exists(projctl_image):
+        if os.path.isdir(projctl_dir):
+            await _build(projctl_image, projctl_dir, timeout=300)
+        else:
+            log.error("preflight_images.projctl_dir_missing", path=projctl_dir)
+    else:
+        log.debug("preflight_images.already_present", image=projctl_image)
+
+    # ── Step 2: template app images ───────────────────────────────────
+    templates_root = os.path.normpath(os.path.join(
+        os.path.dirname(__file__), "..", "setup", "compose_templates",
+    ))
+    if not os.path.isdir(templates_root):
+        log.warning("preflight_images.templates_dir_missing", path=templates_root)
+        return
+
+    import re
+    for dirpath, _dirs, files in os.walk(templates_root):
+        if "compose.yml" not in files or "Dockerfile" not in files:
+            continue
+        compose_path = os.path.join(dirpath, "compose.yml")
+        try:
+            content = open(compose_path).read()
+        except OSError:
+            continue
+        for match in re.finditer(r"^\s+image:\s*(\S+)", content, re.MULTILINE):
+            tag = match.group(1)
+            # Only build images we own — tagged tagh/* — skip all public images.
+            if not tag.startswith("tagh/"):
+                continue
+            if not await _image_exists(tag):
+                await _build(tag, dirpath)
+            else:
+                log.debug("preflight_images.already_present", image=tag)
+
 
 async def _start_infra_tunnels():
     """Start dozzle + settings tunnels in background. Never blocks worker startup."""
@@ -411,7 +509,10 @@ def _load_cron_jobs():
     default ensures only one worker executes a given tick).
     """
     from openclow.services.inactivity_reaper import reaper_cron
-    from openclow.worker.tasks.instance_tasks import tunnel_health_check_cron
+    from openclow.worker.tasks.instance_tasks import (
+        tunnel_health_check_cron,
+        orphan_compose_sweeper_cron,
+    )
     return [
         cron(
             reaper_cron,
@@ -428,6 +529,20 @@ def _load_cron_jobs():
             tunnel_health_check_cron,
             name="tunnel_health_check",
             second=0,
+            run_at_startup=False,
+            unique=True,
+        ),
+        # Defence-in-depth: every 15 min, find any tagh-inst-*
+        # compose project whose DB row is gone (or terminated/destroyed)
+        # and tear it down. Catches leaks from crashed teardown jobs,
+        # manual `docker stop` on the orchestrator, partial provisions
+        # — anything that orphans containers and leaks RAM/disk.
+        # 2026-04-28 incident: 21 leaked containers OOM-killed sshd.
+        cron(
+            orphan_compose_sweeper_cron,
+            name="orphan_compose_sweeper",
+            minute={2, 17, 32, 47},  # offset 2min from reaper to avoid lockstep
+            second=30,
             run_at_startup=False,
             unique=True,
         ),

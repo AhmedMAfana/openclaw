@@ -29,13 +29,22 @@ log = get_logger()
 
 _PREFIX = "openclow:instance"
 
-# Must be >= arq job_timeout (3600s) so a single long task cannot expire
-# its own lock mid-run. Matches the project-lock safety margin.
-_DEFAULT_TTL = 3900
+# Short TTL + heartbeat-while-alive pattern (see InstanceLock._heartbeat).
+# Long TTLs were a footgun: a previous design used 3900s (65min) so a
+# single long agent turn couldn't self-expire — but if the process died
+# mid-run (uvicorn graceful-shutdown timeout, OOM kill, deploy restart),
+# the lock stayed for 65min and locked the user out of their own chat
+# with "Chat busy — finish previous step before sending more". The
+# user's only recourse was an admin redis DEL.
+#
+# New design: 120s TTL + heartbeat that extends every 60s WHILE the
+# holding task is alive. Normal long agent turns stay locked because
+# heartbeat keeps the TTL fresh. Process death → no heartbeat → lock
+# auto-recovers in <120s. No operator intervention needed.
+_DEFAULT_TTL = 120
+_HEARTBEAT_INTERVAL_S = 60
 
 # Default patience window when a second request finds the slug busy.
-# Chosen to absorb normal turn-taking latency without letting a
-# broken/hung task block a user for more than a moment.
 _DEFAULT_WAIT = 30
 
 
@@ -55,9 +64,19 @@ class InstanceLock:
         self.holder_id = holder_id
         self.ttl = ttl
         self._held = False
+        self._heartbeat_task: asyncio.Task | None = None
 
     async def release(self) -> None:
         """Release the lock if we still own it."""
+        # Stop the heartbeat first so it doesn't try to extend a key
+        # we're about to delete (or worse, recreate it after we DELETE).
+        if self._heartbeat_task is not None and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._heartbeat_task = None
         if not self._held:
             return
         try:
@@ -80,6 +99,41 @@ class InstanceLock:
                 await self.redis.expire(self.key, self.ttl + extra_seconds)
         except Exception as e:
             log.warning("instance_lock.extend_failed", error=str(e))
+
+    async def _heartbeat_loop(self) -> None:
+        """Background task: refresh the lock's TTL every
+        ``_HEARTBEAT_INTERVAL_S`` seconds while we hold it.
+
+        This is what makes the short ``_DEFAULT_TTL`` safe for long
+        agent turns: the lock stays alive as long as our task is alive
+        to refresh it. If the worker / api process dies mid-turn, no
+        more heartbeats fire, and the lock self-expires in <TTL — so
+        the user isn't stuck behind a dead holder.
+        """
+        try:
+            while self._held:
+                await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
+                try:
+                    current = await self.redis.get(self.key)
+                    if current and current.decode() == self.holder_id:
+                        # Reset the TTL to its full value, NOT extend by
+                        # +N. A fresh full TTL means the next process-death
+                        # window is bounded by TTL, not TTL × number of
+                        # heartbeats survived.
+                        await self.redis.expire(self.key, self.ttl)
+                    else:
+                        # Lost ownership somehow (TTL expired during a stall,
+                        # someone force-released, etc). Stop heartbeating.
+                        self._held = False
+                        return
+                except Exception as e:
+                    log.warning(
+                        "instance_lock.heartbeat_failed",
+                        slug=self.slug, error=str(e),
+                    )
+        except asyncio.CancelledError:
+            # Normal path: release() cancels us.
+            pass
 
 
 async def _get_redis() -> aioredis.Redis:
@@ -105,6 +159,7 @@ async def acquire_instance_lock(
         acquired = await r.set(lock.key, lock.holder_id, nx=True, ex=ttl)
         if acquired:
             lock._held = True
+            lock._heartbeat_task = asyncio.create_task(lock._heartbeat_loop())
             log.info("instance_lock.acquired", slug=slug, holder=holder_id)
             return lock
 
@@ -119,6 +174,7 @@ async def acquire_instance_lock(
                 )
                 if acquired:
                     lock._held = True
+                    lock._heartbeat_task = asyncio.create_task(lock._heartbeat_loop())
                     log.info(
                         "instance_lock.acquired_after_wait",
                         slug=slug, holder=holder_id,

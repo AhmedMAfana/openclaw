@@ -81,32 +81,112 @@ const TinkeringIndicator: FC = () => (
 const ThinkingPanel: FC = () => {
   const { steps } = useThinking();
   const [open, setOpen] = useState(true);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (scrollRef.current && open) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [steps, open]);
+
   if (steps.length === 0) return null;
+  const logText = steps.join("\n");
+
   return (
-    <div className="mb-3 rounded-lg border border-border/50 bg-muted/30 text-xs text-muted-foreground overflow-hidden">
+    <div className="mb-3 rounded-lg border border-border/50 bg-muted/30 overflow-hidden">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-1.5 px-3 py-2 hover:bg-muted/50 transition-colors text-left"
+        className="flex w-full items-center gap-1.5 px-3 py-2 hover:bg-muted/50 transition-colors text-left text-xs text-muted-foreground"
       >
-        <span className="text-primary/70">{open ? "▾" : "▸"}</span>
-        <span className="font-medium">Thinking ({steps.length} {steps.length === 1 ? "step" : "steps"})</span>
+        <ChevronDownIcon className={cn("size-3 transition-transform shrink-0", !open && "-rotate-90")} />
+        <span className="font-medium text-foreground/70">Working...</span>
+        <span className="ml-1 inline-block size-1.5 rounded-full bg-primary animate-pulse" />
+        <span className="ml-auto opacity-50">{steps.length} step{steps.length !== 1 ? "s" : ""}</span>
       </button>
       {open && (
-        <ul className="px-3 pb-2 space-y-0.5">
-          {steps.map((s, i) => (
-            <li key={i} className="flex items-center gap-1.5 truncate">
-              <span className="text-primary/50">•</span>
-              <span className="truncate font-mono">{s}</span>
-            </li>
-          ))}
-        </ul>
+        <div
+          ref={scrollRef}
+          className="text-[11px] sm:text-xs font-mono text-foreground/75 whitespace-pre-wrap break-words [overflow-wrap:anywhere] max-h-40 overflow-y-auto overflow-x-auto rounded-b bg-black/25 dark:bg-black/50 px-3 py-2 leading-[1.55]"
+        >
+          {logText}
+        </div>
       )}
     </div>
   );
 };
 
-export const Thread: FC = () => {
+const ImageLightbox: FC<{ src: string; onClose: () => void }> = ({ src, onClose }) => {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
   return (
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/85"
+      onClick={onClose}
+    >
+      <img
+        src={src}
+        alt="Preview"
+        className="max-h-[90vh] max-w-[90vw] rounded-xl object-contain shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      />
+      <button
+        className="absolute top-4 right-4 z-10 flex items-center justify-center size-9 rounded-full bg-white/20 hover:bg-white/40 text-white border border-white/30 shadow-lg transition-colors"
+        onClick={onClose}
+        aria-label="Close preview"
+      >
+        <XIcon className="size-5" />
+      </button>
+    </div>
+  );
+};
+
+export const Thread: FC = () => {
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      const target = e.target as HTMLElement;
+      if (!target.closest(".aui-thread-viewport")) return;
+      // Click on an <img> directly
+      if (target.tagName === "IMG") {
+        const src = (target as HTMLImageElement).src;
+        if (src && !src.startsWith("data:,")) { setLightboxSrc(src); return; }
+      }
+      // Click on the attachment chip container — but not the X remove button
+      const chip = target.closest("[data-attachment-chip]") as HTMLElement | null;
+      if (chip && !target.closest("button[aria-label='Remove attachment']")) {
+        const img = chip.querySelector("img") as HTMLImageElement | null;
+        if (img?.src) setLightboxSrc(img.src);
+      }
+    }
+    // Add pointer cursor to images in thread via injected style
+    const style = document.createElement("style");
+    style.textContent = ".aui-thread-viewport img { cursor: pointer; }";
+    document.head.appendChild(style);
+    // Patch the hidden file input to allow multiple selections (max 5)
+    function patchFileInput() {
+      const input = document.querySelector("input[type='file']") as HTMLInputElement | null;
+      if (input && !input.multiple) {
+        input.multiple = true;
+      }
+    }
+    patchFileInput();
+    const observer = new MutationObserver(patchFileInput);
+    observer.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("click", handleClick);
+    return () => {
+      window.removeEventListener("click", handleClick);
+      document.head.removeChild(style);
+      observer.disconnect();
+    };
+  }, []);
+
+  return (
+    <>
+      {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
     <ThreadPrimitive.Root
       className="aui-root aui-thread-root @container flex h-full flex-col bg-background"
       style={{
@@ -116,8 +196,8 @@ export const Thread: FC = () => {
       }}
     >
       <ThreadPrimitive.Viewport
-        turnAnchor="top"
-        className="aui-thread-viewport relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth px-4 pt-4"
+        turnAnchor="bottom"
+        className="aui-thread-viewport relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll px-4 pt-4"
       >
         <ThreadPrimitive.Empty>
           <ThreadWelcome />
@@ -137,6 +217,7 @@ export const Thread: FC = () => {
         </ThreadPrimitive.ViewportFooter>
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>
+    </>
   );
 };
 
@@ -200,23 +281,50 @@ const ThreadWelcome: FC = () => {
   );
 };
 
-const AttachmentItem: FC = () => (
-  <AttachmentPrimitive.Root className="relative flex items-center gap-1.5 rounded-lg border bg-muted px-2 py-1 text-xs">
-    <AttachmentPrimitive.unstable_Thumb className="size-8 rounded object-cover" />
-    <span className="max-w-[100px] truncate text-foreground">
-      <AttachmentPrimitive.Name />
-    </span>
-    <AttachmentPrimitive.Remove asChild>
-      <button
-        type="button"
-        className="ml-1 rounded-full p-0.5 text-muted-foreground hover:bg-background hover:text-foreground"
-        aria-label="Remove attachment"
-      >
-        <XIcon className="size-3" />
-      </button>
-    </AttachmentPrimitive.Remove>
-  </AttachmentPrimitive.Root>
-);
+const AttachmentItem: FC = () => {
+  const file = useAuiState((s) => (s.attachment as { file?: File }).file);
+  const name = useAuiState((s) => s.attachment.name);
+  const [src, setSrc] = useState<string | null>(null);
+  const [dims, setDims] = useState<string>("");
+
+  useEffect(() => {
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    setSrc(url);
+    if (file.type.startsWith("image/")) {
+      const img = new Image();
+      img.onload = () => setDims(`${img.naturalWidth}×${img.naturalHeight}`);
+      img.src = url;
+    }
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  return (
+    <AttachmentPrimitive.Root data-attachment-chip className="group relative inline-flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-2 py-1.5 pr-7 max-w-[200px] cursor-pointer">
+      {src ? (
+        <img src={src} alt={name} className="size-8 rounded object-cover shrink-0 border border-border/50" />
+      ) : (
+        <div className="size-8 rounded bg-muted flex items-center justify-center shrink-0 border border-border/50 text-[9px] text-muted-foreground font-mono uppercase">
+          {name.split(".").pop()}
+        </div>
+      )}
+      <div className="flex flex-col min-w-0">
+        <span className="truncate text-[11px] text-foreground leading-tight">{name}</span>
+        {dims && <span className="text-[10px] text-muted-foreground leading-tight">{dims}</span>}
+      </div>
+      <AttachmentPrimitive.Remove asChild>
+        <button
+          type="button"
+          className="absolute right-1.5 top-1/2 -translate-y-1/2 hidden group-hover:flex items-center justify-center size-4 rounded-full bg-muted-foreground/60 hover:bg-muted-foreground text-background"
+          aria-label="Remove attachment"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <XIcon className="size-2.5" />
+        </button>
+      </AttachmentPrimitive.Remove>
+    </AttachmentPrimitive.Root>
+  );
+};
 
 const ComposerAttachmentPreview: FC = () => (
   // eslint-disable-next-line @typescript-eslint/no-deprecated
@@ -602,7 +710,6 @@ function formatMsgTime(date: Date | undefined): string {
 
 const AssistantMessage: FC = () => {
   const isRunning = useAuiState((s) => s.message.status?.type === "running");
-  const createdAt = useAuiState((s) => (s.message as { createdAt?: Date }).createdAt);
   // Read text directly from state — bypasses MessagePrimitive.Parts and the
   // PartByIndexProvider → SmoothContextProvider → useSmoothStatus chain that
   // caused React error #185 (conditional zustand hook call = unstable hook count).
@@ -614,6 +721,7 @@ const AssistantMessage: FC = () => {
   // __LOADING__ = worker placeholder written before first progress_card heartbeat.
   // Render as a spinner so it's visible after page refresh but doesn't show raw text.
   const isLoadingPlaceholder = text === "__LOADING__";
+  const isInterrupted = text === "__INTERRUPTED__";
   const progressCard = (() => {
     if (!text.startsWith("__PROGRESS_CARD__")) return null;
     try { return JSON.parse(text.slice("__PROGRESS_CARD__".length)) as CardData; }
@@ -632,6 +740,10 @@ const AssistantMessage: FC = () => {
           <WorkerProgressCard card={progressCard} />
         ) : isLoadingPlaceholder ? (
           <TinkeringIndicator />
+        ) : isInterrupted ? (
+          <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground/60 italic select-none">
+            <span>⏹</span> Stopped
+          </span>
         ) : (
           <StandaloneMarkdown text={text} />
         )}
@@ -644,15 +756,12 @@ const AssistantMessage: FC = () => {
       {/* Min-height row so icons appearing/disappearing never shift the layout.
           flex-wrap so on narrow viewports the timestamp drops to the next line
           instead of mashing into the actions. */}
-      <div className="mt-1 ml-2 min-h-7 flex flex-wrap items-center gap-x-3 gap-y-1">
-        <BranchPicker />
-        <AssistantActionBar />
-        {!isRunning && createdAt && (
-          <span className="ml-auto pr-1 text-[11px] text-muted-foreground/50 tabular-nums select-none">
-            {formatMsgTime(createdAt)}
-          </span>
-        )}
-      </div>
+      {!isInterrupted && (
+        <div className="mt-1 ml-2 min-h-7 flex flex-wrap items-center gap-x-3 gap-y-1">
+          <BranchPicker />
+          <AssistantActionBar />
+        </div>
+      )}
     </MessagePrimitive.Root>
   );
 };

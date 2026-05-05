@@ -33,6 +33,21 @@ for f in .env auth.json; do
   [[ -f $f ]] || { echo "error: $HERE/$f is required (source of truth for secrets)"; exit 1; }
 done
 
+# Sanity: built frontend bundle present on laptop. The prod compose
+# bind-mounts ./chat_frontend/dist into the api container read-only
+# (docker-compose.prod.yml:46), so an empty / missing host dir would mask
+# the image's baked bundle and 404 every /chat/ asset. We build locally
+# (or in the worker container — see README) and rsync the result up in
+# step 3.5 below.
+if ! [[ -f chat_frontend/dist/index.html ]]; then
+  echo "error: chat_frontend/dist/index.html missing — build the React frontend first."
+  echo "  if your laptop has Node:    (cd chat_frontend && npm ci && npm run build)"
+  echo "  if your laptop has no Node: build inside the worker container, e.g."
+  echo "    docker compose exec worker bash -c 'cd /app/chat_frontend && npm install && npm run build'"
+  echo "    docker cp tagh-devops-worker-1:/app/chat_frontend/dist/. chat_frontend/dist/"
+  exit 1
+fi
+
 # Sanity: server reachable as root
 ssh -o BatchMode=yes -o ConnectTimeout=5 "root@$SERVER" 'true' \
   || { echo "error: cannot SSH root@$SERVER — add your key first"; exit 1; }
@@ -75,6 +90,23 @@ if ! swapon --show | grep -q '^/swapfile'; then
   sysctl -q vm.swappiness=10
 fi
 
+# inotify limits — Vite (in every per-instance node container) watches
+# every file under /var/www/html, including thousands in vendor/ and
+# node_modules/. Default fs.inotify.max_user_watches=8192 (or ~30k on
+# some kernels) runs out fast: Vite throws ENOSPC, never writes
+# public/hot, Laravel's @vite directive then can't find the manifest
+# and the chat preview URL 500s with ViteManifestNotFoundException.
+# 524288 watches + 8192 instances is the standard "developer machine"
+# bump and covers ~50 concurrent per-instance node services. Persist
+# via /etc/sysctl.d so a reboot keeps them.
+if ! [[ -f /etc/sysctl.d/99-tagh-inotify.conf ]]; then
+  cat > /etc/sysctl.d/99-tagh-inotify.conf <<'INOTIFY'
+fs.inotify.max_user_watches = 524288
+fs.inotify.max_user_instances = 8192
+INOTIFY
+  sysctl -q -p /etc/sysctl.d/99-tagh-inotify.conf
+fi
+
 # Docker log rotation — keep json logs from eating disk over weeks.
 if ! [[ -f /etc/docker/daemon.json ]] || ! grep -q '"max-size"' /etc/docker/daemon.json; then
   mkdir -p /etc/docker
@@ -103,18 +135,31 @@ sudo -u web bash <<EOSU
   set -euo pipefail
   if [[ -d "$REMOTE_DIR/app/.git" ]]; then
     cd "$REMOTE_DIR/app"
-    git fetch --depth=1 origin "$BRANCH"
+    # Explicit refspec so the remote-tracking ref exists after a shallow
+    # fetch — without ":refs/remotes/origin/<branch>" only FETCH_HEAD is
+    # set and "git reset --hard origin/<branch>" fails for new branches.
+    git fetch --depth=1 origin "+$BRANCH:refs/remotes/origin/$BRANCH"
     git reset --hard "origin/$BRANCH"
   else
     git clone --depth=1 --branch "$BRANCH" "$REPO_URL" "$REMOTE_DIR/app"
   fi
   cd "$REMOTE_DIR/app"
-  # Frontend build sits inside the app image in prod, but compose still tries
-  # to bind-mount chat_frontend/dist from docker-compose.yml — provide an empty
-  # dir so it doesn't fail even though the prod override removes the mount.
-  install -d chat_frontend/dist
+  # Ensure the dir exists with web ownership; we'll populate the bundle in
+  # the next step via rsync-from-laptop.
+  install -d -m 0755 chat_frontend/dist
 EOSU
 REMOTE
+
+# ── 2.5 Ship the freshly-built React bundle to the server ────────────────────
+say "2.5/6  rsync chat_frontend/dist → server (built locally — see prod compose:46)"
+# `--delete` so removed assets on the new bundle don't linger on the server.
+# The prod compose mounts ./chat_frontend/dist:ro into the api container; an
+# empty dir would mask the image's baked fallback and 404 the entire /chat/.
+# We rsync as root (which can overwrite any existing file regardless of
+# ownership from prior partial deploys), then chown the result to web so
+# the api container reads it under its expected uid.
+rsync -az --delete chat_frontend/dist/ "root@$SERVER:$REMOTE_DIR/app/chat_frontend/dist/"
+ssh "root@$SERVER" "chown -R web:web '$REMOTE_DIR/app/chat_frontend/dist'"
 
 # ── 3. Push local secrets ────────────────────────────────────────────────────
 say "3/6  scp .env + auth.json → server (600, owned by web)"
@@ -130,9 +175,77 @@ set -euo pipefail
 cd "$REMOTE_DIR/app"
 COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
 
+# Resource preflight — refuse to build when the host is already
+# memory-pressured. On 2026-04-28 we kicked off two parallel docker
+# rebuilds while ~21 leaked containers were still running; the box
+# OOM-thrashed, sshd died, and recovery required a power cycle from
+# the DO console. Numbers chosen to leave 1G+ free for nginx+sshd
+# headroom while the build runs.
+free_mb=\$(free -m | awk '/^Mem:/ {print \$7}')   # MemAvailable in MB
+free_disk_gb=\$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+echo "[preflight] free memory: \${free_mb} MiB  /  free disk: \${free_disk_gb} GiB"
+if [[ \$free_mb -lt 1500 ]]; then
+  echo "[preflight] FATAL: only \${free_mb} MiB free — refusing to rebuild." >&2
+  echo "[preflight] Free memory first: docker ps then docker compose -p <project> down -v --remove-orphans" >&2
+  echo "[preflight] Or skip the build: bash scripts/deploy-staging.sh --skip-build" >&2
+  exit 1
+fi
+if [[ \$free_disk_gb -lt 5 ]]; then
+  echo "[preflight] FATAL: only \${free_disk_gb} GiB free disk — refusing to rebuild." >&2
+  echo "[preflight] Free up space: docker system prune -af --volumes" >&2
+  exit 1
+fi
+
+# Reap obvious stale per-instance compose projects BEFORE building so
+# the build doesn't compete with leaked containers for RAM.
+stale=\$(docker compose ls --all --format json 2>/dev/null | python3 -c '
+import json, sys, subprocess
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for r in rows:
+    name = r.get("Name", "")
+    status = (r.get("Status") or "").lower()
+    if name.startswith("tagh-inst-") and ("exited" in status or "dead" in status):
+        print(name)
+' 2>/dev/null || true)
+if [[ -n "\$stale" ]]; then
+  echo "[preflight] reaping exited orphan instances: \$stale"
+  while IFS= read -r p; do
+    [[ -n "\$p" ]] && docker compose -p "\$p" down --volumes --remove-orphans --timeout 15 >/dev/null 2>&1 || true
+  done <<< "\$stale"
+fi
+
 \$COMPOSE pull postgres redis dozzle
 if [[ "$SKIP_BUILD" != "1" ]]; then
-  \$COMPOSE build api worker bot
+  # Build *every* service that has a build: stanza, not just api/worker/bot.
+  # The migrate service has its own image (app-migrate) because it inherits
+  # the *app YAML anchor's build. Skipping it leaves a stale image frozen
+  # at whatever migrations existed last time it was built — alembic then
+  # silently no-ops because it can't see the new revision files. (Same goes
+  # for the setup service.) This bit us once; don't let it bite again.
+  \$COMPOSE build api worker bot migrate setup
+
+  # Per-instance compose-template images. provision_instance does
+  # \`docker compose up\` against the rendered template; that compose.yml
+  # references \`tagh/laravel-vue-app:latest\` and \`tagh/projctl:dev\`.
+  # Neither exists on a public registry — both are built from in-repo
+  # source. Without these, every container-mode chat fails at
+  # \`docker compose up\` with "pull access denied for tagh/...".
+  # Idempotent: docker layer cache makes re-builds free if source unchanged.
+  docker build -t tagh/projctl:dev "$REMOTE_DIR/app/projctl/"
+
+  # The laravel-vue-app Dockerfile does \`FROM ghcr.io/tagh/projctl:dev\`
+  # (full GHCR path), so docker tries to pull from GHCR even when we
+  # have the image locally as \`tagh/projctl:dev\`. Tag-as-alias trick:
+  # docker checks the local cache first, so this satisfies the FROM
+  # without needing GHCR auth (which the org doesn't have on staging).
+  docker tag tagh/projctl:dev ghcr.io/tagh/projctl:dev
+
+  docker build --build-arg PROJCTL_TAG=dev \\
+               -t tagh/laravel-vue-app:latest \\
+               "$REMOTE_DIR/app/src/openclow/setup/compose_templates/laravel-vue/"
 fi
 
 # Start data services first, wait for healthcheck.
@@ -141,8 +254,23 @@ fi
 # Run migrations to completion.
 \$COMPOSE run --rm migrate
 
-# App services.
-\$COMPOSE up -d api bot worker dozzle
+# App services. --force-recreate is critical: when only the image
+# *content* changed (FROM rebuilt with new code) but the tag didn't
+# (\`:latest\` → \`:latest\`), \`compose up -d\` is a no-op — it sees the
+# tag is unchanged and leaves the running container alone. Symptom:
+# you SSH in 2 hours after deploy and find the worker still running
+# yesterday's bytecode while disk has today's source. Force-recreate
+# guarantees the new image actually starts.
+\$COMPOSE up -d --force-recreate api bot worker
+\$COMPOSE up -d dozzle
+
+# Existing activity_logs named volume might have wrong (root) ownership
+# from before Dockerfile.app's mkdir+chown of /app/logs landed. Docker
+# only syncs perms onto a volume on FIRST creation; existing volumes are
+# stuck with their original perms. One-shot chown via the api container
+# (it has the volume mounted; --user 0 so chown succeeds). Idempotent.
+\$COMPOSE exec -T --user 0 api chown -R openclow:openclow /app/logs 2>&1 \\
+  | sed 's/^/[fix-perms] /' || true
 
 \$COMPOSE ps
 REMOTE
@@ -212,5 +340,11 @@ echo "GET https://$DOMAIN/chat/ → $code"
 ssh "root@$SERVER" "ss -tlnp | awk 'NR==1 || /:(8000|5432|6379|9999)/'"
 ssh "root@$SERVER" "cd $REMOTE_DIR/app && docker compose -f docker-compose.yml -f docker-compose.prod.yml ps"
 
+# What did we actually ship?
+deployed_sha=$(ssh "root@$SERVER" "cd $REMOTE_DIR/app && git rev-parse --short HEAD")
+deployed_msg=$(ssh "root@$SERVER" "cd $REMOTE_DIR/app && git log -1 --pretty=format:'%s'")
+
 echo
 echo "✓ deploy complete — https://$DOMAIN/chat/"
+echo "  branch:   $BRANCH"
+echo "  commit:   $deployed_sha — $deployed_msg"

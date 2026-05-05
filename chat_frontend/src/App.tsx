@@ -59,9 +59,11 @@ import { NewChatModal } from "@/components/NewChatModal";
 import type { CardAction } from "@/types/stream-events";
 import { ThinkingContext } from "@/lib/thinking-context";
 import { TaskModeContext } from "@/lib/task-mode-context";
-import { PlusIcon, SettingsIcon, LogOutIcon, PencilIcon, TrashIcon, CheckIcon, XIcon, ShieldIcon, AlertCircleIcon, Loader2 } from "lucide-react";
+import { PlusIcon, SettingsIcon, LogOutIcon, PencilIcon, TrashIcon, CheckIcon, XIcon, ShieldIcon, AlertCircleIcon, Loader2, UserIcon } from "lucide-react";
 import { AccessPanel } from "@/components/AccessPanel";
 import { SettingsPanel } from "@/components/SettingsPanel"; // admin-only settings
+import { ProfilePanel } from "@/components/ProfilePanel";  // all users
+import { InstanceLimitModal } from "@/components/instance/InstanceLimitModal";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -183,7 +185,62 @@ async function readStream(
 
 // ── App ──────────────────────────────────────────────────────────────────────
 
+// ── 404 page ──────────────────────────────────────────────────────────────────
+
+function NotFoundPage() {
+  return (
+    <div className="h-screen flex items-center justify-center bg-background">
+      <div className="text-center space-y-4 max-w-sm px-6">
+        <p className="text-6xl font-bold text-muted-foreground/20">404</p>
+        <p className="text-lg font-semibold text-foreground">Page not found</p>
+        <p className="text-sm text-muted-foreground">The page you're looking for doesn't exist.</p>
+        <a
+          href="/chat"
+          className="inline-block mt-2 px-4 py-2 rounded-lg text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+        >
+          Go to chat
+        </a>
+      </div>
+    </div>
+  );
+}
+
+// ── Auth guard wrapper ────────────────────────────────────────────────────────
+
+const KNOWN_PATHS = new Set(["/chat", "/chat/"]);
+
 export default function App() {
+  const [authStatus, setAuthStatus] = useState<"checking" | "ok" | "unauth">("checking");
+  const isUnknownRoute = !KNOWN_PATHS.has(window.location.pathname);
+
+  useEffect(() => {
+    fetch("/api/me", { credentials: "include" })
+      .then((r) => {
+        if (r.status === 401) {
+          window.location.href = "/chat/login";
+          setAuthStatus("unauth");
+        } else {
+          setAuthStatus("ok");
+        }
+      })
+      .catch(() => { setAuthStatus("ok"); });
+  }, []);
+
+  if (authStatus === "checking") {
+    return (
+      <div className="h-screen flex items-center justify-center bg-background">
+        <div className="size-8 rounded-full border-2 border-white/10 border-t-white/70 animate-spin" />
+      </div>
+    );
+  }
+  if (authStatus === "unauth") return null;
+  if (isUnknownRoute) return <NotFoundPage />;
+  return <ChatApp />;
+}
+
+// ── Main chat application ─────────────────────────────────────────────────────
+
+function ChatApp() {
   const [threads, setThreads] = useState<ChatThread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -287,13 +344,8 @@ export default function App() {
         break;
       case "instance_limit_exceeded":
         if (evt.variant === "per_user_cap") {
-          setActiveCard({
-            kind: "cap_exceeded",
-            prompt: "End one of these to free up a slot for a new chat.",
-            actions: evt.actions ?? [],
-            variant: "per_user_cap",
-            cap: evt.cap,
-          });
+          setInstanceLimitCap(evt.cap ?? 3);
+          setShowInstanceLimitModal(true);
         } else {
           setActiveCard({
             kind: "cap_exceeded",
@@ -360,8 +412,16 @@ export default function App() {
   // Current user id (for WebSocket URL)
   const [myUserId, setMyUserId] = useState<number | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [hasGitToken, setHasGitToken] = useState(true); // optimistic — gate only once loaded
+  const [toast, setToast] = useState<string | null>(null);
+  const [showInstanceLimitModal, setShowInstanceLimitModal] = useState(false);
+  const [instanceLimitCap, setInstanceLimitCap] = useState(3);
   const [showAccessPanel, setShowAccessPanel] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+  const [showProfilePanel, setShowProfilePanel] = useState(false);
+
+  // Message to auto-send after the user picks a project (intercepted from onNew)
+  const pendingMsgForProjectRef = useRef<string | null>(null);
 
   // WebSocket for worker progress events
   const wsRef = useRef<WebSocket | null>(null);
@@ -395,7 +455,23 @@ export default function App() {
   // Abort controller for in-progress streams
   const abortRef = useRef<AbortController | null>(null);
 
+  // Message queue — holds at most one pending message typed while the agent is running.
+  // Using a ref so the finally block always sees the latest value without stale closures.
+  const queuedMsgRef = useRef<{ text: string } | null>(null);
+  const [queuedMsgDisplay, setQueuedMsgDisplay] = useState<string | null>(null);
+  const [queueInputText, setQueueInputText] = useState("");
+
   useEffect(() => { loadThreads(); loadProjects(); loadMe(); }, []);
+
+  // Esc cancels the active stream
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape" && isRunning) cancelStream();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRunning]);
 
   // Open worker-progress WebSocket whenever the active thread changes
   useEffect(() => {
@@ -469,9 +545,19 @@ export default function App() {
     }
     setIsRunning(false);
     setThinkingSteps([]);
-    // Drop any __LOADING__ stubs from message state immediately — they're placeholders
-    // that the worker never finished populating, and we don't want them showing as blank rows
-    setMessages((prev) => prev.filter((m) => m.content !== "__LOADING__"));
+    setMessages((prev) => {
+      const filtered = prev.filter((m) => m.content !== "__LOADING__");
+      // Always mark the last assistant message as interrupted (even with partial content)
+      const lastAsstIdx = filtered.map((m, i) => ({ m, i }))
+        .filter(({ m }) => m.role === "assistant")
+        .pop()?.i;
+      if (lastAsstIdx !== undefined) {
+        return filtered.map((m, i) =>
+          i === lastAsstIdx ? { ...m, content: "__INTERRUPTED__" } : m
+        );
+      }
+      return filtered;
+    });
     // Also abort any arq worker jobs enqueued during this session
     if (activeThreadId) {
       fetch(`/api/threads/${activeThreadId}/cancel`, {
@@ -488,6 +574,7 @@ export default function App() {
         const data = await res.json();
         setMyUserId(data.id ?? null);
         setIsAdmin(data.is_admin ?? false);
+        setHasGitToken(data.has_git_token ?? true);
       }
     } catch { /* non-critical */ }
   }
@@ -495,7 +582,7 @@ export default function App() {
   function scrollThreadToBottom(delay = 50) {
     setTimeout(() => {
       const viewport = getViewport();
-      if (viewport) viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
+      if (viewport) viewport.scrollTo({ top: viewport.scrollHeight, behavior: "instant" });
     }, delay);
   }
 
@@ -595,14 +682,39 @@ export default function App() {
               })
             );
           }
+        } else if (data.type === "tool_use" && (data as unknown as { tool?: string }).tool) {
+          // Append tool activity to the progress card's agent log so tool use
+          // from the orchestrator is visible alongside agent text tokens.
+          const toolDesc = (data as unknown as { tool: string }).tool;
+          const stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          setMessages((prev) => prev.map((m) => {
+            if (!matchesMsg(m.id)) return m;
+            if (!m.content.startsWith("__PROGRESS_CARD__")) return m;
+            try {
+              const card = JSON.parse(m.content.slice("__PROGRESS_CARD__".length));
+              const prevBuf = card.stream_buffer ?? "";
+              const line = `[${stamp}] ${toolDesc}`;
+              const merged = (prevBuf + (prevBuf ? "\n" : "") + line).slice(-4096);
+              return { ...m, content: `__PROGRESS_CARD__${JSON.stringify({ ...card, stream_buffer: merged })}` };
+            } catch { return m; }
+          }));
         } else if (data.type === "progress_card" && data.card) {
           // Inject session_id so WorkerProgressCard can render a Stop button.
-          // Preserve stream_buffer accumulated by agent_token events.
           const cardWithSession: Record<string, unknown> = { ...(data.card as Record<string, unknown>), session_id: sessionId };
           setMessages((prev) => {
             const existing = prev.find((m) => matchesMsg(m.id));
-            // Carry over stream_buffer so progress_card updates don't wipe the log
-            if (existing?.content.startsWith("__PROGRESS_CARD__")) {
+            // Server-sent stream_buffer is the canonical log (the worker
+            // accumulates it server-side and tails to 4KB). Only fall
+            // back to a locally-accumulated buffer if the server snapshot
+            // hasn't started carrying one yet — otherwise we'd freeze on
+            // the very first line and ignore every subsequent update,
+            // which is exactly the "agent log only refreshes on hard reload"
+            // bug. agent_token / tool_output events still append locally;
+            // those updates survive because they're applied AFTER this
+            // handler runs (later progress_card frames overwrite, but the
+            // server picks them up via _publish_progress_step).
+            const serverBuf = (cardWithSession.stream_buffer as string | undefined) ?? "";
+            if (!serverBuf && existing?.content.startsWith("__PROGRESS_CARD__")) {
               try {
                 const old = JSON.parse(existing.content.slice("__PROGRESS_CARD__".length));
                 if (old.stream_buffer) cardWithSession.stream_buffer = old.stream_buffer;
@@ -647,6 +759,19 @@ export default function App() {
             scrollThreadToBottom();
             return [...prev, { id: msgKey, role: "assistant" as const, content: text }];
           });
+        } else if (
+          data.type === "instance_failed" ||
+          data.type === "instance_provisioning" ||
+          data.type === "instance_limit_exceeded" ||
+          data.type === "instance_upstream_degraded" ||
+          data.type === "instance_busy" ||
+          data.type === "instance_terminating" ||
+          data.type === "instance_retry_started"
+        ) {
+          // Instance lifecycle events published by the reaper/worker directly
+          // to the Redis WS channel (e.g. orphan recovery) route through the
+          // same dispatcher as SSE stream events.
+          dispatchInstanceEvent(data as unknown as StreamEvent);
         }
       } catch { /* ignore malformed */ }
     };
@@ -737,7 +862,8 @@ export default function App() {
     if (id === activeThreadId) return; // already on this thread
     cancelStream();
     setPendingPlan(null);
-    setShowSettingsPanel(false); // clicking a chat should hide settings
+    setShowSettingsPanel(false);
+    setShowProfilePanel(false);
     setActiveThreadId(id);
     setMessages([]);
     // Restore project context — use fromList if provided (avoids stale threads state)
@@ -766,10 +892,14 @@ export default function App() {
             .map((m: { id: string; role: string; content: string; createdAt?: string; isComplete?: boolean }) => ({
               id: m.id,
               role: m.role as "user" | "assistant",
-              // Empty incomplete assistant messages show as loading spinner on refresh
-              content: m.role === "assistant" && m.isComplete === false && m.content.trim() === ""
-                ? "__LOADING__"
-                : m.content,
+              content: (() => {
+                if (m.role !== "assistant") return m.content;
+                // Orphaned __LOADING__ in DB (stream died before finalize) → show interrupted
+                if (m.content === "__LOADING__") return "__INTERRUPTED__";
+                // Empty incomplete message → show loading spinner (user refreshed mid-stream on this tab)
+                if (m.isComplete === false && m.content.trim() === "") return "__LOADING__";
+                return m.content;
+              })(),
               createdAt: m.createdAt,
             }))
         );
@@ -787,10 +917,48 @@ export default function App() {
   // binding path). Cancel = no chat row. This makes a no-project chat
   // structurally impossible — the bug class that produced gaslit "I'll
   // spin up your env" replies on chat 35 etc.
-  function newThread() {
+  function showToast(msg: string) {
+    setToast(msg);
+    setTimeout(() => setToast(null), 4000);
+  }
+
+  function submitQueuedInput() {
+    const text = queueInputText.trim();
+    if (!text) return;
+    queuedMsgRef.current = { text };
+    setQueuedMsgDisplay(text);
+    setQueueInputText("");
+  }
+
+  async function newThread() {
+    if (!hasGitToken) {
+      showToast("Set your git token first — go to My Profile");
+      setShowProfilePanel(true);
+      setShowSettingsPanel(false);
+      return;
+    }
+    // Check instance cap before opening the project picker — show the
+    // manage-instances modal immediately instead of letting the user
+    // pick a project and type a message only to be blocked.
+    if (myUserId != null) {
+      try {
+        const r = await fetch(`/api/users/${myUserId}/instances`, { credentials: "include" });
+        if (r.ok) {
+          const d = await r.json();
+          const count = (d.instances ?? []).filter(
+            (i: { status: string }) => ["provisioning", "running", "idle"].includes(i.status)
+          ).length;
+          if (count >= (d.cap ?? 3)) {
+            setInstanceLimitCap(d.cap ?? 3);
+            setShowInstanceLimitModal(true);
+            return;
+          }
+        }
+      } catch { /* non-critical — proceed anyway */ }
+    }
     cancelStream();
     setPendingPlan(null);
-    setShowSettingsPanel(false); // creating a chat should hide settings
+    setShowSettingsPanel(false);
     setShowNewChatModal(true);
   }
 
@@ -818,6 +986,8 @@ export default function App() {
         // `if (id === activeThreadId) return`)
         setActiveThreadId(null);
         setTimeout(() => setActiveThreadId(thread.remoteId), 0);
+        // pendingMsgForProjectRef is fired by a useEffect that watches
+        // activeThreadId + activeProjectId (declared after runtime hook).
       }
     } catch { /* silently fail */ }
   }
@@ -929,7 +1099,22 @@ export default function App() {
         res.body,
         abort.signal,
         (accumulated) => { pendingRef.current = accumulated; }, // ref only — no setState per chunk
-        (tool) => setThinkingSteps((prev) => [...prev, tool]),
+        (tool) => {
+          const stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          setThinkingSteps((prev) => {
+            const toolBase = tool.replace(/^\[[\d:]+\] /, "");
+            if (prev.length > 0) {
+              const last = prev[prev.length - 1];
+              const lastBase = last.replace(/ \(×\d+\)$/, "").replace(/^\[[\d:]+\] /, "");
+              if (lastBase === toolBase) {
+                const match = last.match(/\(×(\d+)\)$/);
+                const count = match ? parseInt(match[1]) + 1 : 2;
+                return [...prev.slice(0, -1), `${last.replace(/ \(×\d+\)$/, "")} (×${count})`];
+              }
+            }
+            return [...prev, `[${stamp}] ${toolBase}`];
+          });
+        },
         // Reconcile temp ID with the real DB message ID so refresh shows the right message.
         // Also update liveIdRef so RAF/finally keep finding the message after rename.
         (realId) => {
@@ -945,11 +1130,21 @@ export default function App() {
       );
     } finally {
       streamDone = true;
-      // Cancel RAF and snap immediately to full received text
       if (rafId !== null) cancelAnimationFrame(rafId);
-      setMessages((prev) =>
-        prev.map((m) => m.id === liveIdRef.current ? { ...m, content: pendingRef.current } : m)
-      );
+      if (abort.signal.aborted) {
+        // Stream was cancelled — always show interrupted marker (discard partial text)
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.id !== liveIdRef.current) return m;
+            return { ...m, content: "__INTERRUPTED__" };
+          })
+        );
+      } else {
+        // Normal end — snap to full received text
+        setMessages((prev) =>
+          prev.map((m) => m.id === liveIdRef.current ? { ...m, content: pendingRef.current } : m)
+        );
+      }
     }
   }
 
@@ -964,6 +1159,14 @@ export default function App() {
     // Extract attachments provided by assistant-ui's attachment adapter
     const msgAttachments = (message as AppendMessage & { attachments?: Array<{ name: string; contentType?: string; content?: Array<{ type: string; image?: string; text?: string }> }> }).attachments ?? [];
     if (!userText && msgAttachments.length === 0) return;
+
+    // No project selected — intercept send and open project picker instead of
+    // letting the backend return a "no project bound" error card.
+    if (!activeProjectId) {
+      pendingMsgForProjectRef.current = userText || null;
+      setShowNewChatModal(true);
+      return;
+    }
 
     // Build backend attachment payload from CompleteAttachment content parts
     const backendAttachments = msgAttachments.flatMap((att) =>
@@ -1030,6 +1233,7 @@ export default function App() {
     } finally {
       if (!abortRef.current?.signal.aborted) setIsRunning(false);
       if (abortRef.current?.signal.aborted === false) abortRef.current = null;
+      // Auto-fire any queued message is handled by a useEffect watching isRunning.
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeThreadId, threads, activeProjectId, taskMode]);
@@ -1153,10 +1357,54 @@ export default function App() {
     adapters: { attachments: attachmentAdapter },
   });
 
+  // When the agent finishes, auto-fire any queued message.
+  useEffect(() => {
+    if (isRunning) return;
+    const queued = queuedMsgRef.current;
+    if (!queued) return;
+    queuedMsgRef.current = null;
+    setQueuedMsgDisplay(null);
+    setTimeout(() => {
+      runtime.thread.append({ role: "user", content: [{ type: "text", text: queued.text }] });
+    }, 80);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRunning]);
+
+  // After the user picks a project via the picker (triggered mid-message), auto-fire
+  // the message that was intercepted in onNew before the project was set.
+  useEffect(() => {
+    if (!activeThreadId || !activeProjectId) return;
+    const pending = pendingMsgForProjectRef.current;
+    if (!pending) return;
+    pendingMsgForProjectRef.current = null;
+    setTimeout(() => {
+      runtime.thread.append({ role: "user", content: [{ type: "text", text: pending }] });
+    }, 150);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeThreadId, activeProjectId]);
+
   // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
     <div className="h-screen flex overflow-hidden bg-background">
+      {/* Toast notification */}
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-3 px-4 py-3 rounded-xl bg-amber-500 text-black text-sm font-medium shadow-xl animate-in fade-in slide-in-from-bottom-2 duration-200">
+          <span>⚠️ {toast}</span>
+          <button onClick={() => setToast(null)} className="ml-1 opacity-70 hover:opacity-100">✕</button>
+        </div>
+      )}
+
+      {/* Instance limit modal — shown when per-user cap exceeded */}
+      {showInstanceLimitModal && myUserId && (
+        <InstanceLimitModal
+          userId={myUserId}
+          cap={instanceLimitCap}
+          onOpenChat={(chatId) => { selectThread(String(chatId)); setShowInstanceLimitModal(false); }}
+          onClose={() => setShowInstanceLimitModal(false)}
+        />
+      )}
+
       {/* Plan v2 Change 1: mandatory project-pick modal on "New chat".
           Mounted at root so it overlays the entire chat surface. */}
       {showNewChatModal ? (
@@ -1271,9 +1519,16 @@ export default function App() {
               Access Control
             </button>
           )}
+          <button
+            onClick={() => { setShowProfilePanel(true); setShowSettingsPanel(false); setShowAccessPanel(false); }}
+            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs transition-colors w-full text-left ${showProfilePanel ? "bg-white/8 text-foreground" : "text-muted-foreground hover:text-foreground hover:bg-white/5"}`}
+          >
+            <UserIcon className="size-3.5 shrink-0" />
+            My Profile
+          </button>
           {isAdmin && (
             <button
-              onClick={() => setShowSettingsPanel(true)}
+              onClick={() => { setShowSettingsPanel(true); setShowProfilePanel(false); setShowAccessPanel(false); }}
               className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs transition-colors w-full text-left ${showSettingsPanel ? "bg-white/8 text-foreground" : "text-muted-foreground hover:text-foreground hover:bg-white/5"}`}
             >
               <SettingsIcon className="size-3.5 shrink-0" />
@@ -1287,9 +1542,16 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Chat area or settings panel */}
+      {/* Chat area or settings/profile panel */}
       {showSettingsPanel ? (
-        <SettingsPanel onClose={() => setShowSettingsPanel(false)} />
+        <SettingsPanel onClose={() => setShowSettingsPanel(false)} onProjectsChanged={loadProjects} />
+      ) : showProfilePanel ? (
+        <ProfilePanel
+          onClose={() => { setShowProfilePanel(false); loadMe(); }}
+          userId={myUserId!}
+          onOpenChat={(chatId) => { selectThread(String(chatId)); setShowProfilePanel(false); }}
+          onTokenSaved={loadMe}
+        />
       ) : (
         <main className="flex-1 overflow-hidden bg-background relative flex flex-col">
           {pendingPlan && (() => {
@@ -1450,6 +1712,43 @@ export default function App() {
               </TaskModeContext.Provider>
             </ThinkingContext.Provider>
           </ThreadErrorBoundary>
+
+          {/* Queued message bar — visible while the agent is running */}
+          {isRunning && activeThreadId && (
+            <div className="shrink-0 border-t border-border bg-background px-4 py-2">
+              {queuedMsgDisplay ? (
+                <div className="flex items-center justify-between gap-3 rounded-lg bg-primary/10 border border-primary/20 px-3 py-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="size-1.5 rounded-full bg-primary animate-pulse shrink-0" />
+                    <span className="text-xs text-primary font-medium truncate">Queued: {queuedMsgDisplay}</span>
+                  </div>
+                  <button
+                    onClick={() => { queuedMsgRef.current = null; setQueuedMsgDisplay(null); setQueueInputText(""); }}
+                    className="text-xs text-muted-foreground hover:text-foreground shrink-0"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <input
+                    className="flex-1 bg-secondary border border-border rounded-lg px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                    placeholder="Queue next message…"
+                    value={queueInputText}
+                    onChange={(e) => setQueueInputText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitQueuedInput(); } }}
+                  />
+                  <button
+                    onClick={submitQueuedInput}
+                    disabled={!queueInputText.trim()}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium bg-primary text-primary-foreground disabled:opacity-40 hover:bg-primary/90 transition-colors"
+                  >
+                    Queue
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </main>
       )}
 

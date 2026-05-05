@@ -13,6 +13,7 @@ import {
   UsersIcon,
   LinkIcon,
   BoxesIcon,
+  CloudIcon,
   XIcon,
 } from "lucide-react";
 import { SettingsDashboard } from "@/components/settings/SettingsDashboard";
@@ -25,12 +26,16 @@ import { SettingsInstances } from "@/components/settings/SettingsInstances";
 import { SettingsUsers } from "@/components/settings/SettingsUsers";
 import { SettingsChannels } from "@/components/settings/SettingsChannels";
 import { SettingsHost } from "@/components/settings/SettingsHost";
+import { SettingsCloudflare } from "@/components/settings/SettingsCloudflare";
+import { SettingsGithubApp } from "@/components/settings/SettingsGithubApp";
 
 export type SettingsPage =
   | "dashboard"
   | "llm"
   | "chat"
   | "git"
+  | "cloudflare"
+  | "github-app"
   | "system"
   | "host"
   | "projects"
@@ -40,6 +45,7 @@ export type SettingsPage =
 
 interface SettingsPanelProps {
   onClose: () => void;
+  onProjectsChanged?: () => void;
 }
 
 const PAGE_LABELS: Record<SettingsPage, string> = {
@@ -47,6 +53,8 @@ const PAGE_LABELS: Record<SettingsPage, string> = {
   llm: "LLM / AI",
   chat: "Chat Platform",
   git: "Git Provider",
+  cloudflare: "Cloudflare",
+  "github-app": "GitHub App",
   system: "System",
   host: "Host Mode",
   projects: "Projects",
@@ -73,6 +81,8 @@ const NAV: Array<{ section?: string; items: NavItem[] }> = [
       { page: "llm", icon: <BrainIcon className="size-4" />, label: "LLM / AI" },
       { page: "chat", icon: <MessageSquareIcon className="size-4" />, label: "Chat Platform" },
       { page: "git", icon: <GitBranchIcon className="size-4" />, label: "Git Provider" },
+      { page: "cloudflare", icon: <CloudIcon className="size-4" />, label: "Cloudflare" },
+      { page: "github-app", icon: <GitBranchIcon className="size-4" />, label: "GitHub App" },
       { page: "system", icon: <ServerIcon className="size-4" />, label: "System" },
       { page: "host", icon: <ServerIcon className="size-4" />, label: "Host Mode" },
     ],
@@ -88,21 +98,23 @@ const NAV: Array<{ section?: string; items: NavItem[] }> = [
   },
 ];
 
-export function SettingsPanel({ onClose }: SettingsPanelProps) {
+export function SettingsPanel({ onClose, onProjectsChanged }: SettingsPanelProps) {
   const [page, setPage] = useState<SettingsPage>("dashboard");
 
   function renderPage() {
     switch (page) {
-      case "dashboard": return <SettingsDashboard onNavigate={setPage} />;
-      case "llm":       return <SettingsLLM />;
-      case "chat":      return <SettingsChat />;
-      case "git":       return <SettingsGit />;
-      case "system":    return <SettingsSystem />;
-      case "host":      return <SettingsHost />;
-      case "projects":  return <SettingsProjects />;
-      case "instances": return <SettingsInstances />;
-      case "users":     return <SettingsUsers />;
-      case "channels":  return <SettingsChannels />;
+      case "dashboard":   return <SettingsDashboard onNavigate={setPage} />;
+      case "llm":         return <SettingsLLM />;
+      case "chat":        return <SettingsChat />;
+      case "git":         return <SettingsGit />;
+      case "cloudflare":  return <SettingsCloudflare />;
+      case "github-app":  return <SettingsGithubApp />;
+      case "system":      return <SettingsSystem />;
+      case "host":        return <SettingsHost />;
+      case "projects":    return <SettingsProjects onProjectsChanged={onProjectsChanged} />;
+      case "instances":   return <SettingsInstances />;
+      case "users":       return <SettingsUsers />;
+      case "channels":    return <SettingsChannels />;
     }
   }
 

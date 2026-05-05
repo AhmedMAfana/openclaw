@@ -7,13 +7,19 @@
 #     (its compose `command:` block). Do not run npm from this guide.
 #
 # What projctl owns: project-level deps + DB migrations + queue worker.
+#
+# Variant-aware steps (`setup-env`, `migrate`, `seed`) dispatch through
+# `_variant.sh` based on PROJECT_VARIANT (set by the orchestrator from
+# composer.json detection). Variants today: normal,
+# multidomain-gecche, multidomain-spatie, multidomain-stancl. See
+# _variant.sh for per-variant commands.
 
 ## install-php
 
 ```projctl
-cmd: composer install --no-interaction --prefer-dist
+cmd: composer install --no-interaction --prefer-dist || composer install --no-interaction --prefer-dist --no-scripts
 cwd: /var/www/html
-success_check: test -d /var/www/html/vendor
+success_check: test -d /var/www/html/vendor && test -f /var/www/html/vendor/autoload.php
 skippable: false
 max_attempts: 3
 retry_policy: exponential_backoff
@@ -24,23 +30,72 @@ Installs PHP dependencies via Composer. Required before `artisan migrate`.
 Reads `COMPOSER_AUTH` env (set by the orchestrator from /app/auth.json) for
 private VCS auth.
 
+Two-stage cmd: try with scripts first (so a healthy project still runs
+its post-install hooks), fall back to `--no-scripts` if any post-install
+artisan command crashes. Real-world failure mode this guards against:
+a feature branch with a duplicate `use` statement in `config/*.php`
+makes `php artisan package:discover` exit 255 — and without the
+fallback, projctl would retry the whole install 3 times and fail the
+provision over a project-side code bug. With `--no-scripts` the vendor
+tree is fully populated; the success_check verifies autoload.php
+actually exists; and the agent inside the chat can fix the underlying
+PHP issue without re-provisioning.
+
+## setup-env
+
+```projctl
+cmd: sh /var/www/html/_variant.sh setup-env
+cwd: /var/www/html
+success_check: test -f /var/www/html/.env -o -f /var/www/html/.env.${INSTANCE_HOST}
+skippable: false
+max_attempts: 1
+timeout_seconds: 30
+```
+
+Provisions the per-domain .env file(s) before any artisan command.
+Vanilla Laravel: copies .env.example → .env and sed-overrides DB/APP_URL/etc.
+gecche/laravel-multidomain: writes .env.${INSTANCE_HOST} and registers
+the domain via `php artisan domain:add`. Other multidomain variants
+fall through to the vanilla .env path.
+
 ## migrate
 
 ```projctl
-cmd: php artisan migrate --force
+cmd: sh /var/www/html/_variant.sh migrate
 cwd: /var/www/html
-success_check: php artisan migrate --pretend > /dev/null
+success_check: sh /var/www/html/_variant.sh migrate --check 2>/dev/null || php artisan migrate --pretend > /dev/null
 skippable: false
 max_attempts: 2
-timeout_seconds: 120
+timeout_seconds: 300
 ```
 
 Runs DB migrations against the per-instance MySQL.
+Variant-aware: normal Laravel uses `migrate --force`; gecche uses
+`domain:migrate --domain=$INSTANCE_HOST --force`; spatie/stancl run
+their per-tenant migrate commands. See _variant.sh.
+
+## seed-admin
+
+```projctl
+cmd: sh /var/www/html/_variant.sh seed-admin
+cwd: /var/www/html
+success_check: test 1 -eq 1
+skippable: true
+max_attempts: 1
+timeout_seconds: 30
+```
+
+Inserts a default Admin user into the per-instance MySQL so the
+SSO / fake-auth `/webapi/set` flow has something to authenticate
+as on a fresh instance. Idempotent (INSERT IGNORE on PK=1) and
+skippable — if the project's users table requires extra NOT NULL
+columns the seeder doesn't know about, the step logs the failure
+but doesn't block the rest of the boot.
 
 ## seed
 
 ```projctl
-cmd: php artisan db:seed --force 2>&1 | tee /tmp/seed.log; grep -qiE "duplicate entry|already exists|integrity constraint" /tmp/seed.log && echo "seed already applied — treating as success" || tail -1 /tmp/seed.log
+cmd: sh /var/www/html/_variant.sh seed 2>&1 | tee /tmp/seed.log; grep -qiE "duplicate entry|already exists|integrity constraint" /tmp/seed.log && echo "seed already applied — treating as success" || tail -1 /tmp/seed.log
 cwd: /var/www/html
 success_check: test 1 -eq 1
 skippable: true
@@ -61,10 +116,29 @@ projects that want stricter verification can override it with a
 project-specific assertion (e.g.
 `php artisan tinker --execute='exit(\App\Models\User::count() ? 0 : 1)'`).
 
+## grant-admin-roles
+
+```projctl
+cmd: sh /var/www/html/_variant.sh grant-admin-roles
+cwd: /var/www/html
+success_check: test 1 -eq 1
+skippable: true
+max_attempts: 1
+timeout_seconds: 60
+```
+
+Post-seed Spatie role grant. Must run AFTER `seed` because the project's
+DatabaseSeeder commonly truncates `model_has_roles` / `role_has_permissions`
+to rebuild role catalogs — wiping any pre-seed grant. This step assigns
+every existing Role + Permission to `user_id=1` (the admin row inserted
+by `seed-admin`) so the SSO/fake-auth user can hit role-gated controllers
+without the "User does not have the right roles" UnauthorizedException.
+No-op for projects without spatie/laravel-permission.
+
 ## storage-link
 
 ```projctl
-cmd: php artisan storage:link
+cmd: sh /var/www/html/_variant.sh storage-link
 cwd: /var/www/html
 success_check: test -L /var/www/html/public/storage
 skippable: true

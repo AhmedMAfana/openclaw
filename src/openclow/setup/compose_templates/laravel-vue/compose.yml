@@ -15,11 +15,24 @@ name: ${COMPOSE_PROJECT}
 #       GITHUB_TOKEN, HEARTBEAT_SECRET, HEARTBEAT_URL, and
 #       CF_TUNNEL_TOKEN before invoking `docker compose up`.
 
+# Per-service memory caps. Without these, a runaway npm install or a
+# Laravel job that allocates without bounds can swallow the whole
+# host's RAM and OOM-kill sshd / nginx — which is exactly how
+# 2026-04-28 turned the staging box into a "ping ok, ssh dead" brick.
+# Numbers chosen to fit ~6 concurrent instances on an 8 GB droplet:
+#   app(1G) + node(1.5G) + db(512M) + redis(128M) + meili(256M)
+#   + mailpit(64M) + cloudflared(128M) ≈ 3.6G per instance.
+# Override per-deployment via PROJECT_MEM_* env if a project genuinely
+# needs more — but YAGNI: the defaults below cover every Laravel
+# template we've actually shipped.
+
 services:
   app:
     image: tagh/laravel-vue-app:latest
     restart: unless-stopped
     working_dir: /var/www/html
+    mem_limit: ${INSTANCE_MEM_APP:-1g}
+    mem_reservation: 256m
     environment:
       - INSTANCE_SLUG=${INSTANCE_SLUG}
       - INSTANCE_HOST=${INSTANCE_HOST}
@@ -50,9 +63,20 @@ services:
       # this name so private VCS deps (gitlab.com, private GitHub repos)
       # can clone without writing auth.json to the per-instance disk.
       - COMPOSER_AUTH
+      # PROJECT_VARIANT is set by the orchestrator from
+      # _detect_project_variant(workspace) — drives the per-step
+      # dispatch in the bundled `_variant.sh` script. One of:
+      # "normal", "multidomain-gecche", "multidomain-spatie",
+      # "multidomain-stancl". Default "normal" if unset.
+      - PROJECT_VARIANT=${PROJECT_VARIANT:-normal}
+      # Composer caches downloaded packages here. Same project-wide
+      # cache trick as npm: first instance pays the cost, every
+      # subsequent instance hits the cache. ~60s → ~10s on rerun.
+      - COMPOSER_HOME=/host-composer-cache
     volumes:
       - ${WORKSPACE_HOST_DIR}/${INSTANCE_SLUG}:/var/www/html
       - projctl-state:/var/lib/projctl
+      - composer-cache:/host-composer-cache
     depends_on:
       db:
         condition: service_healthy
@@ -62,9 +86,30 @@ services:
       - instance
 
   node:
-    image: node:20-alpine
+    # glibc base, NOT alpine. Real-world Laravel/Vue templates (Vuexy,
+    # Spatie media-library, Inertia starter, …) ship lockfiles that
+    # pin platform-specific binaries — most notably esbuild's
+    # `@esbuild/linux-x64` and Sass's `linux-x64` native modules,
+    # both built for glibc. Run them on alpine (musl) and they
+    # silently segfault: vite then crashes with `[plugin:vite:esbuild]
+    # write EPIPE` because the esbuild subprocess died on first
+    # transform. bookworm-slim costs ~30 MB extra layer over alpine
+    # but eliminates an entire class of musl-vs-glibc landmines.
+    # (2026-04-28: tagh-test esbuild segfault diagnosed by EPIPE +
+    # absence of any OOM in dmesg + cgroup at 7% mem use.)
+    image: node:20-bookworm-slim
     restart: unless-stopped
     working_dir: /var/www/html
+    # Node gets the largest cap by far. Real numbers from staging
+    # 2026-04-28: esbuild's per-transform peak hit 2.31 GB anon-rss
+    # on the Vuexy template's main.ts. Plus the Node parent process
+    # (~300 MB), Vite's worker pool, npm cache, etc. Total cgroup
+    # usage during a cold transform pass legitimately exceeds 3 GB.
+    # 4G gives enough headroom for the worst-case spike + a couple
+    # of concurrent re-transforms during HMR. Reduce via
+    # INSTANCE_MEM_NODE for projects with smaller dep graphs.
+    mem_limit: ${INSTANCE_MEM_NODE:-6g}
+    mem_reservation: 512m
     # Install front-end deps + start the Vite dev server. projctl runs
     # inside `app` and can't docker-exec into other services, so the
     # node service does its own bootstrap. The container restarts if
@@ -73,26 +118,93 @@ services:
       - sh
       - -c
       - |
-        if [ ! -d /var/www/html/node_modules ]; then
-          (cd /var/www/html && npm ci);
+        set -e
+        cd /var/www/html
+        # Real-world Laravel/Vue projects (e.g. Vuexy admin templates)
+        # have peer-dep conflicts that strict `npm ci` rejects with
+        # ERESOLVE. --legacy-peer-deps mirrors what these projects'
+        # READMEs tell humans to do. Fall back to `npm install` if the
+        # lockfile is missing/stale (npm ci is strict about both).
+        # Check `.bin/vite` (the symlink npm creates), not `vite` package
+        # dir — the package can exist with no .bin if a previous install
+        # was interrupted by a restart-loop, and `npx vite` fails with
+        # "vite: not found" on a half-installed tree forever.
+        if [ ! -x node_modules/.bin/vite ]; then
+          # Wipe a partial node_modules tree so the install starts clean.
+          # Otherwise npm ci sees an existing tree and may skip work.
+          [ -d node_modules ] && rm -rf node_modules
+          # `npm ci` is strict about lockfile shape; real-world Laravel/
+          # Vue templates (Vuexy, Spatie media-library) ship lockfiles
+          # with peer-dep conflicts. --legacy-peer-deps is what the
+          # project READMEs tell humans to use; we mirror that. Fall
+          # back to `npm install` if the lockfile is missing/stale.
+          npm ci --legacy-peer-deps --no-audit --no-fund \
+            || npm install --legacy-peer-deps --no-audit --no-fund
+          # If the install STILL didn't produce vite, something is
+          # fundamentally wrong (auth on private packages, network
+          # blip, broken lockfile). Loud failure beats silent restart-
+          # loop with vite-not-found.
+          if [ ! -x node_modules/.bin/vite ]; then
+            echo "FATAL: npm install completed but node_modules/.bin/vite is missing." >&2
+            echo "Inspect with: docker logs <container>; check .npm-debug.log inside the container." >&2
+            sleep 60   # don't tight-loop the host
+            exit 1
+          fi
         fi
         # Use the platform's Vite overlay config (vite.config.tagh.mjs)
         # so server.origin points at the cloudflared HMR hostname and
         # laravel-vite-plugin writes the public URL to public/hot —
         # otherwise the browser tries 0.0.0.0:5173 and fails.
-        cd /var/www/html && exec npx vite --config vite.config.tagh.mjs --host 0.0.0.0
+        exec node_modules/.bin/vite --config vite.config.tagh.mjs --host 0.0.0.0
     environment:
       - INSTANCE_HOST=${INSTANCE_HOST}
       - INSTANCE_HMR_HOST=${INSTANCE_HMR_HOST}
       - NODE_ENV=development
+      # Override npm cache to a shared volume that survives container
+      # destruction and is reused across instances. Without this, every
+      # `npm ci` re-downloads ~1200 packages from registry (3+ minutes
+      # on the Vuexy template). With it, first instance warms the
+      # cache; subsequent instances for the same project pull from disk
+      # (~30s). Per project, not per instance — same lockfile = same
+      # cache hit shape.
+      - npm_config_cache=/host-npm-cache
     volumes:
       - ${WORKSPACE_HOST_DIR}/${INSTANCE_SLUG}:/var/www/html
+      # Shared npm download cache. Named volume scoped to PROJECT (not
+      # the instance), so all chats for the same project hit the same
+      # cache. Created lazily on first use; survives compose teardown
+      # because it's NOT cleaned by `docker compose down --volumes` for
+      # external volumes. The orchestrator pre-creates it.
+      - npm-cache:/host-npm-cache
     networks:
       - instance
 
   db:
-    image: mysql:8.4
+    # MariaDB instead of mysql:8.4. Reasons:
+    #   1. Alpine's `mysql-client` package (in the per-instance app
+    #      image) is actually mariadb-client — it doesn't ship MySQL
+    #      8.4's `caching_sha2_password` auth plugin. Connecting to
+    #      mysql:8.4 fails with "Plugin caching_sha2_password could
+    #      not be loaded: No such file or directory".
+    #   2. MariaDB defaults to mysql_native_password, no plugin
+    #      hunting required, mariadb-client just works.
+    #   3. Wire-protocol compatible — Laravel PDO mysql driver and
+    #      gecche multidomain queries work unchanged.
+    #   4. Lower default memory footprint (~140 MB vs ~250 MB).
+    image: mariadb:11
     restart: unless-stopped
+    mem_limit: ${INSTANCE_MEM_DB:-512m}
+    mem_reservation: 128m
+    # `--tls-version=` (empty) disables TLS server-side. MariaDB,
+    # like MySQL 8.4, ships self-signed certs by default; any artisan
+    # / gecche command that shells out to the mysql CLI then fails
+    # with "TLS/SSL error: self-signed certificate in certificate
+    # chain". Per-instance compose network is private — plaintext is
+    # safe and avoids a whole class of cert-chain gotchas.
+    command:
+      - --innodb-buffer-pool-size=128M
+      - --performance-schema=OFF
+      - --tls-version=
     environment:
       - MYSQL_DATABASE=app
       - MYSQL_USER=app
@@ -100,17 +212,27 @@ services:
       - MYSQL_ROOT_PASSWORD
     volumes:
       - db-data:/var/lib/mysql
+    # mariadb:11 ships /usr/local/bin/healthcheck.sh which probes the
+    # server via a real connection (not just a TCP open). Using
+    # `mysqladmin ping` here would return success-on-ECONNREFUSED in
+    # some versions and report unhealthy after the server is actually
+    # ready (auth/socket quirks); the bundled script avoids both.
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 5s
       timeout: 5s
       retries: 20
+      start_period: 30s
     networks:
       - instance
 
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    mem_limit: ${INSTANCE_MEM_REDIS:-128m}
+    # Hard maxmemory + LRU eviction so a runaway cache fill doesn't
+    # touch the kernel limit (which would OOM-kill instead of evicting).
+    command: ["redis-server", "--maxmemory", "96mb", "--maxmemory-policy", "allkeys-lru"]
     networks:
       - instance
 
@@ -122,6 +244,7 @@ services:
   meilisearch:
     image: getmeili/meilisearch:v1.10
     restart: unless-stopped
+    mem_limit: ${INSTANCE_MEM_MEILI:-256m}
     environment:
       - MEILI_NO_ANALYTICS=true
       - MEILI_ENV=development
@@ -133,6 +256,7 @@ services:
   mailpit:
     image: axllent/mailpit:latest
     restart: unless-stopped
+    mem_limit: ${INSTANCE_MEM_MAILPIT:-64m}
     environment:
       - MP_DATA_FILE=/data/mailpit.db
     volumes:
@@ -143,6 +267,7 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
+    mem_limit: ${INSTANCE_MEM_CLOUDFLARED:-128m}
     command: ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yml", "run"]
     environment:
       - TUNNEL_TOKEN
@@ -171,3 +296,16 @@ volumes:
     name: ${COMPOSE_PROJECT}-meili
   mailpit-data:
     name: ${COMPOSE_PROJECT}-mailpit
+  # Project-scoped (NOT instance-scoped) caches. Reused across every
+  # chat for the same project so npm/composer don't redownload the
+  # world on each provision. external=true so `docker compose down
+  # --volumes` leaves them alone. The orchestrator's
+  # provision_instance pre-creates them with the project-slug suffix
+  # before compose-up. Compose interpolates ${PROJECT_SLUG} in `name:`
+  # but NOT in the volume KEY, so keys are static here.
+  npm-cache:
+    external: true
+    name: tagh-npm-cache-${PROJECT_SLUG:-default}
+  composer-cache:
+    external: true
+    name: tagh-composer-cache-${PROJECT_SLUG:-default}

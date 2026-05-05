@@ -32,6 +32,7 @@ values.
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -41,6 +42,7 @@ from sqlalchemy import select
 from openclow.models import async_session
 from openclow.models.instance import Instance, InstanceStatus
 from openclow.services.config_service import get_config
+from openclow.settings import settings
 from openclow.utils.logging import get_logger
 
 log = get_logger()
@@ -56,6 +58,15 @@ _DEFAULT_GRACE_WINDOW = timedelta(minutes=60)
 # Claim-and-process batch size per phase. FOR UPDATE SKIP LOCKED means
 # concurrent reaper replicas each take their own batch without blocking.
 _BATCH_SIZE = 50
+
+# A real provision_instance job finishes in ~90s end-to-end. Anything
+# in 'provisioning' status for more than this is almost certainly an
+# orphan — the row was committed but the worker never ran the job
+# (process crash, redis blip, or upstream-cancellation race that
+# bypassed the shielded enqueue in instance_service.provision()).
+# Mark it failed so the user sees a Retry button instead of a stuck
+# spinner forever.
+_PROVISIONING_ORPHAN_AGE = timedelta(minutes=5)
 
 
 def _dry_run_enabled() -> bool:
@@ -88,6 +99,93 @@ async def _load_tunables() -> tuple[timedelta, timedelta]:
     )
 
 
+async def _notify_orphan_failed(inst: Instance) -> None:
+    """Push instance_failed to the chat's WebSocket channel after orphan recovery.
+
+    Looks up the session owner, then publishes to wc:{user_id}:{chat_session_id}
+    so any open browser tab immediately shows the Retry card instead of a frozen
+    provisioning spinner.  Also updates the DB progress card message so a page
+    reload renders the failure state correctly.
+    """
+    try:
+        from openclow.models.web_chat import WebChatMessage, WebChatSession
+        import redis.asyncio as aioredis
+
+        # Resolve session owner — needed for the WS channel name.
+        async with async_session() as db:
+            sess = await db.get(WebChatSession, inst.chat_session_id)
+            if sess is None:
+                return
+            user_id = sess.user_id
+
+        payload = {
+            "type": "instance_failed",
+            "slug": inst.slug,
+            "failure_code": "orphan_recovered",
+            "message": (
+                "Your environment timed out during setup — the worker "
+                "didn't pick up the job in time. Click Retry to try again."
+            ),
+            "actions": [
+                {
+                    "label": "🔄 Retry",
+                    "action_id": f"retry_provision:{inst.id}",
+                    "style": "primary",
+                },
+                {"label": "Main Menu", "action_id": "menu:main"},
+            ],
+        }
+
+        # Update the DB progress card (if one exists) so page reloads show failure.
+        async with async_session() as db:
+            from sqlalchemy import select as _sel
+            card_row = (
+                await db.execute(
+                    _sel(WebChatMessage)
+                    .where(
+                        WebChatMessage.session_id == inst.chat_session_id,
+                        WebChatMessage.role == "assistant",
+                        WebChatMessage.content.like("__PROGRESS_CARD__%"),
+                        WebChatMessage.is_complete == False,  # noqa: E712
+                    )
+                    .order_by(WebChatMessage.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if card_row is not None:
+                try:
+                    card = json.loads(card_row.content[len("__PROGRESS_CARD__"):])
+                    card["overall_status"] = "failed"
+                    card["footer"] = "Timed out — click Retry to try again."
+                    for step in card.get("steps", []):
+                        if step.get("status") == "running":
+                            step["status"] = "failed"
+                            step["detail"] = "worker did not pick up the job"
+                    card_row.content = f"__PROGRESS_CARD__{json.dumps(card)}"
+                    card_row.is_complete = True
+                    await db.commit()
+                    # Also publish updated progress_card so live tab sees it.
+                    payload["_progress_card_msg_id"] = str(card_row.id)
+                except Exception as _e:
+                    log.warning("reaper.orphan_card_update_failed", slug=inst.slug, error=str(_e))
+
+        # Publish to the WebSocket channel.
+        channel = f"wc:{user_id}:{inst.chat_session_id}"
+        r = aioredis.from_url(settings.redis_url)
+        try:
+            await r.publish(channel, json.dumps(payload))
+            log.info(
+                "reaper.orphan_notified",
+                slug=inst.slug,
+                channel=channel,
+            )
+        finally:
+            await r.aclose()
+
+    except Exception as e:
+        log.warning("reaper.orphan_notify_failed", slug=inst.slug, error=str(e))
+
+
 async def reap(
     *,
     now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
@@ -115,6 +213,52 @@ async def reap(
     notified = 0
     terminated = 0
 
+    orphan_failed = 0
+
+    # ── Phase 0: provisioning → failed (orphan: no worker job in flight) ─
+    # Safety net for the rare case where a row got committed in
+    # 'provisioning' but the enqueue never reached the worker. The
+    # shielded enqueue in InstanceService.provision() handles the common
+    # cancellation race; this picks up anything that slipped through
+    # (process kill / redis blip / etc). Threshold = 5min, generous vs
+    # the typical ~90s real provision time.
+    async with async_session() as session:
+        orphan_cutoff = now - _PROVISIONING_ORPHAN_AGE
+        orphan_stmt = (
+            select(Instance)
+            .where(
+                Instance.status == InstanceStatus.PROVISIONING.value,
+                Instance.created_at <= orphan_cutoff,
+            )
+            .limit(_BATCH_SIZE)
+            .with_for_update(skip_locked=True, of=Instance)
+        )
+        result = await session.execute(orphan_stmt)
+        rows = list(result.scalars().all())
+        for inst in rows:
+            log.warning(
+                "instance.orphan_recovered",
+                instance_slug=inst.slug,
+                age_minutes=(now - inst.created_at).total_seconds() / 60,
+                dry_run=dry_run,
+            )
+            if dry_run:
+                orphan_failed += 1
+                continue
+            # Mark as destroyed (with terminated_reason) instead of failed
+            # because we don't know the actual failure point — could be
+            # the enqueue, the worker startup, anything before the
+            # provision job itself wrote a real failure_code.
+            inst.status = InstanceStatus.DESTROYED.value
+            inst.terminated_reason = "admin_forced"
+            inst.terminated_at = now
+            await session.commit()
+            orphan_failed += 1
+            # Notify the chat's WebSocket so the frozen provisioning card
+            # immediately flips to the failure card with a Retry button.
+            # Fire-and-forget — a publish failure must never crash the reaper.
+            await _notify_orphan_failed(inst)
+
     # ── Phase 1: running → idle (TTL expired, no warning sent yet) ────
     async with async_session() as session:
         expired_stmt = (
@@ -129,7 +273,14 @@ async def reap(
             # on SQLite (dev/test). Multiple replicas never see the same
             # row because the first replica's UPDATE bumps the status
             # before a second tick can hit it.
-            .with_for_update(skip_locked=True)
+            # `of=Instance` scopes the row lock to instances ONLY — not
+            # the LEFT-JOINed projects table that SQLAlchemy auto-adds via
+            # Instance.project (lazy='joined'). Postgres rejects FOR UPDATE
+            # on the nullable side of an outer join, which is why the old
+            # bare `.with_for_update(skip_locked=True)` was raising
+            # "FeatureNotSupportedError: FOR UPDATE cannot be applied to
+            # the nullable side of an outer join" every reaper tick.
+            .with_for_update(skip_locked=True, of=Instance)
         )
         result = await session.execute(expired_stmt)
         rows = list(result.scalars().all())
@@ -171,7 +322,14 @@ async def reap(
                 Instance.grace_notification_at <= grace_cutoff,
             )
             .limit(_BATCH_SIZE)
-            .with_for_update(skip_locked=True)
+            # `of=Instance` scopes the row lock to instances ONLY — not
+            # the LEFT-JOINed projects table that SQLAlchemy auto-adds via
+            # Instance.project (lazy='joined'). Postgres rejects FOR UPDATE
+            # on the nullable side of an outer join, which is why the old
+            # bare `.with_for_update(skip_locked=True)` was raising
+            # "FeatureNotSupportedError: FOR UPDATE cannot be applied to
+            # the nullable side of an outer join" every reaper tick.
+            .with_for_update(skip_locked=True, of=Instance)
         )
         result = await session.execute(terminating_stmt)
         rows = list(result.scalars().all())
@@ -212,7 +370,12 @@ async def reap(
                         slug=inst.slug, error=str(e),
                     )
 
-    summary = {"notified": notified, "terminated": terminated, "dry_run": dry_run}
+    summary = {
+        "notified": notified,
+        "terminated": terminated,
+        "orphan_failed": orphan_failed,
+        "dry_run": dry_run,
+    }
     log.info("reaper.sweep_complete", **summary)
     return summary
 

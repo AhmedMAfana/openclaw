@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { PlusIcon, TrashIcon, SearchIcon, CheckIcon, ToggleLeftIcon, ToggleRightIcon } from "lucide-react";
+import { PlusIcon, TrashIcon, SearchIcon, CheckIcon, ToggleLeftIcon, ToggleRightIcon, ShieldIcon } from "lucide-react";
 
 interface User { id: number; chat_provider_type: string; chat_provider_uid: string; username: string | null; is_allowed: boolean; is_admin: boolean; }
 interface SlackMember { id: string; name: string; real_name: string; avatar: string; already_added: boolean; }
@@ -13,7 +13,7 @@ export function SettingsUsers() {
   const [hasSlack, setHasSlack] = useState(false);
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<"slack"|"telegram">("telegram");
+  const [activeTab, setActiveTab] = useState<"slack"|"telegram"|"web">("telegram");
   const [deleteTarget, setDeleteTarget] = useState<User | null>(null);
   const [slackMembers, setSlackMembers] = useState<SlackMember[]>([]);
   const [slackSearch, setSlackSearch] = useState("");
@@ -21,6 +21,9 @@ export function SettingsUsers() {
   const [selectedSlackId, setSelectedSlackId] = useState("");
   const [tgUid, setTgUid] = useState("");
   const [tgUsername, setTgUsername] = useState("");
+  const [webUsername, setWebUsername] = useState("");
+  const [webPassword, setWebPassword] = useState("");
+  const [webIsAdmin, setWebIsAdmin] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState("");
 
@@ -59,19 +62,43 @@ export function SettingsUsers() {
     setFormError("");
     if (activeTab === "slack" && !selectedSlackId) { setFormError("Select a Slack member"); return; }
     if (activeTab === "telegram" && !tgUid) { setFormError("Telegram user ID is required"); return; }
+    if (activeTab === "web" && (!webUsername || !webPassword)) { setFormError("Username and password are required"); return; }
     setSubmitting(true);
-    const payload = activeTab === "slack"
-      ? { chat_provider_type: "slack", chat_provider_uid: selectedSlackId }
-      : { chat_provider_type: "telegram", chat_provider_uid: tgUid, username: tgUsername || null };
     try {
-      const res = await fetch("/api/settings/users", {
-        method: "POST", credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (res.ok) { const created = await res.json(); setUsers((p) => [...p, created]); setAddOpen(false); setSelectedSlackId(""); setTgUid(""); setTgUsername(""); }
-      else { const d = await res.json(); setFormError(d.detail || "Failed"); }
+      let res: Response;
+      if (activeTab === "web") {
+        res = await fetch("/api/settings/users/web", {
+          method: "POST", credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: webUsername, password: webPassword, is_admin: webIsAdmin }),
+        });
+      } else {
+        const payload = activeTab === "slack"
+          ? { chat_provider_type: "slack", chat_provider_uid: selectedSlackId }
+          : { chat_provider_type: "telegram", chat_provider_uid: tgUid, username: tgUsername || null };
+        res = await fetch("/api/settings/users", {
+          method: "POST", credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      }
+      if (res.ok) {
+        const created = await res.json();
+        setUsers((p) => [...p, created]);
+        setAddOpen(false);
+        setSelectedSlackId(""); setTgUid(""); setTgUsername("");
+        setWebUsername(""); setWebPassword(""); setWebIsAdmin(false);
+      } else { const d = await res.json(); setFormError(d.detail || "Failed"); }
     } finally { setSubmitting(false); }
+  }
+
+  async function toggleAdmin(u: User) {
+    const res = await fetch(`/api/settings/users/${u.id}/admin`, {
+      method: "PATCH", credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_admin: !u.is_admin }),
+    });
+    if (res.ok) { const d = await res.json(); setUsers((p) => p.map((x) => x.id === u.id ? {...x, is_admin: d.is_admin} : x)); }
   }
 
   async function toggleAllowed(u: User) {
@@ -93,7 +120,7 @@ export function SettingsUsers() {
     <div className="space-y-4 max-w-4xl">
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">{users.length} user{users.length !== 1 ? "s" : ""}</p>
-        <button onClick={() => { setFormError(""); setSelectedSlackId(""); setTgUid(""); setTgUsername(""); setAddOpen(true); if (activeTab === "slack" && slackMembers.length === 0) loadSlackMembers(); }}
+        <button onClick={() => { setFormError(""); setSelectedSlackId(""); setTgUid(""); setTgUsername(""); setWebUsername(""); setWebPassword(""); setWebIsAdmin(false); setActiveTab("web"); setAddOpen(true); }}
           className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium bg-primary hover:bg-primary/90 text-primary-foreground transition-colors">
           <PlusIcon className="size-4" /> Add User
         </button>
@@ -105,7 +132,7 @@ export function SettingsUsers() {
         <div className="rounded-xl border border-border bg-card overflow-hidden">
           <table className="w-full text-sm">
             <thead><tr className="border-b border-border">
-              {["Platform","User ID","Username","Access",""].map((h) => (
+              {["Platform","Username","Access","Role",""].map((h) => (
                 <th key={h} className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{h}</th>
               ))}
             </tr></thead>
@@ -113,17 +140,26 @@ export function SettingsUsers() {
               {users.map((u) => (
                 <tr key={u.id} className="hover:bg-accent/30 transition-colors">
                   <td className="px-4 py-3">
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${u.chat_provider_type === "slack" ? "bg-purple-500/15 text-purple-400" : "bg-blue-500/15 text-blue-400"}`}>
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                      u.chat_provider_type === "slack" ? "bg-purple-500/15 text-purple-400"
+                      : u.chat_provider_type === "web" ? "bg-orange-500/15 text-orange-400"
+                      : "bg-blue-500/15 text-blue-400"}`}>
                       {u.chat_provider_type}
                     </span>
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs text-muted-foreground">{u.chat_provider_uid}</td>
-                  <td className="px-4 py-3 text-foreground">{u.username || "—"}</td>
+                  <td className="px-4 py-3 text-foreground">{u.username || <span className="text-muted-foreground font-mono text-xs">{u.chat_provider_uid}</span>}</td>
                   <td className="px-4 py-3">
                     <button onClick={() => toggleAllowed(u)} className="flex items-center gap-1.5 text-xs transition-colors">
                       {u.is_allowed
                         ? <><ToggleRightIcon className="size-4 text-green-400" /><span className="text-green-400">Authorized</span></>
                         : <><ToggleLeftIcon className="size-4 text-muted-foreground" /><span className="text-muted-foreground">Disabled</span></>}
+                    </button>
+                  </td>
+                  <td className="px-4 py-3">
+                    <button onClick={() => toggleAdmin(u)} className="flex items-center gap-1.5 text-xs transition-colors" title={u.is_admin ? "Click to revoke admin" : "Click to grant admin"}>
+                      {u.is_admin
+                        ? <><ShieldIcon className="size-3.5 text-amber-400" /><span className="text-amber-400">Admin</span></>
+                        : <><ShieldIcon className="size-3.5 text-muted-foreground/40" /><span className="text-muted-foreground">User</span></>}
                     </button>
                   </td>
                   <td className="px-4 py-3 text-right">
@@ -143,16 +179,14 @@ export function SettingsUsers() {
           <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" />
           <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-card p-6 shadow-2xl max-h-[85vh] overflow-y-auto">
             <Dialog.Title className="text-base font-semibold text-foreground mb-4">Add User</Dialog.Title>
-            {hasSlack && (
-              <div className="flex gap-1 mb-4 p-1 rounded-lg bg-secondary border border-border">
-                {(["slack","telegram"] as const).map((tab) => (
-                  <button key={tab} onClick={() => { setActiveTab(tab); if (tab === "slack" && slackMembers.length === 0) loadSlackMembers(); }}
-                    className={`flex-1 px-3 py-1.5 rounded-md text-sm font-medium transition-colors capitalize ${activeTab === tab ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}>
-                    {tab}
-                  </button>
-                ))}
-              </div>
-            )}
+            <div className="flex gap-1 mb-4 p-1 rounded-lg bg-secondary border border-border">
+              {(["web", ...(hasSlack ? ["slack"] : []), "telegram"] as const).map((tab) => (
+                <button key={tab} onClick={() => { setActiveTab(tab as "slack"|"telegram"|"web"); if (tab === "slack" && slackMembers.length === 0) loadSlackMembers(); }}
+                  className={`flex-1 px-3 py-1.5 rounded-md text-sm font-medium transition-colors capitalize ${activeTab === tab ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}>
+                  {tab}
+                </button>
+              ))}
+            </div>
             {activeTab === "slack" && (
               <div className="space-y-3">
                 <div className="relative">
@@ -185,6 +219,18 @@ export function SettingsUsers() {
                   <input type="text" placeholder="123456789" value={tgUid} onChange={(e) => setTgUid(e.target.value)} className={ic} /></div>
                 <div><label className={lc}>Username (optional)</label>
                   <input type="text" placeholder="@username" value={tgUsername} onChange={(e) => setTgUsername(e.target.value)} className={ic} /></div>
+              </div>
+            )}
+            {activeTab === "web" && (
+              <div className="space-y-3">
+                <div><label className={lc}>Username <span className="text-red-400">*</span></label>
+                  <input type="text" placeholder="alice" value={webUsername} onChange={(e) => setWebUsername(e.target.value)} className={ic} /></div>
+                <div><label className={lc}>Password <span className="text-red-400">*</span></label>
+                  <input type="password" placeholder="Min 6 characters" value={webPassword} onChange={(e) => setWebPassword(e.target.value)} className={ic} autoComplete="new-password" /></div>
+                <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                  <input type="checkbox" checked={webIsAdmin} onChange={(e) => setWebIsAdmin(e.target.checked)} className="rounded" />
+                  <span className="text-sm text-foreground">Grant admin access</span>
+                </label>
               </div>
             )}
             {formError && <p className="text-xs text-red-400 mt-3">{formError}</p>}

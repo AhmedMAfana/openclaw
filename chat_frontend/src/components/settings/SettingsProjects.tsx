@@ -28,15 +28,15 @@ const EMPTY = {
   github_repo: "",
   name: "",
   default_branch: "main",
-  tech_stack: "",
   description: "",
+  mode: "docker",
   is_dockerized: false,
   docker_compose_file: "docker-compose.yml",
   app_container_name: "",
   app_port: "",
 };
 
-export function SettingsProjects() {
+export function SettingsProjects({ onProjectsChanged }: { onProjectsChanged?: () => void } = {}) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
@@ -48,10 +48,112 @@ export function SettingsProjects() {
   const [editDraft, setEditDraft] = useState<Partial<Project>>({});
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState("");
+  // Connected GitHub repos — loaded lazily when the Add modal opens.
+  // Keeps the Settings page snappy and avoids a 2 s GitHub round-trip on
+  // first render. `null` = not loaded yet, `[]` = loaded but empty.
+  type GhRepo = { full_name: string; default_branch: string; private: boolean; description: string | null };
+  const [ghRepos, setGhRepos] = useState<GhRepo[] | null>(null);
+  const [ghLoading, setGhLoading] = useState(false);
+  const [ghError, setGhError] = useState("");
+  const [ghQuery, setGhQuery] = useState("");
+  const [showRepoDropdown, setShowRepoDropdown] = useState(false);
 
   useEffect(() => {
     load();
   }, []);
+
+  async function loadGhRepos() {
+    if (ghRepos !== null || ghLoading) return;
+    setGhLoading(true);
+    setGhError("");
+    try {
+      const res = await fetch("/api/settings/projects/github-repos", { credentials: "include" });
+      if (res.ok) {
+        const d = await res.json();
+        setGhRepos(d.repos || []);
+      } else {
+        const d = await res.json().catch(() => ({}));
+        setGhError(d.detail || `Failed to load repos (${res.status})`);
+      }
+    } catch (e) {
+      setGhError(String(e));
+    } finally {
+      setGhLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (addOpen) loadGhRepos();
+  }, [addOpen]);
+
+  // Branches for the Edit modal — fetched per-project on open. Lets the
+  // user point a chat at a working branch instead of a broken main
+  // (e.g. tagh-test where main has a Vite config bug; a feature branch
+  // has the fix). One round-trip to GitHub per Edit-open; not cached
+  // because branches change frequently outside our system.
+  type GhBranch = { name: string; is_default: boolean; protected: boolean };
+  // Branches for Add Project — keyed by repo name (no project row exists
+  // yet). Re-fetched whenever the user picks a different repo.
+  const [addBranches, setAddBranches] = useState<GhBranch[] | null>(null);
+  const [addBranchesLoading, setAddBranchesLoading] = useState(false);
+  const [addBranchesError, setAddBranchesError] = useState("");
+  useEffect(() => {
+    setAddBranches(null);
+    setAddBranchesError("");
+    if (!addOpen || !form.github_repo || !form.github_repo.includes("/")) return;
+    const repo = form.github_repo;
+    setAddBranchesLoading(true);
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/settings/projects/branches?repo=${encodeURIComponent(repo)}`,
+          { credentials: "include" },
+        );
+        if (res.ok) {
+          const d = await res.json();
+          if (form.github_repo === repo) setAddBranches(d.branches || []);
+        } else {
+          const d = await res.json().catch(() => ({}));
+          if (form.github_repo === repo) {
+            setAddBranchesError(d.detail || `Failed to load branches (${res.status})`);
+          }
+        }
+      } catch (e) {
+        if (form.github_repo === repo) setAddBranchesError(String(e));
+      } finally {
+        if (form.github_repo === repo) setAddBranchesLoading(false);
+      }
+    })();
+  }, [addOpen, form.github_repo]);
+
+  const [editBranches, setEditBranches] = useState<GhBranch[] | null>(null);
+  const [editBranchesLoading, setEditBranchesLoading] = useState(false);
+  const [editBranchesError, setEditBranchesError] = useState("");
+  useEffect(() => {
+    setEditBranches(null);
+    setEditBranchesError("");
+    if (!editTarget) return;
+    setEditBranchesLoading(true);
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/settings/projects/${editTarget.id}/branches`,
+          { credentials: "include" },
+        );
+        if (res.ok) {
+          const d = await res.json();
+          setEditBranches(d.branches || []);
+        } else {
+          const d = await res.json().catch(() => ({}));
+          setEditBranchesError(d.detail || `Failed to load branches (${res.status})`);
+        }
+      } catch (e) {
+        setEditBranchesError(String(e));
+      } finally {
+        setEditBranchesLoading(false);
+      }
+    })();
+  }, [editTarget?.id]);
 
   async function load() {
     setLoading(true);
@@ -71,8 +173,8 @@ export function SettingsProjects() {
       github_repo: form.github_repo,
       name: form.name,
       default_branch: form.default_branch || "main",
-      tech_stack: form.tech_stack || null,
       description: form.description || null,
+      mode: form.mode,
       is_dockerized: form.is_dockerized,
     };
     if (form.is_dockerized) {
@@ -92,6 +194,7 @@ export function SettingsProjects() {
         setProjects((p) => [...p, created]);
         setAddOpen(false);
         setForm(EMPTY);
+        onProjectsChanged?.();
       } else {
         const d = await res.json();
         setFormError(d.detail || "Failed");
@@ -106,13 +209,17 @@ export function SettingsProjects() {
       method: "DELETE",
       credentials: "include",
     });
-    if (res.ok) setProjects((prev) => prev.filter((x) => x.id !== p.id));
+    if (res.ok) {
+      setProjects((prev) => prev.filter((x) => x.id !== p.id));
+      onProjectsChanged?.();
+    }
     setDeleteTarget(null);
   }
 
   function openEdit(p: Project) {
     setEditTarget(p);
     setEditDraft({
+      default_branch: p.default_branch ?? "main",
       mode: p.mode ?? "docker",
       project_dir: p.project_dir ?? "",
       start_command: p.start_command ?? "",
@@ -261,54 +368,135 @@ export function SettingsProjects() {
               Add Project
             </Dialog.Title>
             <div className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className={lc}>
-                    Repository <span className="text-red-400">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="owner/repo"
-                    value={form.github_repo}
-                    onChange={(e) => setForm((f) => ({ ...f, github_repo: e.target.value }))}
-                    className={ic}
-                  />
+              {/* Repository combobox */}
+              <div>
+                <label className={lc}>
+                  Repository <span className="text-red-400">*</span>
+                </label>
+                <div className="relative">
+                  {ghLoading ? (
+                    <div className={`${ic} text-muted-foreground`}>Loading repos…</div>
+                  ) : (
+                    <input
+                      type="text"
+                      placeholder={
+                        ghRepos && ghRepos.length
+                          ? `Search ${ghRepos.length} repos…`
+                          : "owner/repo"
+                      }
+                      value={form.github_repo}
+                      onFocus={() => setShowRepoDropdown(true)}
+                      onBlur={() => setTimeout(() => setShowRepoDropdown(false), 150)}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setGhQuery(v);
+                        setForm((f) => ({ ...f, github_repo: v }));
+                        setShowRepoDropdown(true);
+                      }}
+                      className={ic}
+                    />
+                  )}
+                  {showRepoDropdown && !ghLoading && (ghRepos?.length ?? 0) > 0 && (
+                    <ul className="absolute z-50 mt-1 w-full max-h-52 overflow-y-auto rounded-lg border border-border bg-card shadow-lg text-sm">
+                      {(ghRepos || [])
+                        .filter(
+                          (r) =>
+                            !ghQuery ||
+                            r.full_name.toLowerCase().includes(ghQuery.toLowerCase()),
+                        )
+                        .slice(0, 50)
+                        .map((r) => (
+                          <li
+                            key={r.full_name}
+                            onMouseDown={() => {
+                              setForm((f) => ({
+                                ...f,
+                                github_repo: r.full_name,
+                                default_branch: r.default_branch || f.default_branch,
+                                name: f.name || r.full_name.split("/")[1] || "",
+                              }));
+                              setGhQuery(r.full_name);
+                              setShowRepoDropdown(false);
+                            }}
+                            className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-accent transition-colors"
+                          >
+                            {r.private && (
+                              <span className="text-xs text-muted-foreground">🔒</span>
+                            )}
+                            <span className="font-mono text-foreground">{r.full_name}</span>
+                            {r.description && (
+                              <span className="ml-auto text-xs text-muted-foreground truncate max-w-[160px]">
+                                {r.description}
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                    </ul>
+                  )}
                 </div>
-                <div>
-                  <label className={lc}>
-                    Project Name <span className="text-red-400">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="My App"
-                    value={form.name}
-                    onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                    className={ic}
-                  />
-                </div>
+                {ghError && (
+                  <div className="text-xs text-amber-500 mt-1">
+                    {ghError} — type the repo manually
+                  </div>
+                )}
               </div>
+
+              {/* Project Name */}
+              <div>
+                <label className={lc}>
+                  Project Name <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="My App"
+                  value={form.name}
+                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                  className={ic}
+                />
+              </div>
+
+              {/* Mode + Default Branch row */}
               <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={lc}>Mode</label>
+                  <select
+                    className={ic}
+                    value={form.mode}
+                    onChange={(e) => setForm((f) => ({ ...f, mode: e.target.value }))}
+                  >
+                    <option value="docker">docker</option>
+                    <option value="host">host (running on VPS)</option>
+                    <option value="container">container (per-chat)</option>
+                  </select>
+                </div>
                 <div>
                   <label className={lc}>Default Branch</label>
-                  <input
-                    type="text"
-                    placeholder="main"
-                    value={form.default_branch}
-                    onChange={(e) => setForm((f) => ({ ...f, default_branch: e.target.value }))}
-                    className={ic}
-                  />
-                </div>
-                <div>
-                  <label className={lc}>Tech Stack</label>
-                  <input
-                    type="text"
-                    placeholder="Laravel 11, Vue 3"
-                    value={form.tech_stack}
-                    onChange={(e) => setForm((f) => ({ ...f, tech_stack: e.target.value }))}
-                    className={ic}
-                  />
+                  {addBranchesLoading ? (
+                    <div className={`${ic} text-muted-foreground`}>Loading branches…</div>
+                  ) : (
+                    <select
+                      className={ic}
+                      value={form.default_branch}
+                      onChange={(e) => setForm((f) => ({ ...f, default_branch: e.target.value }))}
+                    >
+                      {(addBranches && addBranches.length > 0
+                        ? addBranches.map((b) => b.name)
+                        : [form.default_branch || "main"]
+                      ).map((b) => (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {addBranchesError && (
+                    <div className="text-xs text-amber-500 mt-1">
+                      {addBranchesError}
+                    </div>
+                  )}
                 </div>
               </div>
+
               <div>
                 <label className={lc}>Description</label>
                 <textarea
@@ -400,6 +588,48 @@ export function SettingsProjects() {
               Host-mode settings and public URL. Fields apply only when mode = host.
             </Dialog.Description>
             <div className="space-y-3">
+              <div>
+                <label className={lc}>
+                  Default Branch{" "}
+                  <span className="text-xs text-muted-foreground font-normal">
+                    (every new chat clones from here)
+                  </span>
+                </label>
+                {editBranchesLoading ? (
+                  <div className={`${ic} text-muted-foreground`}>Loading branches…</div>
+                ) : (
+                  <>
+                    <input
+                      type="text"
+                      list={`branch-list-${editTarget?.id}`}
+                      placeholder={
+                        editBranches && editBranches.length
+                          ? `Search ${editBranches.length} branches…`
+                          : "main"
+                      }
+                      value={editDraft.default_branch ?? ""}
+                      onChange={(e) =>
+                        setEditDraft((d) => ({ ...d, default_branch: e.target.value }))
+                      }
+                      className={ic}
+                    />
+                    <datalist id={`branch-list-${editTarget?.id}`}>
+                      {(editBranches || []).map((b) => (
+                        <option key={b.name} value={b.name}>
+                          {b.is_default ? "★ default" : ""}
+                          {b.protected ? " 🔒 protected" : ""}
+                        </option>
+                      ))}
+                    </datalist>
+                  </>
+                )}
+                {editBranchesError && (
+                  <div className="text-xs text-amber-500 mt-1">
+                    {editBranchesError} — type the branch manually
+                  </div>
+                )}
+              </div>
+
               <div>
                 <label className={lc}>Mode</label>
                 <select

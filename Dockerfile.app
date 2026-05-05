@@ -54,8 +54,13 @@ COPY --from=frontend /chat_frontend/dist ./chat_frontend/dist
 RUN pip install --no-cache-dir -e .
 
 RUN useradd -m openclow \
-    && mkdir -p /home/openclow/.claude \
+    && mkdir -p /home/openclow/.claude /app/logs \
     && chown -R openclow:openclow /app /home/openclow $NVM_DIR
+# Note on /app/logs: explicit mkdir + chown so docker-compose's
+# `activity_logs` named volume inherits openclow:openclow on FIRST
+# creation. Once the volume exists, docker never re-syncs perms — so
+# pre-existing volumes stay with whatever uid/gid they had. The deploy
+# script does a one-shot chown of the existing volume to handle that.
 
 COPY scripts/api-entrypoint.sh /usr/local/bin/api-entrypoint.sh
 RUN chmod +x /usr/local/bin/api-entrypoint.sh

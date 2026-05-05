@@ -37,8 +37,44 @@ COPY --from=projctl-bin /projctl /usr/local/bin/projctl
 #     packages that can't be served from dist). Composer's fallback
 #     blows up with "git was not found in your PATH" without it.
 USER root
-RUN apk add --no-cache mysql-client git \
+# PHP extensions needed by the wider Laravel ecosystem this template
+# supports. Default serversideup/php-alpine ships pdo_mysql, mbstring,
+# pcntl, redis, etc. — but NOT gd or exif. Real-world Laravel apps in
+# the tagh-* fleet require:
+#   - gd:    image processing (milon/barcode, phpspreadsheet, fpdf,
+#            simple-qrcode, intervention/image)
+#   - exif:  EXIF metadata (spatie/image, spatie/laravel-medialibrary)
+# Caught running tagh-test (composer install dies with "ext-gd is
+# missing from your system" + the same for exif).
+#
+# serversideup ships PHP themselves (NOT alpine's php84-* packages),
+# so `apk add php84-gd` installs into a different php binary that
+# isn't loaded. Their documented mechanism is the `install-php-extensions`
+# helper (https://serversideup.net/open-source/docker-php/docs/getting-started/installing-additional-php-extensions),
+# which knows how to wire extensions into THEIR php build.
+RUN install-php-extensions gd exif \
+ && apk add --no-cache mysql-client git \
  && chmod 0755 /usr/local/bin/projctl \
+ # Disable SSL for the mysql CLI globally inside this image. The
+ # per-instance MySQL container runs on a private compose bridge with
+ # TLS turned off (compose.yml: `--tls-version=`); without this client
+ # config, any artisan command that shells out to `mysql` (gecche
+ # multidomain, schema introspection, etc.) fails with
+ # "ERROR 2026 (HY000): TLS/SSL error: SSL is required, but the
+ # server does not support it" — the CLI's default ssl-mode=PREFERRED
+ # downgrades to REQUIRED on some builds. ssl-mode=DISABLED forces
+ # plaintext, matching what the server now offers.
+ && mkdir -p /etc/my.cnf.d /etc/mysql/conf.d \
+ # Alpine's `mysql-client` is mariadb-client — uses `ssl=0` (MariaDB
+ # syntax). Oracle MySQL uses `ssl-mode=DISABLED`. Either client errors
+ # on the OTHER's option name in shared [client], so use the tool-
+ # specific section names so each only reads its own:
+ #   [client-mariadb] → MariaDB CLI
+ #   [client-mysql]   → Oracle mysql CLI (8.x)
+ # Plus `loose-` prefix on a [client] fallback so unknown options
+ # become warnings, not errors, on whichever client reads it.
+ && printf '[client]\nloose-ssl=0\nloose-ssl-mode=DISABLED\n[client-mariadb]\nssl=0\n[client-mysql]\nssl-mode=DISABLED\n' \
+    | tee /etc/my.cnf.d/no-ssl.cnf /etc/mysql/conf.d/no-ssl.cnf >/dev/null \
  # Pre-create projctl's state dir and hand ownership to the runtime
  # user. The compose file mounts a named volume here; docker copies
  # the mount-point's existing ownership onto the named volume on
