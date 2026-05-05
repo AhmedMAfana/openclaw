@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 
-_ADMIN_ROUTES_FILE = Path(__file__).resolve().parents[2] / "src" / "openclow" / "api" / "routes" / "admin_instances.py"
+_ADMIN_ROUTES_FILE = Path(__file__).resolve().parents[2] / "src" / "taghdev" / "api" / "routes" / "admin_instances.py"
 
 
 def _route_handlers() -> dict[str, ast.AsyncFunctionDef]:
@@ -91,7 +91,7 @@ def test_every_handler_uses_web_user_dep(handler_name: str):
 def test_require_admin_is_imported_from_access():
     """The handler file must use the canonical guard, not a local copy."""
     text = _ADMIN_ROUTES_FILE.read_text()
-    assert "from openclow.api.routes.access import _require_admin" in text
+    assert "from taghdev.api.routes.access import _require_admin" in text
 
 
 def test_no_handler_bypasses_admin_check_with_inline_user_id_match():

@@ -1,7 +1,7 @@
 """T037a: two concurrent tasks on one chat's instance run serially.
 
 FR-028: agent work on the same instance MUST NOT interleave. This test
-exercises the Redis mutex in ``openclow.services.instance_lock`` by
+exercises the Redis mutex in ``taghdev.services.instance_lock`` by
 acquiring the same slug from two coroutines and asserting only one is
 allowed inside the critical section at any moment.
 
@@ -32,7 +32,7 @@ pytestmark = pytest.mark.skipif(
 async def _ping_redis() -> bool:
     try:
         import redis.asyncio as aioredis
-        from openclow.settings import settings
+        from taghdev.settings import settings
         r = aioredis.from_url(settings.redis_url)
         try:
             await r.ping()
@@ -48,7 +48,7 @@ async def test_two_tasks_against_one_instance_run_serially() -> None:
     if not await _ping_redis():
         pytest.skip("Redis not reachable")
 
-    from openclow.services.instance_lock import (
+    from taghdev.services.instance_lock import (
         instance_lock,
         force_release,
     )
@@ -103,7 +103,7 @@ async def test_second_acquire_without_wait_returns_none() -> None:
     if not await _ping_redis():
         pytest.skip("Redis not reachable")
 
-    from openclow.services.instance_lock import (
+    from taghdev.services.instance_lock import (
         acquire_instance_lock, force_release,
     )
 

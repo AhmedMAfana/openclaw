@@ -28,7 +28,7 @@ if [ -f "$CREDS_FILE" ]; then
     echo "[api-entrypoint] Claude credentials found — inline agent ready"
 else
     echo "[api-entrypoint] WARNING: No Claude credentials at $CREDS_FILE"
-    echo "[api-entrypoint]   Fix: docker exec -it openclow-worker-1 claude login"
+    echo "[api-entrypoint]   Fix: docker exec -it taghdev-worker-1 claude login"
 fi
 
 # ── Persistent backup of .claude.json into the volume ─────────────────────
@@ -65,7 +65,7 @@ echo "[api-entrypoint] .claude.json backup loop started (pid=$_BACKUP_LOOP_PID, 
 # the same secret survives container restarts. A new volume = a new secret,
 # which correctly invalidates all existing tokens on a fresh deployment.
 if [ -z "$WEB_CHAT_JWT_SECRET" ]; then
-    SECRET_FILE="${HOME}/.openclow/jwt_secret"
+    SECRET_FILE="${HOME}/.taghdev/jwt_secret"
     mkdir -p "$(dirname "$SECRET_FILE")"
     if [ ! -f "$SECRET_FILE" ]; then
         openssl rand -hex 32 > "$SECRET_FILE"

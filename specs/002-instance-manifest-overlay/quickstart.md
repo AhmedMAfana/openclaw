@@ -144,7 +144,7 @@ This is the same skill that caught the original `tagh/laravel-vue-app:latest` bl
 
 ```bash
 # What slug does this chat have?
-docker compose exec postgres psql -U openclow -d openclow -c \
+docker compose exec postgres psql -U taghdev -d taghdev -c \
   "SELECT slug, status FROM instances WHERE chat_session_id = <CHAT_ID>;"
 
 # What does the per-instance root look like?

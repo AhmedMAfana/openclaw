@@ -23,7 +23,7 @@ This document resolves every open decision the plan depends on. Spec-level clari
 - **Rust**: comparable to Go on deliverable (static binary), but the team has no Rust expertise and the ecosystem for JSON logs, YAML parsing, and subprocess control is less mature than Go's stdlib.
 
 **Implications for plan**:
-- New top-level `projctl/` module (Go 1.22+). Not in `src/openclow/`.
+- New top-level `projctl/` module (Go 1.22+). Not in `src/taghdev/`.
 - CI builds and pushes the image on merge to `main` with a `vN.N.N` tag read from `projctl/VERSION`.
 - Orchestrator interacts with `projctl` only via `docker exec` + stdout JSON-line parsing. No shared library.
 
@@ -192,7 +192,7 @@ SELECT count(*) FROM instances i
 
 If `count >= per_user_cap` (default 3, configurable via `platform_config` `category="instance"` `key="per_user_cap"`), raise `PerUserCapExceeded` with the list of active chats. `chat_task.py` translates this into the error message required by FR-030a/b (distinct from platform-capacity error) with navigation to the user's active chats.
 
-**Race safety**: Wrap provision in a Redis lock `openclow:user:<user_id>:provision` (held only for the count+insert, not the full compose-up). This prevents two simultaneous first-messages from both succeeding past the cap.
+**Race safety**: Wrap provision in a Redis lock `taghdev:user:<user_id>:provision` (held only for the count+insert, not the full compose-up). This prevents two simultaneous first-messages from both succeeding past the cap.
 
 **Alternative rejected**: DB-level advisory lock on `user_id`. Redis is already the ephemeral-lock layer per Principle VI; using it is more consistent than introducing Postgres advisory locks.
 

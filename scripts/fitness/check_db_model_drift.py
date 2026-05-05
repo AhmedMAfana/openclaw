@@ -37,7 +37,7 @@ from scripts.fitness import Finding, FitnessResult, Severity
 
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-MODELS_DIR = REPO / "src" / "openclow" / "models"
+MODELS_DIR = REPO / "src" / "taghdev" / "models"
 MIGRATIONS_DIR = REPO / "alembic" / "versions"
 
 
@@ -93,7 +93,7 @@ def check() -> FitnessResult:
             severity=Severity.INFO,
             message=(
                 f"alembic history references table `{table}` which has "
-                f"no SQLAlchemy model in src/openclow/models/. Possibly "
+                f"no SQLAlchemy model in src/taghdev/models/. Possibly "
                 f"legacy table or managed by a different surface."
             ),
             location=str(MIGRATIONS_DIR.relative_to(REPO)),

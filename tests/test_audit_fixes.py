@@ -25,13 +25,13 @@ class TestCommandInjectionFixes:
         return source.count("create_subprocess_shell")
 
     def test_git_ops_no_shell(self):
-        src = self._get_source("openclow.worker.tasks.git_ops")
+        src = self._get_source("taghdev.worker.tasks.git_ops")
         # run_cmd kept for backward compat but all git functions should use run_exec
         assert "async def run_exec" in src, "run_exec must exist"
         assert "create_subprocess_exec" in src, "must use exec"
 
     def test_git_ops_run_exec_signature(self):
-        from openclow.worker.tasks.git_ops import run_exec
+        from taghdev.worker.tasks.git_ops import run_exec
         sig = inspect.signature(run_exec)
         # Should have *args (VAR_POSITIONAL), not a single cmd: str parameter
         args_param = sig.parameters.get("args")
@@ -40,7 +40,7 @@ class TestCommandInjectionFixes:
             "run_exec args should be VAR_POSITIONAL (*args), not a single string"
 
     def test_git_ops_clone_uses_exec(self):
-        src = self._get_source("openclow.worker.tasks.git_ops")
+        src = self._get_source("taghdev.worker.tasks.git_ops")
         # Find the clone function and verify it calls run_exec not run_cmd
         in_clone = False
         for line in src.split("\n"):
@@ -53,7 +53,7 @@ class TestCommandInjectionFixes:
 
     def test_git_ops_commit_uses_exec(self):
         """Commit was the worst injection: message in shell quotes."""
-        src = self._get_source("openclow.worker.tasks.git_ops")
+        src = self._get_source("taghdev.worker.tasks.git_ops")
         in_commit = False
         for line in src.split("\n"):
             if "async def commit(" in line:
@@ -64,7 +64,7 @@ class TestCommandInjectionFixes:
                 assert "run_cmd" not in line, f"commit() still uses run_cmd: {line}"
 
     def test_docker_mcp_no_shell(self):
-        src = self._get_source("openclow.mcp_servers.docker_mcp")
+        src = self._get_source("taghdev.mcp_servers.docker_mcp")
         assert self._count_subprocess_shell(src) == 0, \
             f"docker_mcp.py still has {self._count_subprocess_shell(src)} create_subprocess_shell calls"
         assert "create_subprocess_exec" in src or "run_docker" in src, \
@@ -72,32 +72,32 @@ class TestCommandInjectionFixes:
 
     def test_docker_mcp_exec_uses_shlex(self):
         """docker_exec must use shlex.split for safety."""
-        src = self._get_source("openclow.mcp_servers.docker_mcp")
+        src = self._get_source("taghdev.mcp_servers.docker_mcp")
         assert "shlex.split" in src or "shlex" in src, "docker_exec should use shlex for command parsing"
 
     def test_github_mcp_no_shell(self):
-        src = self._get_source("openclow.mcp_servers.github_mcp")
+        src = self._get_source("taghdev.mcp_servers.github_mcp")
         assert self._count_subprocess_shell(src) == 0, \
             f"github_mcp.py still has {self._count_subprocess_shell(src)} create_subprocess_shell calls"
 
     def test_github_service_no_shell(self):
-        src = self._get_source("openclow.services.github_service")
+        src = self._get_source("taghdev.services.github_service")
         assert "run_exec" in src
         # Should not have manual quote escaping anymore
         assert 'replace(\'"\', ' not in src, "manual quote escaping should be removed"
 
     def test_health_service_no_shell(self):
-        src = self._get_source("openclow.services.health_service")
+        src = self._get_source("taghdev.services.health_service")
         assert self._count_subprocess_shell(src) == 0, "health_service should not use create_subprocess_shell"
         assert "create_subprocess_exec" in src, "should use create_subprocess_exec"
 
     def test_github_provider_uses_exec(self):
-        src = self._get_source("openclow.providers.git.github")
+        src = self._get_source("taghdev.providers.git.github")
         assert "run_exec" in src
         assert "run_cmd" not in src, "should not use run_cmd anymore"
 
     def test_bootstrap_uses_exec_not_shell(self):
-        src = self._get_source("openclow.worker.tasks.bootstrap")
+        src = self._get_source("taghdev.worker.tasks.bootstrap")
         assert "create_subprocess_exec" in src, "bootstrap should use create_subprocess_exec"
 
 
@@ -107,14 +107,14 @@ class TestCommandInjectionFixes:
 
 class TestSettingsFixes:
     def test_settings_has_coder_max_turns(self):
-        from openclow.settings import Settings
+        from taghdev.settings import Settings
         s = Settings()
         assert hasattr(s, "claude_coder_max_turns"), "missing claude_coder_max_turns"
         assert isinstance(s.claude_coder_max_turns, int)
         assert s.claude_coder_max_turns > 0
 
     def test_settings_has_reviewer_max_turns(self):
-        from openclow.settings import Settings
+        from taghdev.settings import Settings
         s = Settings()
         assert hasattr(s, "claude_reviewer_max_turns"), "missing claude_reviewer_max_turns"
         assert isinstance(s.claude_reviewer_max_turns, int)
@@ -127,19 +127,19 @@ class TestSettingsFixes:
 
 class TestClaudeProviderFixes:
     def test_coder_system_prompt_no_laravel(self):
-        from openclow.providers.llm.claude import CODER_SYSTEM_PROMPT
+        from taghdev.providers.llm.claude import CODER_SYSTEM_PROMPT
         assert "php artisan" not in CODER_SYSTEM_PROMPT, "still has Laravel-specific php artisan"
         assert "composer" not in CODER_SYSTEM_PROMPT, "still has Laravel-specific composer"
 
     def test_reviewer_system_prompt_no_laravel(self):
-        from openclow.providers.llm.claude import REVIEWER_SYSTEM_PROMPT
+        from taghdev.providers.llm.claude import REVIEWER_SYSTEM_PROMPT
         assert "Laravel" not in REVIEWER_SYSTEM_PROMPT, "still has hardcoded Laravel"
         assert "Vue" not in REVIEWER_SYSTEM_PROMPT, "still has hardcoded Vue"
         assert "{tech_stack}" in REVIEWER_SYSTEM_PROMPT, "should use tech_stack variable"
 
     def test_run_coder_fix_has_app_container(self):
         """The format() call in run_coder_fix must include app_container and app_port."""
-        src_path = os.path.join("src", "openclow", "providers", "llm", "claude.py")
+        src_path = os.path.join("src", "taghdev", "providers", "llm", "claude.py")
         with open(src_path) as f:
             src = f.read()
 
@@ -164,7 +164,7 @@ class TestClaudeProviderFixes:
 class TestWorkspaceLockingFixes:
     def test_lock_stored_on_self(self):
         """Lock object must be stored, not discarded."""
-        src_path = os.path.join("src", "openclow", "services", "workspace_service.py")
+        src_path = os.path.join("src", "taghdev", "services", "workspace_service.py")
         with open(src_path) as f:
             src = f.read()
 
@@ -172,7 +172,7 @@ class TestWorkspaceLockingFixes:
         assert "self._lock_redis" in src or "self._lock" in src, "must store redis connection"
 
     def test_prepare_acquires_lock(self):
-        src_path = os.path.join("src", "openclow", "services", "workspace_service.py")
+        src_path = os.path.join("src", "taghdev", "services", "workspace_service.py")
         with open(src_path) as f:
             src = f.read()
 
@@ -196,7 +196,7 @@ class TestWorkspaceLockingFixes:
 
 class TestFactoryFixes:
     def test_factory_has_async_lock(self):
-        src_path = os.path.join("src", "openclow", "providers", "factory.py")
+        src_path = os.path.join("src", "taghdev", "providers", "factory.py")
         with open(src_path) as f:
             src = f.read()
 
@@ -211,13 +211,13 @@ class TestFactoryFixes:
 
 class TestActivityLogFixes:
     def test_query_uses_deque(self):
-        src_path = os.path.join("src", "openclow", "services", "activity_log.py")
+        src_path = os.path.join("src", "taghdev", "services", "activity_log.py")
         with open(src_path) as f:
             src = f.read()
         assert "deque" in src, "query() should use deque for bounded memory"
 
     def test_exception_not_swallowed(self):
-        src_path = os.path.join("src", "openclow", "services", "activity_log.py")
+        src_path = os.path.join("src", "taghdev", "services", "activity_log.py")
         with open(src_path) as f:
             src = f.read()
         # Should not have bare "pass" after except in log_event
@@ -230,14 +230,14 @@ class TestActivityLogFixes:
 
 class TestLoggingFixes:
     def test_setup_has_configured_flag(self):
-        src_path = os.path.join("src", "openclow", "utils", "logging.py")
+        src_path = os.path.join("src", "taghdev", "utils", "logging.py")
         with open(src_path) as f:
             src = f.read()
         assert "_configured" in src, "should have _configured flag"
 
     def test_setup_only_runs_once(self):
         """Calling get_logger multiple times should only configure once."""
-        from openclow.utils import logging as log_module
+        from taghdev.utils import logging as log_module
         # Reset
         log_module._configured = False
         log_module.setup_logging()
@@ -252,7 +252,7 @@ class TestLoggingFixes:
 
 class TestReviewHandlerFixes:
     def test_discard_dispatches_to_worker(self):
-        src_path = os.path.join("src", "openclow", "providers", "chat", "telegram", "handlers", "review.py")
+        src_path = os.path.join("src", "taghdev", "providers", "chat", "telegram", "handlers", "review.py")
         with open(src_path) as f:
             src = f.read()
 
@@ -261,7 +261,7 @@ class TestReviewHandlerFixes:
         assert "discard_task" in src, "should enqueue discard_task job"
 
     def test_all_handlers_have_error_handling(self):
-        src_path = os.path.join("src", "openclow", "providers", "chat", "telegram", "handlers", "review.py")
+        src_path = os.path.join("src", "taghdev", "providers", "chat", "telegram", "handlers", "review.py")
         with open(src_path) as f:
             src = f.read()
 
@@ -276,7 +276,7 @@ class TestReviewHandlerFixes:
 
 class TestTunnelServiceFixes:
     def test_pid_verification_before_kill(self):
-        src_path = os.path.join("src", "openclow", "services", "tunnel_service.py")
+        src_path = os.path.join("src", "taghdev", "services", "tunnel_service.py")
         with open(src_path) as f:
             src = f.read()
         assert "cloudflared" in src and "ps" in src, "should verify PID is cloudflared before killing"
@@ -288,14 +288,14 @@ class TestTunnelServiceFixes:
 
 class TestORMSessionFixes:
     def test_orchestrator_eagerly_loads(self):
-        src_path = os.path.join("src", "openclow", "worker", "tasks", "orchestrator.py")
+        src_path = os.path.join("src", "taghdev", "worker", "tasks", "orchestrator.py")
         with open(src_path) as f:
             src = f.read()
         assert "selectinload" in src, "should eagerly load relationships"
         assert "expunge" in src, "should expunge task for use after session closes"
 
     def test_start_cancel_uses_update(self):
-        src_path = os.path.join("src", "openclow", "bot", "handlers", "start.py")
+        src_path = os.path.join("src", "taghdev", "bot", "handlers", "start.py")
         with open(src_path) as f:
             src = f.read()
 
@@ -310,7 +310,7 @@ class TestORMSessionFixes:
                 assert "session.add(task)" not in line, "should not add detached task object"
 
     def test_task_handler_consolidated_sessions(self):
-        src_path = os.path.join("src", "openclow", "bot", "handlers", "task.py")
+        src_path = os.path.join("src", "taghdev", "bot", "handlers", "task.py")
         with open(src_path) as f:
             src = f.read()
         # Count async with async_session() in task_submitted
@@ -332,7 +332,7 @@ class TestORMSessionFixes:
 
 class TestDeadCodeCleanup:
     def test_coder_no_unused_os(self):
-        src_path = os.path.join("src", "openclow", "agents", "coder.py")
+        src_path = os.path.join("src", "taghdev", "agents", "coder.py")
         with open(src_path) as f:
             src = f.read()
         # Check that os is not imported (or if imported, is actually used)
@@ -344,12 +344,12 @@ class TestDeadCodeCleanup:
                 assert len(other_lines) > 0, "coder.py imports os but never uses it"
 
     def test_doctor_no_laravel(self):
-        from openclow.agents.doctor import DIAGNOSE_PROMPT
+        from taghdev.agents.doctor import DIAGNOSE_PROMPT
         assert "php artisan" not in DIAGNOSE_PROMPT, "doctor prompt still has Laravel commands"
         assert "composer install" not in DIAGNOSE_PROMPT, "doctor prompt still has composer"
 
     def test_config_service_no_duplicate_where(self):
-        src_path = os.path.join("src", "openclow", "services", "config_service.py")
+        src_path = os.path.join("src", "taghdev", "services", "config_service.py")
         with open(src_path) as f:
             src = f.read()
         # Each function should not have duplicate category filter

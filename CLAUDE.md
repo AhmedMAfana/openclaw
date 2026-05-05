@@ -8,7 +8,7 @@ Python 3.12 async project: AI Dev Orchestrator with Telegram/Slack bots, arq wor
 
 ```bash
 # Typecheck
-python -m py_compile src/openclow/path/to/file.py
+python -m py_compile src/taghdev/path/to/file.py
 
 # Restart services (code changes only — no rebuild needed)
 docker compose restart bot worker
@@ -73,7 +73,7 @@ If a task requires 3+ files changed, use Plan Mode first. Break into small tasks
 ## Architecture Quick Reference
 
 ```
-src/openclow/
+src/taghdev/
 ├── api/              # FastAPI dashboard
 ├── bot/              # Legacy telegram aliases (use providers/ instead)
 ├── models/           # SQLAlchemy: Project, Task, User, PlatformConfig, TaskLog
@@ -137,7 +137,7 @@ fitness functions as automated guardrails):
 |---|---|---|
 | **Schema** (source of truth) | `specs/001-per-chat-instances/contracts/*.schema.json` | The contract itself — every event/job/tool name with its full payload shape. Single source of truth. |
 | **Codegen** (build-time) | `scripts/codegen/gen_*.py` → `chat_frontend/src/types/*.ts` | TypeScript discriminated unions generated from schema. The frontend's `switch` becomes exhaustive at compile time — adding a new event in the schema breaks `tsc` until every consumer adds a `case`. |
-| **Runtime** (emit-time) | `src/openclow/services/stream_validator.py` | Every `controller.add_data` payload validated against the schema. Strict mode raises (dev/test); warn mode logs telemetry (prod). |
+| **Runtime** (emit-time) | `src/taghdev/services/stream_validator.py` | Every `controller.add_data` payload validated against the schema. Strict mode raises (dev/test); warn mode logs telemetry (prod). |
 | **Static audit** (CI gate) | `scripts/fitness/check_*.py` + `scripts/pipeline_fitness.py` | Cross-checks schema ↔ runtime ↔ codegen ↔ frontend ↔ backend, plus other contract surfaces (ARQ jobs, MCP tool args, compose ports, httpx timeouts, redactor coverage). |
 
 ### Today's fitness checks
@@ -322,7 +322,7 @@ Legacy host/docker modes still work unchanged — the router in
 - `inactivity_reaper` — every 5 min. Two-phase: running → idle +
   grace banner, idle → terminating after grace window.
 - `tunnel_health_check` — every 60 s. CF tunnel probe; Redis-backed
-  degradation state at `openclow:instance_upstream:<slug>:<cap>`
+  degradation state at `taghdev:instance_upstream:<slug>:<cap>`
   with 180s TTL.
 
 **Docs**: full spec lives in [specs/001-per-chat-instances/](specs/001-per-chat-instances/);

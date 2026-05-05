@@ -31,8 +31,8 @@ from scripts.fitness import Finding, FitnessResult, Severity
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 SCHEMA = REPO / "specs" / "001-per-chat-instances" / "contracts" / "stream-events.schema.json"
-BACKEND = REPO / "src" / "openclow" / "api" / "routes" / "assistant.py"
-VALIDATOR = REPO / "src" / "openclow" / "services" / "stream_validator.py"
+BACKEND = REPO / "src" / "taghdev" / "api" / "routes" / "assistant.py"
+VALIDATOR = REPO / "src" / "taghdev" / "services" / "stream_validator.py"
 FRONTEND = REPO / "chat_frontend" / "src" / "App.tsx"
 TS_TYPES = REPO / "chat_frontend" / "src" / "types" / "stream-events.ts"
 

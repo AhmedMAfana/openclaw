@@ -20,9 +20,9 @@ This plan **subsumes Phase 11 of spec 001 (T107–T116)** — that phase enumera
 
 ## Technical Context
 
-**Language/Version**: Python 3.12 async (orchestrator, API, workers — Constitution Architecture Constraint). Server-rendered admin templates use Jinja2 + Tailwind CSS + HTMX + vanilla `EventSource` JS (continuity with existing `settings/*.html` pages — see [src/openclow/api/templates/settings/projects.html](src/openclow/api/templates/settings/projects.html), [src/openclow/api/templates/settings/chat.html](src/openclow/api/templates/settings/chat.html)).
+**Language/Version**: Python 3.12 async (orchestrator, API, workers — Constitution Architecture Constraint). Server-rendered admin templates use Jinja2 + Tailwind CSS + HTMX + vanilla `EventSource` JS (continuity with existing `settings/*.html` pages — see [src/taghdev/api/templates/settings/projects.html](src/taghdev/api/templates/settings/projects.html), [src/taghdev/api/templates/settings/chat.html](src/taghdev/api/templates/settings/chat.html)).
 **Primary Dependencies**: FastAPI, SQLAlchemy[asyncio], Jinja2, ARQ, Redis, structlog. All already in the dependency set; no new deps.
-**Storage**: Postgres (existing `instances`, `chat_sessions`, `projects`, `users`, `audit_log` tables); Redis (read-only consumption of existing `openclow:instance_upstream:<slug>:<cap>` keys); JSONL on disk (read-only consumption via `activity_log.query()`).
+**Storage**: Postgres (existing `instances`, `chat_sessions`, `projects`, `users`, `audit_log` tables); Redis (read-only consumption of existing `taghdev:instance_upstream:<slug>:<cap>` keys); JSONL on disk (read-only consumption via `activity_log.query()`).
 **Testing**: pytest (existing test suite — `tests/contract/`, `tests/integration/`, `tests/unit/`). No new test framework. New tests added per the conventions of feature 001.
 **Target Platform**: Linux server (Docker compose stack); modern web browsers (Chrome/Firefox/Safari current) for the admin UI.
 **Project Type**: Web service (FastAPI backend + server-rendered admin pages; no SPA).
@@ -91,7 +91,7 @@ specs/003-admin-instance-mgmt/
 ### Source Code (repository root)
 
 ```text
-src/openclow/
+src/taghdev/
 ├── api/
 │   ├── routes/
 │   │   ├── admin_instances.py         # NEW — 11 admin endpoints (JSON) + 2 page routes
@@ -140,7 +140,7 @@ scripts/
                                                #   templates; verified during /speckit.tasks)
 ```
 
-**Structure Decision**: Single-project layout — admin work fits inside the existing `src/openclow/api/` (router + templates) and `src/openclow/services/` (existing InstanceService extensions). No new top-level project, no new package, no separate frontend repo. This matches the constitution's "single-tenant control plane" architecture constraint and the audit's keep-as-is verdict on the FastAPI + ARQ + Postgres stack.
+**Structure Decision**: Single-project layout — admin work fits inside the existing `src/taghdev/api/` (router + templates) and `src/taghdev/services/` (existing InstanceService extensions). No new top-level project, no new package, no separate frontend repo. This matches the constitution's "single-tenant control plane" architecture constraint and the audit's keep-as-is verdict on the FastAPI + ARQ + Postgres stack.
 
 The new `api/routes/admin_instances.py` router is the only new module file; everything else is either a template (UI), a single-line enum addition (model), or method additions on existing services.
 

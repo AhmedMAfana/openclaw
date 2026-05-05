@@ -26,7 +26,7 @@ import sys
 import pytest
 
 _instance_mcp = pytest.importorskip(
-    "openclow.mcp_servers.instance_mcp",
+    "taghdev.mcp_servers.instance_mcp",
     reason="T038 instance_mcp not landed",
 )
 
@@ -36,7 +36,7 @@ async def test_instance_exec_refuses_cloudflared() -> None:
     """Calling instance_exec with service='cloudflared' returns a REFUSED."""
     # We invoke the tool function directly rather than round-tripping
     # via a subprocess — the refusal check is pure Python.
-    from openclow.mcp_servers import instance_mcp as m
+    from taghdev.mcp_servers import instance_mcp as m
 
     result = await m.instance_exec(service="cloudflared", cmd="kill 1")
     assert "REFUSED" in result
@@ -49,7 +49,7 @@ def test_instance_mcp_startup_refuses_cloudflared_in_allowlist(tmp_path) -> None
     proc = asyncio.get_event_loop().run_until_complete(
         asyncio.create_subprocess_exec(
             sys.executable,
-            "-m", "openclow.mcp_servers.instance_mcp",
+            "-m", "taghdev.mcp_servers.instance_mcp",
             "--compose-project", "tagh-inst-deadbeefdead00",
             "--allowed-services", "app,cloudflared,web",
             stdout=asyncio.subprocess.PIPE,

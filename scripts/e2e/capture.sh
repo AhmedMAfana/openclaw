@@ -12,7 +12,7 @@
 #     worker.log         — last 200 lines of worker logs
 #     instance.log       — per-instance compose stack logs (if slug given)
 #     instance.json      — instance row from DB (if slug given)
-#     redis-keys.txt     — openclow:* keys (cap state, locks)
+#     redis-keys.txt     — taghdev:* keys (cap state, locks)
 #     timestamp.txt      — UTC timestamp of capture
 #
 # Idempotent: running twice for the same phase overwrites, doesn't merge.
@@ -49,13 +49,13 @@ if [[ -n "$SLUG" ]]; then
 
   # DB row for the instance
   docker compose exec -T postgres \
-    psql -U postgres -d openclow -At -c \
+    psql -U postgres -d taghdev -At -c \
     "SELECT row_to_json(i) FROM instances i WHERE slug='$SLUG' LIMIT 1;" \
     > "$OUT/instance.json" 2>&1 || true
 fi
 
 # --- Redis state (cap counters, upstream-degradation flags) -------------
-docker compose exec -T redis redis-cli --raw KEYS 'openclow:*' \
+docker compose exec -T redis redis-cli --raw KEYS 'taghdev:*' \
   > "$OUT/redis-keys.txt" 2>&1 || true
 
 # --- Recent stream events (best-effort tail) ----------------------------

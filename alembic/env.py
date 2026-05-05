@@ -5,8 +5,8 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from openclow.models import Base
-from openclow.settings import settings
+from taghdev.models import Base
+from taghdev.settings import settings
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)

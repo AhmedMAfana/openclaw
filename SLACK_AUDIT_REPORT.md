@@ -11,19 +11,19 @@ The Slack implementation has been audited and fixed. All critical gaps have been
 
 **Fix:** Changed to use `f"home:{user_id}"` as the chat_id for Home Tab task queries.
 
-**File:** `src/openclow/providers/chat/slack/handlers/home.py`
+**File:** `src/taghdev/providers/chat/slack/handlers/home.py`
 
 ### 2. ✅ Fixed: Missing `/oc-adduser` Command
 **Problem:** The `/oc-adduser` command was referenced in help but not implemented.
 
 **Fix:** Added `handle_adduser()` command handler that opens the add user modal.
 
-**File:** `src/openclow/providers/chat/slack/handlers/commands.py`
+**File:** `src/taghdev/providers/chat/slack/handlers/commands.py`
 
 ### 3. ✅ Verified: `view_pr` Button
 **Status:** Not broken — the button has `url=pr_url` which opens directly in browser. No handler needed.
 
-**File:** `src/openclow/providers/chat/slack/blocks.py` (line 475-479)
+**File:** `src/taghdev/providers/chat/slack/blocks.py` (line 475-479)
 
 ### 4. ✅ Fixed: Missing Modal Validation
 **Problem:** Modals lacked proper validation for required fields.
@@ -36,7 +36,7 @@ The Slack implementation has been audited and fixed. All critical gaps have been
 - User selection validation for adduser
 
 **Files:** 
-- `src/openclow/providers/chat/slack/handlers/modals.py`
+- `src/taghdev/providers/chat/slack/handlers/modals.py`
 
 ### 5. ✅ Fixed: Error Handling Gaps
 **Problem:** Many error paths didn't notify the user or log properly.
@@ -52,7 +52,7 @@ The Slack implementation has been audited and fixed. All critical gaps have been
 
 **Fix:** Added User Management section to help.
 
-**File:** `src/openclow/providers/chat/slack/blocks.py`
+**File:** `src/taghdev/providers/chat/slack/blocks.py`
 
 ## Feature Parity: Telegram vs Slack
 

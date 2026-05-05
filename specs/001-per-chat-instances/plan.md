@@ -23,7 +23,7 @@ The refactor is scoped to new code paths. Existing `mode="host"` and `mode="dock
 
 **Storage**:
 - PostgreSQL (durable source of truth per Principle VI) — new tables `instances`, `instance_tunnels`; new columns `web_chat_sessions.instance_id`, `tasks.instance_id`
-- Redis (ephemeral only) — Redis lock `openclow:instance:<slug>` per Principle VI, reuse pattern from `workspace_service.py:36`
+- Redis (ephemeral only) — Redis lock `taghdev:instance:<slug>` per Principle VI, reuse pattern from `workspace_service.py:36`
 - Docker secrets — Cloudflare named-tunnel credential JSONs (`tagh-inst-<slug>-cf`), referenced (not embedded) from `instance_tunnels.credentials_secret`
 - Filesystem — per-instance workspaces at `/workspaces/inst-<slug>/`, shared per-project clone cache at `/workspaces/_cache/<project_name>/` (read-only to instances)
 
@@ -104,7 +104,7 @@ specs/001-per-chat-instances/
 ### Source Code (repository root)
 
 ```text
-src/openclow/
+src/taghdev/
 ├── api/                              # FastAPI dashboard — unchanged topology
 │   └── routers/
 │       └── instances.py              # NEW: /internal/instances/<slug>/heartbeat, /instances list
@@ -173,7 +173,7 @@ tests/
     └── test_compose_no_ports_lint.py
 ```
 
-**Structure Decision**: Extend the existing single Python package (`src/openclow/`) rather than introducing a new service; the feature is a topology change to the existing orchestrator, not a new service boundary. The one exception is `projctl/`, which ships as a separate Go module so it can be baked into arbitrary project images via `COPY --from=ghcr.io/<org>/projctl:<ver>`. Tests mirror the existing `tests/unit` + `tests/integration` split and add a `tests/contract` directory for schema contracts (projctl stdout, LLM envelope, heartbeat API).
+**Structure Decision**: Extend the existing single Python package (`src/taghdev/`) rather than introducing a new service; the feature is a topology change to the existing orchestrator, not a new service boundary. The one exception is `projctl/`, which ships as a separate Go module so it can be baked into arbitrary project images via `COPY --from=ghcr.io/<org>/projctl:<ver>`. Tests mirror the existing `tests/unit` + `tests/integration` split and add a `tests/contract` directory for schema contracts (projctl stdout, LLM envelope, heartbeat API).
 
 ## Implementation PR Sequence
 

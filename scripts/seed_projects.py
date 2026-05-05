@@ -7,7 +7,7 @@ import asyncio
 
 from sqlalchemy import select
 
-from openclow.models import Project, async_session
+from taghdev.models import Project, async_session
 
 # =============================================
 # ADD YOUR PROJECTS HERE

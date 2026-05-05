@@ -32,8 +32,8 @@ from scripts.fitness import Finding, FitnessResult, Severity
 
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-CLAUDE = REPO / "src" / "openclow" / "providers" / "llm" / "claude.py"
-MCP_DIR = REPO / "src" / "openclow" / "mcp_servers"
+CLAUDE = REPO / "src" / "taghdev" / "providers" / "llm" / "claude.py"
+MCP_DIR = REPO / "src" / "taghdev" / "mcp_servers"
 
 # The per-instance trio that the container-mode allowlist binds to.
 # Each entry is (mcp_server_name_in_url, source_file).
@@ -109,7 +109,7 @@ def check() -> FitnessResult:
                 f"chats cannot call it. Add to CONTAINER_MODE_TOOLS or "
                 f"to _REGISTERED_OPTIONAL with a one-line reason."
             ),
-            location="src/openclow/mcp_servers/",
+            location="src/taghdev/mcp_servers/",
         ))
 
     result.findings = findings

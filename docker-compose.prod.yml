@@ -11,12 +11,12 @@ services:
     command: >
       bash -c "
         if [ -z \"$$WEB_CHAT_JWT_SECRET\" ]; then
-          JWT_FILE=/home/openclow/.claude/.jwt_secret;
+          JWT_FILE=/home/taghdev/.claude/.jwt_secret;
           [ -f $$JWT_FILE ] || openssl rand -hex 32 > $$JWT_FILE;
           export WEB_CHAT_JWT_SECRET=$$(cat $$JWT_FILE);
           echo '[api] WEB_CHAT_JWT_SECRET loaded from volume';
         fi;
-        exec uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 10
+        exec uvicorn taghdev.api.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 10
       "
     ports: !override
       - "127.0.0.1:8000:8000"
@@ -26,13 +26,13 @@ services:
     volumes: !override
       - activity_logs:/app/logs
       - workspaces:/workspaces
-      - claude_auth:/home/openclow/.claude
+      - claude_auth:/home/taghdev/.claude
       - /var/run/docker.sock:/var/run/docker.sock
       - ./auth.json:/app/auth.json:ro
       # Bind-mount source + alembic + frontend dist so Python / migration /
       # built-frontend changes ship via `git pull && docker compose restart`,
       # no image rebuild. Tradeoff: the running code is whatever's at
-      # /home/web/vhosts/openclow/app on the host, not what was baked into
+      # /home/web/vhosts/taghdev/app on the host, not what was baked into
       # the image. For staging that's the right call (5 s restart vs 5+ min
       # rebuild). For real prod, drop these mounts and rebuild on every
       # change — the image becomes the immutable source of truth.
@@ -68,14 +68,14 @@ services:
     command: >
       bash -c "
         chmod 666 /var/run/docker.sock 2>/dev/null || true;
-        exec su -l openclow -c 'arq openclow.worker.arq_app.WorkerSettings'
+        exec su -l taghdev -c 'arq taghdev.worker.arq_app.WorkerSettings'
       "
     user: root
     # Same reason as api: replace base volumes so ./src and ./dev-sandbox
     # bind-mounts don't leak in from docker-compose.override.yml.
     volumes: !override
       - workspaces:/workspaces
-      - claude_auth:/home/openclow/.claude
+      - claude_auth:/home/taghdev/.claude
       - activity_logs:/app/logs
       - /var/run/docker.sock:/var/run/docker.sock
       - ./auth.json:/app/auth.json:ro

@@ -27,7 +27,7 @@ import pytest
 
 def test_dry_run_toggle_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """``REAPER_DRY_RUN=1`` flips on; any other value keeps it off."""
-    from openclow.services import inactivity_reaper as r
+    from taghdev.services import inactivity_reaper as r
     monkeypatch.setenv("REAPER_DRY_RUN", "1")
     assert r._dry_run_enabled() is True
     monkeypatch.setenv("REAPER_DRY_RUN", "0")

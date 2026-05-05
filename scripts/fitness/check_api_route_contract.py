@@ -6,7 +6,7 @@ backend ships a route nobody calls (likely dead code).
 
 Walks:
 
-  * Every ``src/openclow/api/routes/*.py`` for
+  * Every ``src/taghdev/api/routes/*.py`` for
     ``@router.<verb>("/path")`` decorators. Combines with the
     ``router = APIRouter(prefix="/api", ...)`` declaration to produce
     canonical full paths.
@@ -28,9 +28,9 @@ from scripts.fitness import Finding, FitnessResult, Severity
 
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-ROUTES_DIR = REPO / "src" / "openclow" / "api" / "routes"
-PAGES_FILE = REPO / "src" / "openclow" / "api" / "pages.py"
-MAIN_FILE = REPO / "src" / "openclow" / "api" / "main.py"
+ROUTES_DIR = REPO / "src" / "taghdev" / "api" / "routes"
+PAGES_FILE = REPO / "src" / "taghdev" / "api" / "pages.py"
+MAIN_FILE = REPO / "src" / "taghdev" / "api" / "main.py"
 FRONTEND_DIR = REPO / "chat_frontend" / "src"
 
 
@@ -103,7 +103,7 @@ def check() -> FitnessResult:
                 message=(
                     f"frontend calls `{fe_url}` but no FastAPI route "
                     "serves it — user request will 404. Either add "
-                    "the route under src/openclow/api/routes/ or "
+                    "the route under src/taghdev/api/routes/ or "
                     "whitelist in _FRONTEND_ONLY_OK with a one-line "
                     "reason."
                 ),
@@ -125,7 +125,7 @@ def check() -> FitnessResult:
                 "another consumer. Add to _BACKEND_ONLY_OK with a "
                 "reason if intentional."
             ),
-            location="src/openclow/api/routes/",
+            location="src/taghdev/api/routes/",
         ))
 
     result.findings = findings

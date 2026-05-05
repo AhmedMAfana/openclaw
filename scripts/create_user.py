@@ -7,7 +7,7 @@ import sys
 
 from sqlalchemy import select
 
-from openclow.models import User, async_session
+from taghdev.models import User, async_session
 
 
 async def main():

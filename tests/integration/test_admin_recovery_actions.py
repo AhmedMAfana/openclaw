@@ -10,7 +10,7 @@ import uuid
 import pytest
 from datetime import datetime, timedelta, timezone
 
-from openclow.models.instance import Instance, InstanceStatus, TerminatedReason
+from taghdev.models.instance import Instance, InstanceStatus, TerminatedReason
 
 
 def _seed_chat(store, *, chat_id: int = 7, user_id: int = 1, project_id: int = 11):

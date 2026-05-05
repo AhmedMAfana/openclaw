@@ -76,8 +76,8 @@ class InMemorySession:
         return None
 
     async def get(self, model: type, pk: Any) -> Any:
-        from openclow.models.instance import Instance
-        from openclow.models.web_chat import WebChatSession
+        from taghdev.models.instance import Instance
+        from taghdev.models.web_chat import WebChatSession
         if model is WebChatSession:
             return self._store.chats.get(int(pk))
         if model is Instance:
@@ -155,7 +155,7 @@ class InMemorySession:
         return rows
 
     def add(self, obj: Any) -> None:
-        from openclow.models.instance import Instance
+        from taghdev.models.instance import Instance
         if isinstance(obj, Instance):
             if obj.id is None:
                 obj.id = uuid.uuid4()
@@ -173,7 +173,7 @@ class InMemorySession:
         return None
 
     async def delete(self, obj: Any) -> None:
-        from openclow.models.instance import Instance
+        from taghdev.models.instance import Instance
         if isinstance(obj, Instance) and obj.id in self._store.instances:
             del self._store.instances[obj.id]
 
@@ -234,7 +234,7 @@ def inmemory_service(inmemory_store: InMemoryStore):
     on enqueued jobs inspect ``recorded_calls`` — a list of
     ``(job_name, args)`` tuples.
     """
-    from openclow.services.instance_service import InstanceService
+    from taghdev.services.instance_service import InstanceService
 
     calls: list[tuple[str, tuple[Any, ...]]] = []
 
@@ -274,7 +274,7 @@ def make_chat():
         mode: str = "container",
         session_branch: str = "session-x",
     ):
-        from openclow.models.web_chat import WebChatSession
+        from taghdev.models.web_chat import WebChatSession
 
         @dataclass
         class _FakeProject:

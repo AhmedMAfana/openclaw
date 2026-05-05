@@ -39,7 +39,7 @@ repos:
         pass_filenames: false
         # Run on changes to any contract surface: backend, schema,
         # codegen, frontend, validators, fitness checks themselves.
-        files: ^(src/openclow/.*\.py|chat_frontend/src/.*\.(ts|tsx)|specs/001-per-chat-instances/contracts/.*|scripts/(fitness/.*|codegen/.*|pipeline_fitness)\.py|src/openclow/setup/compose_templates/.*\.yml)$
+        files: ^(src/taghdev/.*\.py|chat_frontend/src/.*\.(ts|tsx)|specs/001-per-chat-instances/contracts/.*|scripts/(fitness/.*|codegen/.*|pipeline_fitness)\.py|src/taghdev/setup/compose_templates/.*\.yml)$
 
       # Codegen freshness gate — generated TS types must match the
       # JSON schema. Lower-severity than fitness (a stale codegen is

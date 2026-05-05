@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from openclow.api.serializers.admin_instance import to_audit_entry
+from taghdev.api.serializers.admin_instance import to_audit_entry
 
 
 def test_audit_entry_redacts_command():

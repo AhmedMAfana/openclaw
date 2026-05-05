@@ -30,7 +30,7 @@ pytestmark = pytest.mark.skipif(
 async def test_delete_chat_cascade_all_four_loops() -> None:
     pytest.skip(
         "Pending fixture factory. The cascade service is "
-        "`openclow.services.chat_session_service.delete_chat_cascade`; "
+        "`taghdev.services.chat_session_service.delete_chat_cascade`; "
         "test walks through the returned summary dict + queries each "
         "table + checks the workspace cache."
     )

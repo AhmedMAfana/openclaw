@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from openclow.api.serializers.admin_instance import to_log_line
+from taghdev.api.serializers.admin_instance import to_log_line
 
 
 def test_log_line_message_redacts_bearer_token():

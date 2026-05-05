@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from openclow.api.serializers.admin_instance import to_list_row
+from taghdev.api.serializers.admin_instance import to_list_row
 
 
 def _failed(slug: str, when: datetime):

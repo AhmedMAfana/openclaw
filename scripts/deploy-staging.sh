@@ -6,7 +6,7 @@
 #
 # Requirements on your laptop:
 #   - SSH key already authorized as root@165.227.228.113
-#   - /home/web/vhosts/openclow/app/ exists on server OR your key is authorized
+#   - /home/web/vhosts/taghdev/app/ exists on server OR your key is authorized
 #     for `web` (we clone as web via sudo)
 #   - Local .env + auth.json present at the repo root (this script refuses
 #     without them — secrets come from here)
@@ -17,7 +17,7 @@ set -euo pipefail
 
 SERVER=${SERVER:-165.227.228.113}
 DOMAIN=${DOMAIN:-devops.staging-ami.com}
-REMOTE_DIR=${REMOTE_DIR:-/home/web/vhosts/openclow}
+REMOTE_DIR=${REMOTE_DIR:-/home/web/vhosts/taghdev}
 REPO_URL=${REPO_URL:-https://github.com/AhmedMAfana/openclaw.git}
 BRANCH=${BRANCH:-undocker}
 CERTBOT_EMAIL=${CERTBOT_EMAIL:-admin@staging-ami.com}
@@ -245,7 +245,7 @@ if [[ "$SKIP_BUILD" != "1" ]]; then
 
   docker build --build-arg PROJCTL_TAG=dev \\
                -t tagh/laravel-vue-app:latest \\
-               "$REMOTE_DIR/app/src/openclow/setup/compose_templates/laravel-vue/"
+               "$REMOTE_DIR/app/src/taghdev/setup/compose_templates/laravel-vue/"
 fi
 
 # Start data services first, wait for healthcheck.
@@ -269,7 +269,7 @@ fi
 # only syncs perms onto a volume on FIRST creation; existing volumes are
 # stuck with their original perms. One-shot chown via the api container
 # (it has the volume mounted; --user 0 so chown succeeds). Idempotent.
-\$COMPOSE exec -T --user 0 api chown -R openclow:openclow /app/logs 2>&1 \\
+\$COMPOSE exec -T --user 0 api chown -R taghdev:taghdev /app/logs 2>&1 \\
   | sed 's/^/[fix-perms] /' || true
 
 \$COMPOSE ps
@@ -295,8 +295,8 @@ server {
     # certbot --nginx will inject ssl_certificate/... lines on first run.
 
     client_max_body_size 25m;
-    access_log /var/log/nginx/openclow.access.log;
-    error_log  /var/log/nginx/openclow.error.log;
+    access_log /var/log/nginx/taghdev.access.log;
+    error_log  /var/log/nginx/taghdev.error.log;
 
     location / {
         proxy_pass http://127.0.0.1:8000;

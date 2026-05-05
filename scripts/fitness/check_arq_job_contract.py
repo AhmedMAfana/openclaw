@@ -21,7 +21,7 @@ from scripts.fitness import Finding, FitnessResult, Severity
 
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-SRC = REPO / "src" / "openclow"
+SRC = REPO / "src" / "taghdev"
 ARQ_APP = SRC / "worker" / "arq_app.py"
 
 _REGISTERED_NO_CALLER_OK: set[str] = {

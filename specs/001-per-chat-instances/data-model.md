@@ -6,7 +6,7 @@
 
 Two new tables, two column extensions, and one enum addition. All migrations live in a single Alembic revision (`alembic/versions/011_instance_tables.py`) to keep the deploy atomic.
 
-Identifier convention for all new columns: snake_case, per SQLAlchemy 2.x async conventions already in use across [src/openclow/models/](../../src/openclow/models/).
+Identifier convention for all new columns: snake_case, per SQLAlchemy 2.x async conventions already in use across [src/taghdev/models/](../../src/taghdev/models/).
 
 ---
 
@@ -104,7 +104,7 @@ Enforced at the service layer (`InstanceService`):
 
 ## 2. New entity: `InstanceTunnel`
 
-Represents the public networking surface for an instance. Explicit table (not stuffed into `platform_config`) because lifecycle is explicit per [Principle VI](../../.specify/memory/constitution.md) and the audit flagged the worker-local `_active_processes` dict at [tunnel_service.py:29](../../src/openclow/services/tunnel_service.py#L29) as an orphan risk.
+Represents the public networking surface for an instance. Explicit table (not stuffed into `platform_config`) because lifecycle is explicit per [Principle VI](../../.specify/memory/constitution.md) and the audit flagged the worker-local `_active_processes` dict at [tunnel_service.py:29](../../src/taghdev/services/tunnel_service.py#L29) as an orphan risk.
 
 ### 2.1 Fields
 

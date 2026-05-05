@@ -16,7 +16,7 @@ import httpx
 import jwt
 import pytest
 
-from openclow.services.credentials_service import (
+from taghdev.services.credentials_service import (
     APP_JWT_TTL_SECONDS,
     CredentialsService,
     GitHubAppConfig,

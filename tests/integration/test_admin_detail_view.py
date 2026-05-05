@@ -8,8 +8,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from openclow.api.serializers.admin_instance import to_detail
-from openclow.services import activity_log
+from taghdev.api.serializers.admin_instance import to_detail
+from taghdev.services import activity_log
 
 
 def _running_instance():

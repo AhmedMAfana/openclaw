@@ -53,7 +53,7 @@ Validates **User Story 2 (P1)** and **User Story 3 (P2)**.
 
 1. Provision an instance as in §1.
 2. In a dev shell, fast-forward the clock: `UPDATE instances SET last_activity_at = now() - interval '24 hours', expires_at = now() - interval '1 second' WHERE slug = 'inst-...';`
-3. Wait for the reaper cron (≤5 min) — or trigger manually: `arq --run-once openclow.worker.inactivity_reaper`.
+3. Wait for the reaper cron (≤5 min) — or trigger manually: `arq --run-once taghdev.worker.inactivity_reaper`.
 4. **Observe**:
    - Chat receives banner: "Environment ending in 60 minutes. Send a message or any activity to keep it alive."
    - `instances.status` flips to `idle`, `grace_notification_at` set.
@@ -162,7 +162,7 @@ Both coexist on the same host.
 ## Success-exit checks (to mark the feature done)
 
 - All integration tests in [../../../tests/integration/](../../../tests/integration/) tagged `per_chat_instances` pass against real Docker + real Postgres + real Redis (stubbed CF).
-- The compose-no-ports lint test passes for every template in [../../../src/openclow/setup/compose_templates/](../../../src/openclow/setup/compose_templates/).
+- The compose-no-ports lint test passes for every template in [../../../src/taghdev/setup/compose_templates/](../../../src/taghdev/setup/compose_templates/).
 - The MCP-manifest test asserts no "which instance" tool exists in any new-mode MCP server.
 - Redactor unit tests cover all categories listed in Principle IV.
 - The nightly E2E test against a real Cloudflare zone completes within SC-002's 5-minute budget on a cold run.

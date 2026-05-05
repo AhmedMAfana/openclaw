@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from openclow.api.schemas.admin_instances import (
+from taghdev.api.schemas.admin_instances import (
     BulkTerminateRequest,
     BulkTerminateOutcome,
     BulkTerminateResponse,
@@ -42,5 +42,5 @@ def test_bulk_outcome_envelope_has_per_slug_results():
 
 def test_bulk_cap_constant_is_50():
     """Pin the 50 cap so it can't drift without conscious change."""
-    from openclow.api.routes import admin_instances
+    from taghdev.api.routes import admin_instances
     assert admin_instances._BULK_CAP == 50

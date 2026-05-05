@@ -11,7 +11,7 @@ Categories (from spec.md FR-032/FR-033 + constitution.md IV):
 
 Also: redact must be idempotent AND a byte-for-byte identity on non-secret text.
 """
-from openclow.services.audit_service import redact
+from taghdev.services.audit_service import redact
 
 
 def test_bearer_token_masked():

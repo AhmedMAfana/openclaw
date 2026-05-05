@@ -10,7 +10,7 @@ This contract lets the admin list and detail views satisfy FR-006 (≤10s stalen
 
 ## Why this exists
 
-Decision 2 in [research.md](../research.md) chose SSE over polling. The existing stream endpoint at [src/openclow/api/routes/activity.py:48-83](src/openclow/api/routes/activity.py#L48-L83) is the canonical mechanism; this contract pins the **event-type vocabulary** the admin UI listens for and the **emit sites** that must produce them. The fitness suite's `stream_event_contract` check should treat this file as the source of truth for instance-related event types.
+Decision 2 in [research.md](../research.md) chose SSE over polling. The existing stream endpoint at [src/taghdev/api/routes/activity.py:48-83](src/taghdev/api/routes/activity.py#L48-L83) is the canonical mechanism; this contract pins the **event-type vocabulary** the admin UI listens for and the **emit sites** that must produce them. The fitness suite's `stream_event_contract` check should treat this file as the source of truth for instance-related event types.
 
 ---
 
@@ -60,7 +60,7 @@ Allows two admins on the same page to see each other's actions with ≤10s lag (
 
 ### `instance_upstream`
 
-Emitted on every transition of upstream-degradation state (existing infra at `openclow:instance_upstream:<slug>:<cap>`). The detail view uses this to update the tunnel-health badge live.
+Emitted on every transition of upstream-degradation state (existing infra at `taghdev:instance_upstream:<slug>:<cap>`). The detail view uses this to update the tunnel-health badge live.
 
 ```json
 {
@@ -101,12 +101,12 @@ The fitness suite's `stream_event_contract` check should verify each of these em
 
 | Event type | Emit site (file:line) | Trigger |
 |---|---|---|
-| `instance_status` | `src/openclow/services/instance_service.py` (every method that mutates `Instance.status`) | After successful UPDATE commits. |
-| `instance_status` | `src/openclow/worker/tasks/instance_tasks.py::provision_instance` | At each phase boundary (provisioning → running, running → failed). |
-| `instance_status` | `src/openclow/worker/tasks/instance_tasks.py::teardown_instance` | At terminating → destroyed transition. |
-| `instance_action` | `src/openclow/api/routes/admin_instances.py` (new file) | After enqueue/dispatch in each admin action handler. |
-| `instance_upstream` | `src/openclow/worker/tasks/instance_tasks.py::tunnel_health_check_cron` | On state-change (not on every probe). |
-| `instance_summary` | `src/openclow/services/instance_service.py` (debounced helper) | After any `instance_status` emit, debounced to ≤1/min. |
+| `instance_status` | `src/taghdev/services/instance_service.py` (every method that mutates `Instance.status`) | After successful UPDATE commits. |
+| `instance_status` | `src/taghdev/worker/tasks/instance_tasks.py::provision_instance` | At each phase boundary (provisioning → running, running → failed). |
+| `instance_status` | `src/taghdev/worker/tasks/instance_tasks.py::teardown_instance` | At terminating → destroyed transition. |
+| `instance_action` | `src/taghdev/api/routes/admin_instances.py` (new file) | After enqueue/dispatch in each admin action handler. |
+| `instance_upstream` | `src/taghdev/worker/tasks/instance_tasks.py::tunnel_health_check_cron` | On state-change (not on every probe). |
+| `instance_summary` | `src/taghdev/services/instance_service.py` (debounced helper) | After any `instance_status` emit, debounced to ≤1/min. |
 
 All emits MUST happen **after** the DB write commits (Principle VI: durable state is the source of truth). Order: `commit → log_event → return`.
 
@@ -139,7 +139,7 @@ The `slug=` query parameter is honored server-side (filter step in `/api/activit
 
 ## Backend filter for `slug=`
 
-The existing `/api/activity/stream` accepts `?type=` filters. This contract requires extending it to accept `?slug=` as a secondary filter — server-side, so non-matching events are dropped before the network. **Implementation note**: this is a 5-line change to the generator in [src/openclow/api/routes/activity.py:48-83](src/openclow/api/routes/activity.py#L48-L83). It is bounded by Principle VII (no half-features): the change MUST land in the same PR as the detail-view template that depends on it.
+The existing `/api/activity/stream` accepts `?type=` filters. This contract requires extending it to accept `?slug=` as a secondary filter — server-side, so non-matching events are dropped before the network. **Implementation note**: this is a 5-line change to the generator in [src/taghdev/api/routes/activity.py:48-83](src/taghdev/api/routes/activity.py#L48-L83). It is bounded by Principle VII (no half-features): the change MUST land in the same PR as the detail-view template that depends on it.
 
 ---
 

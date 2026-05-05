@@ -17,7 +17,7 @@ class ThreadErrorBoundary extends Component<
   }
 
   componentDidCatch(error: Error, info: { componentStack: string }) {
-    localStorage.removeItem("openclow_thread");
+    localStorage.removeItem("taghdev_thread");
     console.error("[ThreadBoundary] crash:", error.message);
     console.error("[ThreadBoundary] component stack:", info.componentStack);
   }
@@ -301,7 +301,7 @@ function ChatApp() {
         // Plan v3: provisioning is now an INLINE thread message via the
         // existing WorkerProgressCard pattern (`__PROGRESS_CARD__` prefix
         // on a real assistant message — see thread.tsx::WorkerProgressCard
-        // and src/openclow/api/routes/assistant.py auto-provision block).
+        // and src/taghdev/api/routes/assistant.py auto-provision block).
         // The hovering card is gone. This branch is now a no-op (and any
         // stale failure card from a prior attempt gets cleared).
         setActiveCard(null);
@@ -487,7 +487,7 @@ function ChatApp() {
 
   // Persist active thread to localStorage so reload restores it
   useEffect(() => {
-    if (activeThreadId) localStorage.setItem("openclow_thread", activeThreadId);
+    if (activeThreadId) localStorage.setItem("taghdev_thread", activeThreadId);
   }, [activeThreadId]);
 
   useEffect(() => {
@@ -830,7 +830,7 @@ function ChatApp() {
 
         if (list.length > 0) {
           // Restore last active thread from localStorage, fallback to newest
-          const saved = localStorage.getItem("openclow_thread");
+          const saved = localStorage.getItem("taghdev_thread");
           const target = (saved && list.find((t) => t.remoteId === saved))
             ? saved
             : list[0].remoteId;

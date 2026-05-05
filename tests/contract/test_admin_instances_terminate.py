@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from openclow.api import main as api_main
+from taghdev.api import main as api_main
 
 
 def _route_methods(path: str) -> set[str]:
@@ -30,19 +30,19 @@ def _route_response_model(path: str, method: str):
 
 
 def test_terminate_response_model():
-    from openclow.api.schemas.admin_instances import TerminateResponse
+    from taghdev.api.schemas.admin_instances import TerminateResponse
 
     assert _route_response_model("/api/admin/instances/{slug}/terminate", "POST") is TerminateResponse
 
 
 def test_bulk_terminate_response_model():
-    from openclow.api.schemas.admin_instances import BulkTerminateResponse
+    from taghdev.api.schemas.admin_instances import BulkTerminateResponse
 
     assert _route_response_model("/api/admin/instances/bulk-terminate", "POST") is BulkTerminateResponse
 
 
 def test_terminate_request_requires_confirm_field():
-    from openclow.api.schemas.admin_instances import TerminateRequest
+    from taghdev.api.schemas.admin_instances import TerminateRequest
 
     with pytest.raises(Exception):
         TerminateRequest()  # type: ignore[call-arg]
@@ -52,7 +52,7 @@ def test_terminate_request_requires_confirm_field():
 
 
 def test_bulk_terminate_envelope_shape():
-    from openclow.api.schemas.admin_instances import (
+    from taghdev.api.schemas.admin_instances import (
         BulkTerminateOutcome,
         BulkTerminateResponse,
     )
@@ -70,7 +70,7 @@ def test_bulk_terminate_envelope_shape():
 
 def test_no_op_terminate_envelope_marks_blocked_with_reason():
     from types import SimpleNamespace
-    from openclow.api.routes.admin_instances import _no_op_terminate_envelope
+    from taghdev.api.routes.admin_instances import _no_op_terminate_envelope
 
     inst = SimpleNamespace(slug="inst-aaaaaaaaaaaaaa", status="destroyed")
     env = _no_op_terminate_envelope(inst)

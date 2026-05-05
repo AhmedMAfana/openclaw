@@ -110,7 +110,7 @@ Either use the seeder (`scripts/seed_platform_creds.py`) or this
 direct INSERT:
 
 ```bash
-docker compose exec -T postgres psql -U openclow -d openclow -c "
+docker compose exec -T postgres psql -U taghdev -d taghdev -c "
 INSERT INTO platform_config (category, key, value, is_active)
 VALUES ('cloudflare', 'settings', jsonb_build_object(
   'account_id',  '<account_id>',
@@ -235,7 +235,7 @@ print(json.dumps({
 }))
 ")
 
-docker compose exec -T postgres psql -U openclow -d openclow -c \
+docker compose exec -T postgres psql -U taghdev -d taghdev -c \
   "INSERT INTO platform_config (category, key, value, is_active) \
    VALUES ('github_app', 'settings', '$JSON'::jsonb, true) \
    ON CONFLICT (category, key) DO UPDATE SET value = EXCLUDED.value;"
@@ -291,7 +291,7 @@ echo "ghp_..." > github_pat.md
 chmod 600 github_pat.md
 echo "github_pat.md" >> .gitignore
 
-docker compose exec -T postgres psql -U openclow -d openclow <<EOF
+docker compose exec -T postgres psql -U taghdev -d taghdev <<EOF
 INSERT INTO platform_config (category, key, value, is_active)
 VALUES ('github_app', 'settings', jsonb_build_object('pat', '$(cat github_pat.md)'), true)
 ON CONFLICT (category, key) DO UPDATE SET value = EXCLUDED.value;
@@ -359,7 +359,7 @@ Either via the dashboard:
 Or directly via SQL:
 
 ```bash
-docker compose exec -T postgres psql -U openclow -d openclow -c "
+docker compose exec -T postgres psql -U taghdev -d taghdev -c "
 UPDATE projects
 SET github_repo = 'yourname/laravel-test-app'
 WHERE name = 'test-project';"

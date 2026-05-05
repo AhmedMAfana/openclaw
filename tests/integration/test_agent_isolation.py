@@ -30,15 +30,15 @@ import tempfile
 import pytest
 
 pytest.importorskip(
-    "openclow.mcp_servers.instance_mcp",
+    "taghdev.mcp_servers.instance_mcp",
     reason="T038 instance_mcp not landed yet",
 )
 pytest.importorskip(
-    "openclow.mcp_servers.workspace_mcp",
+    "taghdev.mcp_servers.workspace_mcp",
     reason="T039 workspace_mcp not landed yet",
 )
 pytest.importorskip(
-    "openclow.mcp_servers.git_mcp",
+    "taghdev.mcp_servers.git_mcp",
     reason="T040 git_mcp extension not landed yet",
 )
 
@@ -64,7 +64,7 @@ async def test_workspace_read_rejects_cross_instance_absolute_path(tmp_path):
         [
             sys.executable, "-c",
             "import sys; sys.argv = ['workspace_mcp', '--root', %r];"
-            "from openclow.mcp_servers.workspace_mcp import _resolve;"
+            "from taghdev.mcp_servers.workspace_mcp import _resolve;"
             "path, err = _resolve(%r);"
             "print('path=', path); print('err=', err)"
             % (str(inst_a), str(inst_b / "secret.txt")),
@@ -92,7 +92,7 @@ async def test_workspace_read_rejects_symlink_escape(tmp_path):
         [
             sys.executable, "-c",
             "import sys; sys.argv = ['workspace_mcp', '--root', %r];"
-            "from openclow.mcp_servers.workspace_mcp import _resolve;"
+            "from taghdev.mcp_servers.workspace_mcp import _resolve;"
             "path, err = _resolve('link');"
             "print('err=', err)"
             % (str(inst_a),),
@@ -110,7 +110,7 @@ async def test_workspace_read_rejects_symlink_escape(tmp_path):
 
 async def test_instance_exec_refuses_cloudflared() -> None:
     """Escape (b): `cloudflared` is never in the allowlist."""
-    from openclow.mcp_servers import instance_mcp as m
+    from taghdev.mcp_servers import instance_mcp as m
     result = await m.instance_exec(service="cloudflared", cmd="kill 1")
     assert "REFUSED" in result
     assert "cloudflared" in result.lower() or "allowlist" in result.lower()
@@ -118,7 +118,7 @@ async def test_instance_exec_refuses_cloudflared() -> None:
 
 async def test_instance_exec_refuses_unlisted_service() -> None:
     """Escape (b'): any service not in the bound allowlist is refused."""
-    from openclow.mcp_servers import instance_mcp as m
+    from taghdev.mcp_servers import instance_mcp as m
     result = await m.instance_exec(service="arbitrary_service", cmd="ls")
     assert "REFUSED" in result
 
@@ -127,7 +127,7 @@ def test_instance_mcp_refuses_startup_if_cloudflared_allowlisted() -> None:
     """Operator cannot enable cloudflared via --allowed-services."""
     proc = subprocess.run(
         [
-            sys.executable, "-m", "openclow.mcp_servers.instance_mcp",
+            sys.executable, "-m", "taghdev.mcp_servers.instance_mcp",
             "--compose-project", "tagh-inst-deadbeef000000",
             "--allowed-services", "app,cloudflared,web",
         ],
@@ -177,7 +177,7 @@ async def test_git_commit_refused_when_head_off_pinned_branch(tmp_path):
     code = (
         "import asyncio, sys;"
         "sys.argv = ['git_mcp', '--workspace', %r, '--branch', 'session-A'];"
-        "from openclow.mcp_servers import git_mcp as g;"
+        "from taghdev.mcp_servers import git_mcp as g;"
         "r = asyncio.run(g.git_commit('test commit'));"
         "print('R:', r)"
     ) % (repo,)
@@ -198,7 +198,7 @@ async def test_git_mcp_pinned_mode_does_not_expose_checkout_or_reset() -> None:
     call `git_checkout` / `git_reset` / `git_branch -D` because those
     tool names don't exist.
     """
-    from openclow.mcp_servers import git_mcp as g
+    from taghdev.mcp_servers import git_mcp as g
     manifest = g.get_tool_manifest()
     exposed = {t["name"] for t in manifest}
     # The forbidden destructive ops:
@@ -224,7 +224,7 @@ def test_factories_bake_identity_into_argv() -> None:
     different identifier at call time (because the identifier is
     already baked before the subprocess spawns).
     """
-    from openclow.providers.llm.claude import (
+    from taghdev.providers.llm.claude import (
         _mcp_instance, _mcp_workspace, _mcp_git_pinned,
     )
 

@@ -2,8 +2,8 @@
 # Worker entrypoint — ensures Claude credentials persist across restarts.
 # HOME is resolved dynamically from the OS so no paths are hardcoded.
 
-# Resolve the real home dir of the openclow user (the volume is mounted there)
-export HOME="$(getent passwd openclow | cut -d: -f6)"
+# Resolve the real home dir of the taghdev user (the volume is mounted there)
+export HOME="$(getent passwd taghdev | cut -d: -f6)"
 
 CLAUDE_JSON="${HOME}/.claude.json"
 CREDS_FILE="${HOME}/.claude/.credentials.json"
@@ -26,7 +26,7 @@ if [ -f "$CREDS_FILE" ]; then
     echo "[entrypoint] Claude credentials found"
     claude auth status 2>/dev/null | head -3
 else
-    echo "[entrypoint] WARNING: No Claude credentials. Run: docker exec -it openclow-worker-1 claude login"
+    echo "[entrypoint] WARNING: No Claude credentials. Run: docker exec -it taghdev-worker-1 claude login"
 fi
 
 # Back up .claude.json to volume on every start (so it persists)
@@ -85,10 +85,10 @@ if [ "${WORKSPACES_BIND_MODE:-check}" != "skip" ]; then
     fi
     # Fix ownership if the named volume was initialised as root (common on
     # first `docker compose up` before the Dockerfile USER takes effect).
-    if [ "$(stat -c '%U' /workspaces)" != "openclow" ] || [ "$(stat -c '%U' /workspaces)" = "root" ]; then
-        chown openclow:openclow /workspaces 2>/dev/null || true
+    if [ "$(stat -c '%U' /workspaces)" != "taghdev" ] || [ "$(stat -c '%U' /workspaces)" = "root" ]; then
+        chown taghdev:taghdev /workspaces 2>/dev/null || true
     fi
-    mkdir -p /workspaces/_cache && chown openclow:openclow /workspaces/_cache 2>/dev/null || true
+    mkdir -p /workspaces/_cache && chown taghdev:taghdev /workspaces/_cache 2>/dev/null || true
 
     _probe="/workspaces/.entrypoint_writable_$$"
     if ! touch "$_probe" 2>/dev/null; then

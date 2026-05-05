@@ -28,7 +28,7 @@
 # 1. Open Telegram, search for @BotFather
 # 2. Send /newbot
 # 3. Choose a name: "TAGH Dev Bot"
-# 4. Choose a username: "openclow_bot"
+# 4. Choose a username: "taghdev_bot"
 # 5. BotFather gives you a token like: 7123456789:AAF1234567890abcdef
 # 6. Put it in .env as TELEGRAM_BOT_TOKEN
 ```
@@ -39,10 +39,10 @@
 # You already use Docker + SSH + `claude login` — same approach here.
 
 # FIRST TIME ONLY (after docker compose up):
-docker exec -it openclow-worker-1 bash
+docker exec -it taghdev-worker-1 bash
 claude login
 # → Opens browser → authenticate → done
-# Credentials saved to /home/openclow/.claude/ (persistent Docker volume)
+# Credentials saved to /home/taghdev/.claude/ (persistent Docker volume)
 # Auto-refreshes weekly. Never need to do this again.
 
 # NO setup-token needed. NO API key needed. Just your normal login.
@@ -64,7 +64,7 @@ You do NOT SSH into Docker containers.
 You do NOT open a terminal.
 You just talk to your Telegram bot:
 
-Phone/Desktop Telegram → @openclow_bot → /task → describe what you want → done
+Phone/Desktop Telegram → @taghdev_bot → /task → describe what you want → done
 
 Everything happens inside Docker automatically.
 The bot sends you status updates and PR links.
@@ -168,7 +168,7 @@ Using an AI agent to run `git push` and `gh pr create` is like using a surgeon t
 ## Project Structure
 
 ```
-openclow/
+taghdev/
 ├── PLAN.md
 ├── pyproject.toml
 ├── .env.example
@@ -185,7 +185,7 @@ openclow/
 │   └── versions/
 │       └── 001_initial_schema.py
 ├── src/
-│   └── openclow/
+│   └── taghdev/
 │       ├── __init__.py
 │       ├── settings.py                 # Pydantic Settings
 │       ├── models/
@@ -328,9 +328,9 @@ COPY src/ ./src/
 COPY alembic.ini ./alembic/
 COPY alembic/ ./alembic/
 COPY scripts/ ./scripts/
-RUN useradd -m openclow && chown -R openclow:openclow /app
-USER openclow
-CMD ["python", "-m", "openclow.bot.main"]
+RUN useradd -m taghdev && chown -R taghdev:taghdev /app
+USER taghdev
+CMD ["python", "-m", "taghdev.bot.main"]
 ```
 
 ### Dockerfile.worker (fat — full dev environment)
@@ -375,7 +375,7 @@ RUN curl -fsSL https://github.com/github/github-mcp-server/releases/latest/downl
     | tar xz -C /usr/local/bin/ github-mcp-server
 
 # Git identity
-RUN git config --system user.email "openclow@bot.local" \
+RUN git config --system user.email "taghdev@bot.local" \
     && git config --system user.name "TAGH Dev Bot"
 
 # Python app
@@ -386,12 +386,12 @@ COPY src/ ./src/
 
 # Workspace + Claude home
 RUN mkdir -p /workspaces \
-    && useradd -m -s /bin/bash openclow \
-    && mkdir -p /home/openclow/.claude \
-    && chown -R openclow:openclow /app /workspaces /home/openclow
-USER openclow
+    && useradd -m -s /bin/bash taghdev \
+    && mkdir -p /home/taghdev/.claude \
+    && chown -R taghdev:taghdev /app /workspaces /home/taghdev
+USER taghdev
 
-CMD ["arq", "openclow.worker.arq_app.WorkerSettings"]
+CMD ["arq", "taghdev.worker.arq_app.WorkerSettings"]
 ```
 
 ### docker-compose.yml
@@ -414,26 +414,26 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: openclow
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-openclow}
-      POSTGRES_DB: openclow
+      POSTGRES_USER: taghdev
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taghdev}
+      POSTGRES_DB: taghdev
     volumes:
       - postgres_data:/var/lib/postgresql/data
     # ports NOT exposed (dev override adds them)
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U openclow"]
+      test: ["CMD-SHELL", "pg_isready -U taghdev"]
       interval: 5s
       timeout: 3s
       retries: 5
 
   redis:
     image: redis:7-alpine
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD:-openclow}
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD:-taghdev}
     volumes:
       - redis_data:/data
     # ports NOT exposed
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-openclow}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-taghdev}", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -444,7 +444,7 @@ services:
     env_file:
       - .env.common
       - .env.bot
-    command: python -m openclow.bot.main
+    command: python -m taghdev.bot.main
     deploy:
       resources:
         limits:
@@ -457,7 +457,7 @@ services:
 
   api:
     <<: *app
-    command: uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000
+    command: uvicorn taghdev.api.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
     deploy:
@@ -485,7 +485,7 @@ services:
         condition: service_healthy
     volumes:
       - workspaces:/workspaces
-      - claude_auth:/home/openclow/.claude   # persists claude login
+      - claude_auth:/home/taghdev/.claude   # persists claude login
     deploy:
       resources:
         limits:
@@ -514,14 +514,14 @@ volumes:
 ```yaml
 services:
   bot:
-    command: watchfiles "python -m openclow.bot.main" src/
+    command: watchfiles "python -m taghdev.bot.main" src/
     volumes:
       - ./src:/app/src:cached
     environment:
       - LOG_LEVEL=DEBUG
 
   api:
-    command: uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn taghdev.api.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ./src:/app/src:cached
 
@@ -545,9 +545,9 @@ services:
 
 **.env.common** (shared by all services)
 ```bash
-DATABASE_URL=postgresql+asyncpg://openclow:openclow@postgres:5432/openclow
-REDIS_URL=redis://:openclow@redis:6379/0
-REDIS_PASSWORD=openclow
+DATABASE_URL=postgresql+asyncpg://taghdev:taghdev@postgres:5432/taghdev
+REDIS_URL=redis://:taghdev@redis:6379/0
+REDIS_PASSWORD=taghdev
 LOG_LEVEL=INFO
 ```
 
@@ -1056,7 +1056,7 @@ SETUP_COMMANDS: <if needed, one per line>
 - [ ] `pyproject.toml`, `.gitignore`, `.env.*` files
 - [ ] `Dockerfile.app`, `Dockerfile.worker`
 - [ ] `docker-compose.yml`, `docker-compose.override.yml`
-- [ ] `src/openclow/settings.py`
+- [ ] `src/taghdev/settings.py`
 - [ ] Verify: `docker compose build` succeeds
 
 ### Step 2: Database

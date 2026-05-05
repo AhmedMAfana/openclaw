@@ -12,14 +12,14 @@ import pytest
 
 class TestModelSchema:
     def test_task_has_git_mode(self):
-        src_path = os.path.join("src", "openclow", "models", "task.py")
+        src_path = os.path.join("src", "taghdev", "models", "task.py")
         with open(src_path) as f:
             src = f.read()
         assert "git_mode" in src, "Task model must have git_mode column"
         assert 'default="branch_per_task"' in src, "Task.git_mode must default to branch_per_task"
 
     def test_webchat_session_has_git_mode(self):
-        src_path = os.path.join("src", "openclow", "models", "web_chat.py")
+        src_path = os.path.join("src", "taghdev", "models", "web_chat.py")
         with open(src_path) as f:
             src = f.read()
         assert "git_mode" in src, "WebChatSession model must have git_mode column"
@@ -32,7 +32,7 @@ class TestModelSchema:
 
 class TestGitOps:
     def test_reset_hard_exists(self):
-        src_path = os.path.join("src", "openclow", "worker", "tasks", "git_ops.py")
+        src_path = os.path.join("src", "taghdev", "worker", "tasks", "git_ops.py")
         with open(src_path) as f:
             src = f.read()
         assert "async def reset_hard(" in src, "git_ops must have reset_hard function"
@@ -45,14 +45,14 @@ class TestGitOps:
 
 class TestGitProvider:
     def test_github_has_get_pr_for_branch(self):
-        src_path = os.path.join("src", "openclow", "providers", "git", "github.py")
+        src_path = os.path.join("src", "taghdev", "providers", "git", "github.py")
         with open(src_path) as f:
             src = f.read()
         assert "async def get_pr_for_branch(" in src, "GitHubProvider must have get_pr_for_branch"
         assert '"gh", "pr", "view"' in src, "get_pr_for_branch must use gh pr view"
 
     def test_base_provider_has_get_pr_for_branch(self):
-        src_path = os.path.join("src", "openclow", "providers", "base.py")
+        src_path = os.path.join("src", "taghdev", "providers", "base.py")
         with open(src_path) as f:
             src = f.read()
         assert "get_pr_for_branch" in src, "GitProvider base must declare get_pr_for_branch"
@@ -64,7 +64,7 @@ class TestGitProvider:
 
 class TestTaskCreation:
     def test_trigger_task_accepts_git_mode(self):
-        src_path = os.path.join("src", "openclow", "mcp_servers", "actions_mcp.py")
+        src_path = os.path.join("src", "taghdev", "mcp_servers", "actions_mcp.py")
         with open(src_path) as f:
             src = f.read()
         assert "git_mode: str = \"branch_per_task\"" in src, "trigger_task must accept git_mode param"
@@ -72,19 +72,19 @@ class TestTaskCreation:
         assert "ws.git_mode" in src, "trigger_task must read git_mode from web session"
 
     def test_trigger_task_stores_git_mode_on_task(self):
-        src_path = os.path.join("src", "openclow", "mcp_servers", "actions_mcp.py")
+        src_path = os.path.join("src", "taghdev", "mcp_servers", "actions_mcp.py")
         with open(src_path) as f:
             src = f.read()
         assert "git_mode=resolved_git_mode" in src, "trigger_task must store resolved git_mode on Task"
 
     def test_slack_task_defaults_to_branch_per_task(self):
-        src_path = os.path.join("src", "openclow", "providers", "chat", "slack", "handlers", "modals.py")
+        src_path = os.path.join("src", "taghdev", "providers", "chat", "slack", "handlers", "modals.py")
         with open(src_path) as f:
             src = f.read()
         assert 'git_mode="branch_per_task"' in src, "Slack task creation must default to branch_per_task"
 
     def test_telegram_task_defaults_to_branch_per_task(self):
-        src_path = os.path.join("src", "openclow", "providers", "chat", "telegram", "handlers", "task.py")
+        src_path = os.path.join("src", "taghdev", "providers", "chat", "telegram", "handlers", "task.py")
         with open(src_path) as f:
             src = f.read()
         assert 'git_mode="branch_per_task"' in src, "Telegram task creation must default to branch_per_task"
@@ -96,7 +96,7 @@ class TestTaskCreation:
 
 class TestOrchestratorExecuteTask:
     def test_direct_commit_skips_branch_creation(self):
-        src_path = os.path.join("src", "openclow", "worker", "tasks", "orchestrator.py")
+        src_path = os.path.join("src", "taghdev", "worker", "tasks", "orchestrator.py")
         with open(src_path) as f:
             src = f.read()
         assert 'task.git_mode == "direct_commit"' in src, "orchestrator must check direct_commit mode"
@@ -104,7 +104,7 @@ class TestOrchestratorExecuteTask:
         assert "no branch created" in src.lower(), "direct_commit must log no branch creation"
 
     def test_session_branch_uses_or_creates_session_branch(self):
-        src_path = os.path.join("src", "openclow", "worker", "tasks", "orchestrator.py")
+        src_path = os.path.join("src", "taghdev", "worker", "tasks", "orchestrator.py")
         with open(src_path) as f:
             src = f.read()
         assert 'task.git_mode == "session_branch"' in src, "orchestrator must check session_branch mode"
@@ -119,7 +119,7 @@ class TestOrchestratorExecuteTask:
 
 class TestOrchestratorApproveTask:
     def test_direct_commit_commits_to_main(self):
-        src_path = os.path.join("src", "openclow", "worker", "tasks", "orchestrator.py")
+        src_path = os.path.join("src", "taghdev", "worker", "tasks", "orchestrator.py")
         with open(src_path) as f:
             src = f.read()
         assert 'task.git_mode == "direct_commit"' in src, "approve_task must branch for direct_commit"
@@ -127,7 +127,7 @@ class TestOrchestratorApproveTask:
         assert 'status="merged"' in src, "direct_commit must set status to merged after commit"
 
     def test_session_branch_checks_existing_pr(self):
-        src_path = os.path.join("src", "openclow", "worker", "tasks", "orchestrator.py")
+        src_path = os.path.join("src", "taghdev", "worker", "tasks", "orchestrator.py")
         with open(src_path) as f:
             src = f.read()
         assert 'task.git_mode == "session_branch"' in src, "approve_task must branch for session_branch"
@@ -141,21 +141,21 @@ class TestOrchestratorApproveTask:
 
 class TestOrchestratorCleanup:
     def test_merge_task_handles_direct_commit(self):
-        src_path = os.path.join("src", "openclow", "worker", "tasks", "orchestrator.py")
+        src_path = os.path.join("src", "taghdev", "worker", "tasks", "orchestrator.py")
         with open(src_path) as f:
             src = f.read()
         assert 'task.git_mode == "direct_commit"' in src, "merge_task must handle direct_commit"
         assert "already merged" in src.lower(), "direct_commit merge must explain already merged"
 
     def test_reject_task_preserves_session_branch(self):
-        src_path = os.path.join("src", "openclow", "worker", "tasks", "orchestrator.py")
+        src_path = os.path.join("src", "taghdev", "worker", "tasks", "orchestrator.py")
         with open(src_path) as f:
             src = f.read()
         # Session branch should NOT be deleted on reject
         assert 'task.git_mode == "branch_per_task"' in src, "reject must only delete branch for branch_per_task"
 
     def test_discard_task_preserves_session_branch(self):
-        src_path = os.path.join("src", "openclow", "worker", "tasks", "orchestrator.py")
+        src_path = os.path.join("src", "taghdev", "worker", "tasks", "orchestrator.py")
         with open(src_path) as f:
             src = f.read()
         assert 'task.git_mode == "branch_per_task" and task.branch_name' in src, \
@@ -168,13 +168,13 @@ class TestOrchestratorCleanup:
 
 class TestWebAPI:
     def test_threads_endpoint_returns_git_mode(self):
-        src_path = os.path.join("src", "openclow", "api", "routes", "threads.py")
+        src_path = os.path.join("src", "taghdev", "api", "routes", "threads.py")
         with open(src_path) as f:
             src = f.read()
         assert '"gitMode": s.git_mode' in src or '"gitMode": result.git_mode' in src, "threads endpoints must return gitMode"
 
     def test_git_mode_patch_endpoint_exists(self):
-        src_path = os.path.join("src", "openclow", "api", "routes", "threads.py")
+        src_path = os.path.join("src", "taghdev", "api", "routes", "threads.py")
         with open(src_path) as f:
             src = f.read()
         assert '@router.patch("/threads/{thread_id}/git-mode")' in src, \
