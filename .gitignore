@@ -43,3 +43,5 @@ claude-code-leak/
 artifacts/
 claudeflare.md
 github_pat.md
+*.db
+.env
