@@ -67,6 +67,14 @@ class InstanceRenderContext:
     # Falls back to `workspace_path` when worker and host filesystems
     # are 1:1 (e.g., orchestrator running directly on the host).
     workspace_host_dir: str | None = None
+    # Sanitised project name used for shared cache volume names in the
+    # compose template (e.g. tagh-npm-cache-${PROJECT_SLUG}). Every
+    # instance for the same project shares these volumes so the second
+    # chat hits a warm npm/composer cache instead of re-downloading.
+    # Must match the value computed in instance_tasks.py — a single
+    # re.sub(r"[^a-z0-9_-]+", "-", name.lower()) pass. Defaults to
+    # "default" so templates without project context still render.
+    project_slug: str = "default"
     # HTTP port the primary application service listens on inside the
     # per-instance compose network. The cloudflared sidecar uses this
     # to route web ingress to the right service:port. Image-dependent —
@@ -142,6 +150,7 @@ def render(
         "CF_CREDENTIALS_SECRET": ctx.cf_credentials_secret,
         "WORKSPACE_HOST_DIR": host_workspace_dir,
         "APP_HTTP_PORT": str(ctx.app_http_port),
+        "PROJECT_SLUG": ctx.project_slug,
     }
 
     compose_out = output_dir / "_compose.yml"

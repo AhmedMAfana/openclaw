@@ -137,6 +137,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock  # access to host Docker
       - ./src:/app/src  # live-reload: code changes without rebuild
       - ./auth.json:/app/auth.json:ro  # Composer GitLab deploy tokens
+      - ./projctl:/app/projctl:ro  # preflight builds projctl image from source
     deploy:
       resources:
         limits:

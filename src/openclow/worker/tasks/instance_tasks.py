@@ -228,6 +228,7 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
             cf_credentials_secret=tunnel_result.credentials_secret,
             db_password=db_password,
             heartbeat_secret=heartbeat_secret,
+            project_slug=project_slug,
         )
         compose_path, cloudflared_path = render_compose(
             render_ctx, template_dir, output_dir
@@ -797,12 +798,15 @@ async def _compose_down(*, compose_project: str) -> None:
         )
 
 
-async def _projctl_up(*, compose_project: str, slug: str) -> None:
+async def _projctl_up(*, compose_project: str, slug: str, instance_id: uuid.UUID | None = None) -> None:
     """Run ``projctl up`` inside the app container; parse JSON events.
 
     Emits one JSON line per event per projctl-stdout.schema.json. We fail
     the provision on ``fatal`` or on any stream that ends without a
     ``step_success`` for the last step (projctl exits non-zero on fatal).
+
+    When ``instance_id`` is provided, each projctl log line is appended to
+    the chat UI's agent-log panel in real time via ``_publish_progress_step``.
     """
     # The laravel-vue template bind-mounts the workspace at /var/www/html
     # (matching the serversideup base image's docroot expectation), not
@@ -831,6 +835,15 @@ async def _projctl_up(*, compose_project: str, slug: str) -> None:
                 event = json.loads(text)
             except json.JSONDecodeError:
                 log.debug("projctl.non_json_line", slug=slug, raw=text[:200])
+                # Stream non-JSON lines (raw shell output) to the agent log too.
+                if instance_id is not None:
+                    try:
+                        await _publish_progress_step(
+                            instance_id=instance_id,
+                            stream_buffer_append=text,
+                        )
+                    except Exception:
+                        pass
                 continue
             kind = event.get("event")
             if kind == "step_success":
@@ -840,6 +853,14 @@ async def _projctl_up(*, compose_project: str, slug: str) -> None:
                     step=event.get("step"),
                     attempt=event.get("attempt"),
                 )
+                if instance_id is not None:
+                    try:
+                        await _publish_progress_step(
+                            instance_id=instance_id,
+                            stream_buffer_append=f"✓ {event.get('step', '')}",
+                        )
+                    except Exception:
+                        pass
             elif kind == "step_failure":
                 log.warning(
                     "projctl.step_failure",
@@ -848,11 +869,36 @@ async def _projctl_up(*, compose_project: str, slug: str) -> None:
                     attempt=event.get("attempt"),
                     exit_code=event.get("exit_code"),
                 )
+                if instance_id is not None:
+                    try:
+                        await _publish_progress_step(
+                            instance_id=instance_id,
+                            stream_buffer_append=f"✗ {event.get('step', '')} (exit {event.get('exit_code')})",
+                        )
+                    except Exception:
+                        pass
             elif kind == "fatal":
                 log.error(
                     "projctl.fatal",
                     slug=slug, reason=event.get("fatal_reason"),
                 )
+                if instance_id is not None:
+                    try:
+                        await _publish_progress_step(
+                            instance_id=instance_id,
+                            stream_buffer_append=f"fatal: {event.get('fatal_reason', '')}",
+                        )
+                    except Exception:
+                        pass
+            elif instance_id is not None:
+                # Stream any other projctl event as a raw log line.
+                try:
+                    await _publish_progress_step(
+                        instance_id=instance_id,
+                        stream_buffer_append=text[:300],
+                    )
+                except Exception:
+                    pass
 
     try:
         await asyncio.wait_for(

@@ -1,8 +1,71 @@
 import { useState, useEffect } from "react";
-import { CheckCircleIcon } from "lucide-react";
+import { CheckCircleIcon, LockIcon, UnlockIcon } from "lucide-react";
 
-const ic = "w-full px-3 py-2 rounded-lg text-sm bg-secondary border border-border text-foreground focus:outline-none focus:ring-1 focus:ring-ring";
 const lc = "block text-sm font-medium text-foreground mb-1";
+
+function LockedInput({
+  type = "text",
+  value,
+  onChange,
+  placeholder,
+  locked,
+  onToggleLock,
+  rows,
+}: {
+  type?: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  locked: boolean;
+  onToggleLock: () => void;
+  rows?: number;
+}) {
+  const sharedClass = `w-full pl-3 pr-9 py-2 rounded-lg text-sm bg-secondary border text-foreground focus:outline-none focus:ring-1 focus:ring-ring transition-colors ${
+    locked
+      ? "border-border/40 text-muted-foreground cursor-not-allowed select-none"
+      : "border-border"
+  }`;
+  const lockBtn = (
+    <button
+      type="button"
+      onClick={onToggleLock}
+      className="absolute top-2 right-0 flex items-center px-2.5 text-muted-foreground hover:text-foreground transition-colors"
+      title={locked ? "Click to edit" : "Lock field"}
+    >
+      {locked ? <LockIcon className="size-3.5" /> : <UnlockIcon className="size-3.5" />}
+    </button>
+  );
+
+  if (rows) {
+    return (
+      <div className="relative">
+        <textarea
+          rows={rows}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          readOnly={locked}
+          placeholder={locked ? "" : placeholder}
+          className={`${sharedClass} font-mono text-xs resize-none`}
+        />
+        {lockBtn}
+      </div>
+    );
+  }
+  return (
+    <div className="relative">
+      <input
+        type={locked ? "password" : type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        readOnly={locked}
+        placeholder={locked ? "" : placeholder}
+        autoComplete="new-password"
+        className={sharedClass}
+      />
+      {lockBtn}
+    </div>
+  );
+}
 
 function ConfiguredBadge() {
   return (
@@ -16,6 +79,7 @@ export function SettingsGithubApp() {
   const [configured, setConfigured] = useState(false);
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState({ app_id: "", installation_id: "", private_key_pem: "" });
+  const [locked, setLocked] = useState({ app_id: false, installation_id: false, private_key_pem: false });
   const [saveState, setSaveState] = useState<"idle" | "saving" | "ok" | "error">("idle");
   const [saveMsg, setSaveMsg] = useState("");
   const [testState, setTestState] = useState<"idle" | "testing" | "ok" | "error">("idle");
@@ -32,6 +96,7 @@ export function SettingsGithubApp() {
         if (d.configured) {
           setConfigured(true);
           setForm({ app_id: d.app_id, installation_id: d.installation_id, private_key_pem: d.private_key_pem });
+          setLocked({ app_id: true, installation_id: true, private_key_pem: true });
         }
       }
     } finally { setLoading(false); }
@@ -78,24 +143,38 @@ export function SettingsGithubApp() {
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className={lc}>App ID</label>
-            <input type="text" className={ic} placeholder="123456"
-              value={form.app_id} onChange={(e) => setForm(f => ({ ...f, app_id: e.target.value }))} />
+            <LockedInput
+              value={form.app_id}
+              onChange={(v) => setForm(f => ({ ...f, app_id: v }))}
+              placeholder="123456"
+              locked={locked.app_id}
+              onToggleLock={() => setLocked(l => ({ ...l, app_id: !l.app_id }))}
+            />
             <p className="mt-1 text-xs text-muted-foreground">GitHub → Settings → Developer settings → GitHub Apps</p>
           </div>
           <div>
             <label className={lc}>Installation ID</label>
-            <input type="text" className={ic} placeholder="45678901"
-              value={form.installation_id} onChange={(e) => setForm(f => ({ ...f, installation_id: e.target.value }))} />
+            <LockedInput
+              value={form.installation_id}
+              onChange={(v) => setForm(f => ({ ...f, installation_id: v }))}
+              placeholder="45678901"
+              locked={locked.installation_id}
+              onToggleLock={() => setLocked(l => ({ ...l, installation_id: !l.installation_id }))}
+            />
             <p className="mt-1 text-xs text-muted-foreground">App → Install → URL contains the ID</p>
           </div>
         </div>
 
         <div>
           <label className={lc}>Private Key (PEM)</label>
-          <textarea rows={6} className={`${ic} font-mono text-xs resize-none`}
-            placeholder={configured ? "Leave blank to keep existing key" : "-----BEGIN RSA PRIVATE KEY-----\n..."}
+          <LockedInput
             value={form.private_key_pem}
-            onChange={(e) => setForm(f => ({ ...f, private_key_pem: e.target.value }))} />
+            onChange={(v) => setForm(f => ({ ...f, private_key_pem: v }))}
+            placeholder="-----BEGIN RSA PRIVATE KEY-----\n..."
+            locked={locked.private_key_pem}
+            onToggleLock={() => setLocked(l => ({ ...l, private_key_pem: !l.private_key_pem }))}
+            rows={6}
+          />
           <p className="mt-1 text-xs text-muted-foreground">
             Generate in GitHub App settings → "Generate a private key". Paste the full .pem contents.
           </p>

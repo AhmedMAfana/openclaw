@@ -36,7 +36,7 @@ const EMPTY = {
   app_port: "",
 };
 
-export function SettingsProjects() {
+export function SettingsProjects({ onProjectsChanged }: { onProjectsChanged?: () => void } = {}) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
@@ -194,6 +194,7 @@ export function SettingsProjects() {
         setProjects((p) => [...p, created]);
         setAddOpen(false);
         setForm(EMPTY);
+        onProjectsChanged?.();
       } else {
         const d = await res.json();
         setFormError(d.detail || "Failed");
@@ -208,7 +209,10 @@ export function SettingsProjects() {
       method: "DELETE",
       credentials: "include",
     });
-    if (res.ok) setProjects((prev) => prev.filter((x) => x.id !== p.id));
+    if (res.ok) {
+      setProjects((prev) => prev.filter((x) => x.id !== p.id));
+      onProjectsChanged?.();
+    }
     setDeleteTarget(null);
   }
 

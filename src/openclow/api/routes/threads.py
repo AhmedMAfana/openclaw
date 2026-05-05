@@ -282,8 +282,48 @@ async def get_thread_messages(thread_id: int, user: User = Depends(web_user_dep)
 
 @router.get("/me")
 async def get_me(user: User = Depends(web_user_dep)):
-    """Return the authenticated user's id, email, and admin flag."""
-    return {"id": user.id, "email": getattr(user, "email", None), "is_admin": user.is_admin}
+    """Return the authenticated user's profile."""
+    return {
+        "id": user.id,
+        "username": user.username,
+        "is_admin": user.is_admin,
+        "has_git_token": bool(getattr(user, "git_token", None)),
+    }
+
+
+@router.put("/me/git-token")
+async def set_my_git_token(body: dict, user: User = Depends(web_user_dep)):
+    """Save the current user's personal GitHub PAT."""
+    from openclow.models.base import async_session
+    from sqlalchemy import select as sa_select
+    token = (body.get("git_token") or "").strip()
+    async with async_session() as session:
+        db_user = await session.get(user.__class__, user.id)
+        if not db_user:
+            raise HTTPException(404, "User not found")
+        db_user.git_token = token or None
+        await session.commit()
+    return {"status": "ok", "has_git_token": bool(token)}
+
+
+@router.post("/me/test-git-token")
+async def test_my_git_token(user: User = Depends(web_user_dep)):
+    """Test the current user's personal GitHub PAT against the API."""
+    import urllib.request, json as _json
+    token = getattr(user, "git_token", None)
+    if not token:
+        raise HTTPException(400, "No personal git token saved")
+    req = urllib.request.Request(
+        "https://api.github.com/user",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = _json.loads(r.read())
+            login = data.get("login", "?")
+            return {"status": "ok", "message": f"Authenticated as @{login}"}
+    except Exception as e:
+        raise HTTPException(400, f"Token invalid: {e}")
 
 
 # ── Projects list (for project selector UI) ──────────────────

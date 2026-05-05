@@ -504,6 +504,9 @@ RULES — follow exactly, no exceptions:
 
 Auth knowledge: auth.json in project workspace = Composer tokens (Nova, Spark, Packagist). Copy to ~/.composer/auth.json before any composer install or Docker build. 401/403 on build = auth issue — apply auth.json and rebuild. Never expose its contents.
 
+CODE NAVIGATION — mandatory before any file edit:
+Read the CODEBASE NAVIGATION section (injected below the rules). It tells you exactly where each type of file lives for this project's tech stack. When a user asks to change a page, screen, component, or feature — consult the navigation guide first, then find the correct file using workspace search. NEVER guess a file path or assume Blade == frontend. The navigation guide is the source of truth.
+
 AVAILABLE TOOLS (use directly — do NOT search for tools):
 
 Actions tools (prefixed mcp__actions__):
@@ -839,6 +842,19 @@ async def assistant_endpoint(
                 conv_str=conv_str,
                 skip_planning_val=skip_planning_val,
             )
+
+            # Inject tech-stack hints from the compose template so the LLM
+            # knows WHERE code lives before touching any files.
+            # Uses the same template-dir lookup as the provisioner.
+            try:
+                import pathlib as _pl
+                _tpl_base = _pl.Path(__file__).resolve().parents[2] / "setup" / "compose_templates"
+                _hints_file = _tpl_base / "laravel-vue" / "stack_hints.md"
+                if _hints_file.exists():
+                    _hints = _hints_file.read_text(encoding="utf-8").strip()
+                    system_prompt += f"\n\n{'═' * 40}\nCODEBASE NAVIGATION — read before touching ANY file:\n{_hints}\n{'═' * 40}\n"
+            except Exception:
+                pass
 
             # Inject role context section if user has a restricted role
             if not is_admin and effective_role is not None:

@@ -32,6 +32,7 @@ values.
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -41,6 +42,7 @@ from sqlalchemy import select
 from openclow.models import async_session
 from openclow.models.instance import Instance, InstanceStatus
 from openclow.services.config_service import get_config
+from openclow.settings import settings
 from openclow.utils.logging import get_logger
 
 log = get_logger()
@@ -95,6 +97,93 @@ async def _load_tunables() -> tuple[timedelta, timedelta]:
         timedelta(hours=ttl_hours) if ttl_hours > 0 else _DEFAULT_IDLE_TTL,
         timedelta(minutes=grace_min) if grace_min > 0 else _DEFAULT_GRACE_WINDOW,
     )
+
+
+async def _notify_orphan_failed(inst: Instance) -> None:
+    """Push instance_failed to the chat's WebSocket channel after orphan recovery.
+
+    Looks up the session owner, then publishes to wc:{user_id}:{chat_session_id}
+    so any open browser tab immediately shows the Retry card instead of a frozen
+    provisioning spinner.  Also updates the DB progress card message so a page
+    reload renders the failure state correctly.
+    """
+    try:
+        from openclow.models.web_chat import WebChatMessage, WebChatSession
+        import redis.asyncio as aioredis
+
+        # Resolve session owner — needed for the WS channel name.
+        async with async_session() as db:
+            sess = await db.get(WebChatSession, inst.chat_session_id)
+            if sess is None:
+                return
+            user_id = sess.user_id
+
+        payload = {
+            "type": "instance_failed",
+            "slug": inst.slug,
+            "failure_code": "orphan_recovered",
+            "message": (
+                "Your environment timed out during setup — the worker "
+                "didn't pick up the job in time. Click Retry to try again."
+            ),
+            "actions": [
+                {
+                    "label": "🔄 Retry",
+                    "action_id": f"retry_provision:{inst.id}",
+                    "style": "primary",
+                },
+                {"label": "Main Menu", "action_id": "menu:main"},
+            ],
+        }
+
+        # Update the DB progress card (if one exists) so page reloads show failure.
+        async with async_session() as db:
+            from sqlalchemy import select as _sel
+            card_row = (
+                await db.execute(
+                    _sel(WebChatMessage)
+                    .where(
+                        WebChatMessage.session_id == inst.chat_session_id,
+                        WebChatMessage.role == "assistant",
+                        WebChatMessage.content.like("__PROGRESS_CARD__%"),
+                        WebChatMessage.is_complete == False,  # noqa: E712
+                    )
+                    .order_by(WebChatMessage.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if card_row is not None:
+                try:
+                    card = json.loads(card_row.content[len("__PROGRESS_CARD__"):])
+                    card["overall_status"] = "failed"
+                    card["footer"] = "Timed out — click Retry to try again."
+                    for step in card.get("steps", []):
+                        if step.get("status") == "running":
+                            step["status"] = "failed"
+                            step["detail"] = "worker did not pick up the job"
+                    card_row.content = f"__PROGRESS_CARD__{json.dumps(card)}"
+                    card_row.is_complete = True
+                    await db.commit()
+                    # Also publish updated progress_card so live tab sees it.
+                    payload["_progress_card_msg_id"] = str(card_row.id)
+                except Exception as _e:
+                    log.warning("reaper.orphan_card_update_failed", slug=inst.slug, error=str(_e))
+
+        # Publish to the WebSocket channel.
+        channel = f"wc:{user_id}:{inst.chat_session_id}"
+        r = aioredis.from_url(settings.redis_url)
+        try:
+            await r.publish(channel, json.dumps(payload))
+            log.info(
+                "reaper.orphan_notified",
+                slug=inst.slug,
+                channel=channel,
+            )
+        finally:
+            await r.aclose()
+
+    except Exception as e:
+        log.warning("reaper.orphan_notify_failed", slug=inst.slug, error=str(e))
 
 
 async def reap(
@@ -165,6 +254,10 @@ async def reap(
             inst.terminated_at = now
             await session.commit()
             orphan_failed += 1
+            # Notify the chat's WebSocket so the frozen provisioning card
+            # immediately flips to the failure card with a Retry button.
+            # Fire-and-forget — a publish failure must never crash the reaper.
+            await _notify_orphan_failed(inst)
 
     # ── Phase 1: running → idle (TTL expired, no warning sent yet) ────
     async with async_session() as session:

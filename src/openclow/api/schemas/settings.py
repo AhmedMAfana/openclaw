@@ -134,6 +134,7 @@ class UserCreate(BaseModel):
     chat_provider_uid: str = Field(..., min_length=1)
     username: str | None = None
     is_allowed: bool = True
+    web_password_hash: str | None = None
 
 
 class UserResponse(BaseModel):
@@ -142,6 +143,7 @@ class UserResponse(BaseModel):
     chat_provider_uid: str
     username: str | None
     is_allowed: bool
+    is_admin: bool = False
     model_config = ConfigDict(from_attributes=True)
 
 

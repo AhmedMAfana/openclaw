@@ -59,9 +59,11 @@ import { NewChatModal } from "@/components/NewChatModal";
 import type { CardAction } from "@/types/stream-events";
 import { ThinkingContext } from "@/lib/thinking-context";
 import { TaskModeContext } from "@/lib/task-mode-context";
-import { PlusIcon, SettingsIcon, LogOutIcon, PencilIcon, TrashIcon, CheckIcon, XIcon, ShieldIcon, AlertCircleIcon, Loader2 } from "lucide-react";
+import { PlusIcon, SettingsIcon, LogOutIcon, PencilIcon, TrashIcon, CheckIcon, XIcon, ShieldIcon, AlertCircleIcon, Loader2, UserIcon } from "lucide-react";
 import { AccessPanel } from "@/components/AccessPanel";
 import { SettingsPanel } from "@/components/SettingsPanel"; // admin-only settings
+import { ProfilePanel } from "@/components/ProfilePanel";  // all users
+import { InstanceLimitModal } from "@/components/instance/InstanceLimitModal";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -342,13 +344,8 @@ function ChatApp() {
         break;
       case "instance_limit_exceeded":
         if (evt.variant === "per_user_cap") {
-          setActiveCard({
-            kind: "cap_exceeded",
-            prompt: "End one of these to free up a slot for a new chat.",
-            actions: evt.actions ?? [],
-            variant: "per_user_cap",
-            cap: evt.cap,
-          });
+          setInstanceLimitCap(evt.cap ?? 3);
+          setShowInstanceLimitModal(true);
         } else {
           setActiveCard({
             kind: "cap_exceeded",
@@ -415,8 +412,13 @@ function ChatApp() {
   // Current user id (for WebSocket URL)
   const [myUserId, setMyUserId] = useState<number | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [hasGitToken, setHasGitToken] = useState(true); // optimistic — gate only once loaded
+  const [toast, setToast] = useState<string | null>(null);
+  const [showInstanceLimitModal, setShowInstanceLimitModal] = useState(false);
+  const [instanceLimitCap, setInstanceLimitCap] = useState(3);
   const [showAccessPanel, setShowAccessPanel] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+  const [showProfilePanel, setShowProfilePanel] = useState(false);
 
   // WebSocket for worker progress events
   const wsRef = useRef<WebSocket | null>(null);
@@ -449,6 +451,12 @@ function ChatApp() {
 
   // Abort controller for in-progress streams
   const abortRef = useRef<AbortController | null>(null);
+
+  // Message queue — holds at most one pending message typed while the agent is running.
+  // Using a ref so the finally block always sees the latest value without stale closures.
+  const queuedMsgRef = useRef<{ text: string } | null>(null);
+  const [queuedMsgDisplay, setQueuedMsgDisplay] = useState<string | null>(null);
+  const [queueInputText, setQueueInputText] = useState("");
 
   useEffect(() => { loadThreads(); loadProjects(); loadMe(); }, []);
 
@@ -543,6 +551,7 @@ function ChatApp() {
         const data = await res.json();
         setMyUserId(data.id ?? null);
         setIsAdmin(data.is_admin ?? false);
+        setHasGitToken(data.has_git_token ?? true);
       }
     } catch { /* non-critical */ }
   }
@@ -711,6 +720,19 @@ function ChatApp() {
             scrollThreadToBottom();
             return [...prev, { id: msgKey, role: "assistant" as const, content: text }];
           });
+        } else if (
+          data.type === "instance_failed" ||
+          data.type === "instance_provisioning" ||
+          data.type === "instance_limit_exceeded" ||
+          data.type === "instance_upstream_degraded" ||
+          data.type === "instance_busy" ||
+          data.type === "instance_terminating" ||
+          data.type === "instance_retry_started"
+        ) {
+          // Instance lifecycle events published by the reaper/worker directly
+          // to the Redis WS channel (e.g. orphan recovery) route through the
+          // same dispatcher as SSE stream events.
+          dispatchInstanceEvent(data as unknown as StreamEvent);
         }
       } catch { /* ignore malformed */ }
     };
@@ -851,10 +873,48 @@ function ChatApp() {
   // binding path). Cancel = no chat row. This makes a no-project chat
   // structurally impossible — the bug class that produced gaslit "I'll
   // spin up your env" replies on chat 35 etc.
-  function newThread() {
+  function showToast(msg: string) {
+    setToast(msg);
+    setTimeout(() => setToast(null), 4000);
+  }
+
+  function submitQueuedInput() {
+    const text = queueInputText.trim();
+    if (!text) return;
+    queuedMsgRef.current = { text };
+    setQueuedMsgDisplay(text);
+    setQueueInputText("");
+  }
+
+  async function newThread() {
+    if (!hasGitToken) {
+      showToast("Set your git token first — go to My Profile");
+      setShowProfilePanel(true);
+      setShowSettingsPanel(false);
+      return;
+    }
+    // Check instance cap before opening the project picker — show the
+    // manage-instances modal immediately instead of letting the user
+    // pick a project and type a message only to be blocked.
+    if (myUserId != null) {
+      try {
+        const r = await fetch(`/api/users/${myUserId}/instances`, { credentials: "include" });
+        if (r.ok) {
+          const d = await r.json();
+          const count = (d.instances ?? []).filter(
+            (i: { status: string }) => ["provisioning", "running", "idle"].includes(i.status)
+          ).length;
+          if (count >= (d.cap ?? 3)) {
+            setInstanceLimitCap(d.cap ?? 3);
+            setShowInstanceLimitModal(true);
+            return;
+          }
+        }
+      } catch { /* non-critical — proceed anyway */ }
+    }
     cancelStream();
     setPendingPlan(null);
-    setShowSettingsPanel(false); // creating a chat should hide settings
+    setShowSettingsPanel(false);
     setShowNewChatModal(true);
   }
 
@@ -1094,6 +1154,7 @@ function ChatApp() {
     } finally {
       if (!abortRef.current?.signal.aborted) setIsRunning(false);
       if (abortRef.current?.signal.aborted === false) abortRef.current = null;
+      // Auto-fire any queued message is handled by a useEffect watching isRunning.
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeThreadId, threads, activeProjectId, taskMode]);
@@ -1217,10 +1278,41 @@ function ChatApp() {
     adapters: { attachments: attachmentAdapter },
   });
 
+  // When the agent finishes, auto-fire any queued message.
+  useEffect(() => {
+    if (isRunning) return;
+    const queued = queuedMsgRef.current;
+    if (!queued) return;
+    queuedMsgRef.current = null;
+    setQueuedMsgDisplay(null);
+    setTimeout(() => {
+      runtime.thread.append({ role: "user", content: [{ type: "text", text: queued.text }] });
+    }, 80);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRunning]);
+
   // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
     <div className="h-screen flex overflow-hidden bg-background">
+      {/* Toast notification */}
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-3 px-4 py-3 rounded-xl bg-amber-500 text-black text-sm font-medium shadow-xl animate-in fade-in slide-in-from-bottom-2 duration-200">
+          <span>⚠️ {toast}</span>
+          <button onClick={() => setToast(null)} className="ml-1 opacity-70 hover:opacity-100">✕</button>
+        </div>
+      )}
+
+      {/* Instance limit modal — shown when per-user cap exceeded */}
+      {showInstanceLimitModal && myUserId && (
+        <InstanceLimitModal
+          userId={myUserId}
+          cap={instanceLimitCap}
+          onOpenChat={(chatId) => { selectThread(String(chatId)); setShowInstanceLimitModal(false); }}
+          onClose={() => setShowInstanceLimitModal(false)}
+        />
+      )}
+
       {/* Plan v2 Change 1: mandatory project-pick modal on "New chat".
           Mounted at root so it overlays the entire chat surface. */}
       {showNewChatModal ? (
@@ -1335,9 +1427,16 @@ function ChatApp() {
               Access Control
             </button>
           )}
+          <button
+            onClick={() => { setShowProfilePanel(true); setShowSettingsPanel(false); setShowAccessPanel(false); }}
+            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs transition-colors w-full text-left ${showProfilePanel ? "bg-white/8 text-foreground" : "text-muted-foreground hover:text-foreground hover:bg-white/5"}`}
+          >
+            <UserIcon className="size-3.5 shrink-0" />
+            My Profile
+          </button>
           {isAdmin && (
             <button
-              onClick={() => setShowSettingsPanel(true)}
+              onClick={() => { setShowSettingsPanel(true); setShowProfilePanel(false); setShowAccessPanel(false); }}
               className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs transition-colors w-full text-left ${showSettingsPanel ? "bg-white/8 text-foreground" : "text-muted-foreground hover:text-foreground hover:bg-white/5"}`}
             >
               <SettingsIcon className="size-3.5 shrink-0" />
@@ -1351,9 +1450,16 @@ function ChatApp() {
         </div>
       </aside>
 
-      {/* Chat area or settings panel */}
+      {/* Chat area or settings/profile panel */}
       {showSettingsPanel ? (
-        <SettingsPanel onClose={() => setShowSettingsPanel(false)} />
+        <SettingsPanel onClose={() => setShowSettingsPanel(false)} onProjectsChanged={loadProjects} />
+      ) : showProfilePanel ? (
+        <ProfilePanel
+          onClose={() => { setShowProfilePanel(false); loadMe(); }}
+          userId={myUserId!}
+          onOpenChat={(chatId) => { selectThread(String(chatId)); setShowProfilePanel(false); }}
+          onTokenSaved={loadMe}
+        />
       ) : (
         <main className="flex-1 overflow-hidden bg-background relative flex flex-col">
           {pendingPlan && (() => {
@@ -1514,6 +1620,43 @@ function ChatApp() {
               </TaskModeContext.Provider>
             </ThinkingContext.Provider>
           </ThreadErrorBoundary>
+
+          {/* Queued message bar — visible while the agent is running */}
+          {isRunning && activeThreadId && (
+            <div className="shrink-0 border-t border-border bg-background px-4 py-2">
+              {queuedMsgDisplay ? (
+                <div className="flex items-center justify-between gap-3 rounded-lg bg-primary/10 border border-primary/20 px-3 py-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="size-1.5 rounded-full bg-primary animate-pulse shrink-0" />
+                    <span className="text-xs text-primary font-medium truncate">Queued: {queuedMsgDisplay}</span>
+                  </div>
+                  <button
+                    onClick={() => { queuedMsgRef.current = null; setQueuedMsgDisplay(null); setQueueInputText(""); }}
+                    className="text-xs text-muted-foreground hover:text-foreground shrink-0"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <input
+                    className="flex-1 bg-secondary border border-border rounded-lg px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                    placeholder="Queue next message…"
+                    value={queueInputText}
+                    onChange={(e) => setQueueInputText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitQueuedInput(); } }}
+                  />
+                  <button
+                    onClick={submitQueuedInput}
+                    disabled={!queueInputText.trim()}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium bg-primary text-primary-foreground disabled:opacity-40 hover:bg-primary/90 transition-colors"
+                  >
+                    Queue
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </main>
       )}
 

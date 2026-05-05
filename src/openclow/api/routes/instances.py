@@ -98,7 +98,42 @@ async def list_user_instances(
             "last_activity_at": inst.last_activity_at.isoformat(),
             "expires_at": inst.expires_at.isoformat(),
         })
-    return {"instances": payload}
+    from openclow.services.instance_service import DEFAULT_PER_USER_CAP
+    return {"instances": payload, "cap": DEFAULT_PER_USER_CAP}
+
+
+@router.post("/users/{user_id}/instances/{instance_id}/terminate")
+async def terminate_user_instance(
+    user_id: int,
+    instance_id: str,
+    user: User = Depends(web_user_dep),
+) -> dict:
+    """Terminate a specific instance owned by user_id.
+
+    Non-admin users may only terminate their own instances.
+    """
+    if user.id != user_id and not user.is_admin:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    from uuid import UUID as _UUID
+    try:
+        inst_uuid = _UUID(instance_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid instance_id")
+
+    # Verify ownership before terminating.
+    rows = await InstanceService().list_active(user_id=user_id)
+    owned_ids = {str(r.id) for r in rows}
+    if instance_id not in owned_ids and not user.is_admin:
+        raise HTTPException(status_code=403, detail="instance does not belong to this user")
+
+    try:
+        await InstanceService().terminate(inst_uuid, reason="user_request")
+    except Exception as e:
+        log.warning("user_terminate_instance.failed", instance_id=instance_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+    return {"status": "ok", "instance_id": instance_id}
 
 
 # ---------------------------------------------------------------------------

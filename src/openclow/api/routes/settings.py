@@ -219,6 +219,10 @@ async def test_connection(request: Request, category: str):
         result = await _test_git(config)
     elif category == "llm":
         result = await _test_llm(config)
+    elif category == "cloudflare":
+        result = await _test_cloudflare_connection()
+    elif category == "github-app":
+        result = await _test_github_app_connection()
     else:
         raise HTTPException(400, f"Unknown test category: {category}")
 
@@ -499,6 +503,50 @@ async def _test_llm(config: dict) -> TestResult:
     return TestResult(status="error", message=f"Unknown LLM provider: {provider_type}")
 
 
+async def _test_cloudflare_connection() -> TestResult:
+    cfg = await config_service.get_config("cloudflare", "settings") or {}
+    if not cfg.get("api_token"):
+        return TestResult(status="error", message="Cloudflare not configured")
+    import urllib.request, urllib.error, json as _json
+    req = urllib.request.Request(
+        "https://api.cloudflare.com/client/v4/user/tokens/verify",
+        headers={"Authorization": f"Bearer {cfg['api_token']}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = _json.loads(r.read())
+            if data.get("success"):
+                return TestResult(status="ok", message=f"Token active · zone: {cfg.get('zone_domain')}")
+    except Exception as e:
+        return TestResult(status="error", message=str(e))
+    return TestResult(status="error", message="Token invalid")
+
+
+async def _test_github_app_connection() -> TestResult:
+    cfg = await config_service.get_config("github_app", "settings") or {}
+    if not cfg.get("app_id") or not cfg.get("private_key_pem"):
+        return TestResult(status="error", message="GitHub App not configured")
+    try:
+        import time, jwt  # type: ignore
+        import urllib.request, json as _json
+        now = int(time.time())
+        token = jwt.encode(
+            {"iat": now - 60, "exp": now + 300, "iss": int(cfg["app_id"])},
+            cfg["private_key_pem"], algorithm="RS256",
+        )
+        req = urllib.request.Request(
+            "https://api.github.com/app",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = _json.loads(r.read())
+            return TestResult(status="ok", message=f"App: {data.get('name')} · id={data.get('id')}")
+    except ImportError:
+        return TestResult(status="error", message="pyjwt not installed — install it to test")
+    except Exception as e:
+        return TestResult(status="error", message=str(e))
+
+
 # ---------------------------------------------------------------------------
 # Claude Auth
 # ---------------------------------------------------------------------------
@@ -583,6 +631,17 @@ async def setup_status():
         cat = key.split(".")[0]
         if cat in categories:
             configured.add(cat)
+
+    # LLM uses Claude credentials file, not platform_config — check auth status
+    if "llm" not in configured:
+        try:
+            from openclow.services import bot_actions
+            job = await bot_actions.enqueue_job("claude_auth_check")
+            result = await job.result(timeout=10)
+            if result and result.get("loggedIn"):
+                configured.add("llm")
+        except Exception:
+            pass  # worker unavailable — leave llm as unconfigured
 
     # Count projects and users
     async with async_session() as session:
@@ -888,6 +947,47 @@ async def toggle_user_allowed(user_id: int, body: dict):
         user.is_allowed = bool(body.get("is_allowed", False))
         await session.commit()
     return {"status": "ok", "is_allowed": user.is_allowed}
+
+
+@router.patch("/users/{user_id}/admin")
+async def toggle_user_admin(user_id: int, body: dict):
+    """Set is_admin flag for a user."""
+    async with async_session() as session:
+        user = await session.get(User, user_id)
+        if not user:
+            raise HTTPException(404, "User not found")
+        user.is_admin = bool(body.get("is_admin", False))
+        await session.commit()
+    return {"status": "ok", "is_admin": user.is_admin}
+
+
+@router.post("/users/web", response_model=UserResponse)
+async def create_web_user(body: dict):
+    """Create a web-login user (username + password). Admin use only."""
+    from openclow.api.web_auth import hash_password
+    username = (body.get("username") or "").strip()
+    password = (body.get("password") or "").strip()
+    if not username or not password:
+        raise HTTPException(400, "username and password are required")
+    if len(password) < 6:
+        raise HTTPException(400, "password must be at least 6 characters")
+    uid = f"web:{username}"
+    async with async_session() as session:
+        existing = await session.execute(select(User).where(User.chat_provider_uid == uid))
+        if existing.scalar_one_or_none():
+            raise HTTPException(409, f"Web user '{username}' already exists")
+        user = User(
+            chat_provider_type="web",
+            chat_provider_uid=uid,
+            username=username,
+            is_allowed=True,
+            is_admin=bool(body.get("is_admin", False)),
+            web_password_hash=hash_password(password),
+        )
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        return user
 
 
 # ---------------------------------------------------------------------------

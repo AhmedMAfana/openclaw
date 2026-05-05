@@ -45,6 +45,7 @@ export type SettingsPage =
 
 interface SettingsPanelProps {
   onClose: () => void;
+  onProjectsChanged?: () => void;
 }
 
 const PAGE_LABELS: Record<SettingsPage, string> = {
@@ -97,7 +98,7 @@ const NAV: Array<{ section?: string; items: NavItem[] }> = [
   },
 ];
 
-export function SettingsPanel({ onClose }: SettingsPanelProps) {
+export function SettingsPanel({ onClose, onProjectsChanged }: SettingsPanelProps) {
   const [page, setPage] = useState<SettingsPage>("dashboard");
 
   function renderPage() {
@@ -110,7 +111,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
       case "github-app":  return <SettingsGithubApp />;
       case "system":      return <SettingsSystem />;
       case "host":        return <SettingsHost />;
-      case "projects":    return <SettingsProjects />;
+      case "projects":    return <SettingsProjects onProjectsChanged={onProjectsChanged} />;
       case "instances":   return <SettingsInstances />;
       case "users":       return <SettingsUsers />;
       case "channels":    return <SettingsChannels />;

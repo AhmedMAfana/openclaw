@@ -1,8 +1,53 @@
 import { useState, useEffect } from "react";
-import { CheckCircleIcon } from "lucide-react";
+import { CheckCircleIcon, LockIcon, UnlockIcon } from "lucide-react";
 
-const ic = "w-full px-3 py-2 rounded-lg text-sm bg-secondary border border-border text-foreground focus:outline-none focus:ring-1 focus:ring-ring";
 const lc = "block text-sm font-medium text-foreground mb-1";
+
+function LockedInput({
+  type = "text",
+  value,
+  onChange,
+  placeholder,
+  locked,
+  onToggleLock,
+  mono = false,
+}: {
+  type?: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  locked: boolean;
+  onToggleLock: () => void;
+  mono?: boolean;
+}) {
+  return (
+    <div className="relative">
+      <input
+        type={locked ? "password" : type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        readOnly={locked}
+        placeholder={locked ? "" : placeholder}
+        autoComplete="new-password"
+        className={`w-full pl-3 pr-9 py-2 rounded-lg text-sm bg-secondary border text-foreground focus:outline-none focus:ring-1 focus:ring-ring transition-colors ${
+          mono ? "font-mono" : ""
+        } ${
+          locked
+            ? "border-border/40 text-muted-foreground cursor-not-allowed select-none"
+            : "border-border"
+        }`}
+      />
+      <button
+        type="button"
+        onClick={onToggleLock}
+        className="absolute inset-y-0 right-0 flex items-center px-2.5 text-muted-foreground hover:text-foreground transition-colors"
+        title={locked ? "Click to edit" : "Lock field"}
+      >
+        {locked ? <LockIcon className="size-3.5" /> : <UnlockIcon className="size-3.5" />}
+      </button>
+    </div>
+  );
+}
 
 function ConfiguredBadge() {
   return (
@@ -16,6 +61,7 @@ export function SettingsCloudflare() {
   const [configured, setConfigured] = useState(false);
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState({ account_id: "", zone_id: "", zone_domain: "", api_token: "" });
+  const [locked, setLocked] = useState({ account_id: false, zone_id: false, zone_domain: false, api_token: false });
   const [saveState, setSaveState] = useState<"idle" | "saving" | "ok" | "error">("idle");
   const [saveMsg, setSaveMsg] = useState("");
   const [testState, setTestState] = useState<"idle" | "testing" | "ok" | "error">("idle");
@@ -32,6 +78,7 @@ export function SettingsCloudflare() {
         if (d.configured) {
           setConfigured(true);
           setForm({ account_id: d.account_id, zone_id: d.zone_id, zone_domain: d.zone_domain, api_token: d.api_token });
+          setLocked({ account_id: true, zone_id: true, zone_domain: true, api_token: true });
         }
       }
     } finally { setLoading(false); }
@@ -77,29 +124,49 @@ export function SettingsCloudflare() {
 
         <div>
           <label className={lc}>Account ID</label>
-          <input type="text" className={ic} placeholder="daeb4dec9d9185ce8c1f569205354650"
-            value={form.account_id} onChange={(e) => setForm(f => ({ ...f, account_id: e.target.value }))} />
+          <LockedInput
+            value={form.account_id}
+            onChange={(v) => setForm(f => ({ ...f, account_id: v }))}
+            placeholder="daeb4dec9d9185ce8c1f569205354650"
+            locked={locked.account_id}
+            onToggleLock={() => setLocked(l => ({ ...l, account_id: !l.account_id }))}
+          />
           <p className="mt-1 text-xs text-muted-foreground">Cloudflare dashboard → any zone → right sidebar</p>
         </div>
 
         <div>
           <label className={lc}>Zone ID</label>
-          <input type="text" className={ic} placeholder="fbfef8c847b58212a729455cd91aaf8a"
-            value={form.zone_id} onChange={(e) => setForm(f => ({ ...f, zone_id: e.target.value }))} />
+          <LockedInput
+            value={form.zone_id}
+            onChange={(v) => setForm(f => ({ ...f, zone_id: v }))}
+            placeholder="fbfef8c847b58212a729455cd91aaf8a"
+            locked={locked.zone_id}
+            onToggleLock={() => setLocked(l => ({ ...l, zone_id: !l.zone_id }))}
+          />
         </div>
 
         <div>
           <label className={lc}>Zone Domain</label>
-          <input type="text" className={ic} placeholder="apps.example.com"
-            value={form.zone_domain} onChange={(e) => setForm(f => ({ ...f, zone_domain: e.target.value }))} />
+          <LockedInput
+            value={form.zone_domain}
+            onChange={(v) => setForm(f => ({ ...f, zone_domain: v }))}
+            placeholder="apps.example.com"
+            locked={locked.zone_domain}
+            onToggleLock={() => setLocked(l => ({ ...l, zone_domain: !l.zone_domain }))}
+          />
           <p className="mt-1 text-xs text-muted-foreground">Subdomain where tunnels are reachable — e.g. chats.tagh.co.uk</p>
         </div>
 
         <div>
           <label className={lc}>API Token</label>
-          <input type="password" className={ic} autoComplete="new-password"
-            placeholder={configured ? "Leave blank to keep existing token" : "cfut_..."}
-            value={form.api_token} onChange={(e) => setForm(f => ({ ...f, api_token: e.target.value }))} />
+          <LockedInput
+            type="password"
+            value={form.api_token}
+            onChange={(v) => setForm(f => ({ ...f, api_token: v }))}
+            placeholder="cfut_..."
+            locked={locked.api_token}
+            onToggleLock={() => setLocked(l => ({ ...l, api_token: !l.api_token }))}
+          />
           <p className="mt-1 text-xs text-muted-foreground">
             Needs: Account.Cloudflare-Tunnel:Edit · Zone.DNS:Edit · Zone.Zone:Read
           </p>
