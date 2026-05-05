@@ -420,6 +420,9 @@ function ChatApp() {
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [showProfilePanel, setShowProfilePanel] = useState(false);
 
+  // Message to auto-send after the user picks a project (intercepted from onNew)
+  const pendingMsgForProjectRef = useRef<string | null>(null);
+
   // WebSocket for worker progress events
   const wsRef = useRef<WebSocket | null>(null);
   // Set to true when the WS was intentionally closed (thread switch / unmount)
@@ -459,6 +462,16 @@ function ChatApp() {
   const [queueInputText, setQueueInputText] = useState("");
 
   useEffect(() => { loadThreads(); loadProjects(); loadMe(); }, []);
+
+  // Esc cancels the active stream
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape" && isRunning) cancelStream();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRunning]);
 
   // Open worker-progress WebSocket whenever the active thread changes
   useEffect(() => {
@@ -532,9 +545,19 @@ function ChatApp() {
     }
     setIsRunning(false);
     setThinkingSteps([]);
-    // Drop any __LOADING__ stubs from message state immediately — they're placeholders
-    // that the worker never finished populating, and we don't want them showing as blank rows
-    setMessages((prev) => prev.filter((m) => m.content !== "__LOADING__"));
+    setMessages((prev) => {
+      const filtered = prev.filter((m) => m.content !== "__LOADING__");
+      // Always mark the last assistant message as interrupted (even with partial content)
+      const lastAsstIdx = filtered.map((m, i) => ({ m, i }))
+        .filter(({ m }) => m.role === "assistant")
+        .pop()?.i;
+      if (lastAsstIdx !== undefined) {
+        return filtered.map((m, i) =>
+          i === lastAsstIdx ? { ...m, content: "__INTERRUPTED__" } : m
+        );
+      }
+      return filtered;
+    });
     // Also abort any arq worker jobs enqueued during this session
     if (activeThreadId) {
       fetch(`/api/threads/${activeThreadId}/cancel`, {
@@ -559,7 +582,7 @@ function ChatApp() {
   function scrollThreadToBottom(delay = 50) {
     setTimeout(() => {
       const viewport = getViewport();
-      if (viewport) viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
+      if (viewport) viewport.scrollTo({ top: viewport.scrollHeight, behavior: "instant" });
     }, delay);
   }
 
@@ -659,6 +682,22 @@ function ChatApp() {
               })
             );
           }
+        } else if (data.type === "tool_use" && (data as unknown as { tool?: string }).tool) {
+          // Append tool activity to the progress card's agent log so tool use
+          // from the orchestrator is visible alongside agent text tokens.
+          const toolDesc = (data as unknown as { tool: string }).tool;
+          const stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          setMessages((prev) => prev.map((m) => {
+            if (!matchesMsg(m.id)) return m;
+            if (!m.content.startsWith("__PROGRESS_CARD__")) return m;
+            try {
+              const card = JSON.parse(m.content.slice("__PROGRESS_CARD__".length));
+              const prevBuf = card.stream_buffer ?? "";
+              const line = `[${stamp}] ${toolDesc}`;
+              const merged = (prevBuf + (prevBuf ? "\n" : "") + line).slice(-4096);
+              return { ...m, content: `__PROGRESS_CARD__${JSON.stringify({ ...card, stream_buffer: merged })}` };
+            } catch { return m; }
+          }));
         } else if (data.type === "progress_card" && data.card) {
           // Inject session_id so WorkerProgressCard can render a Stop button.
           const cardWithSession: Record<string, unknown> = { ...(data.card as Record<string, unknown>), session_id: sessionId };
@@ -823,7 +862,8 @@ function ChatApp() {
     if (id === activeThreadId) return; // already on this thread
     cancelStream();
     setPendingPlan(null);
-    setShowSettingsPanel(false); // clicking a chat should hide settings
+    setShowSettingsPanel(false);
+    setShowProfilePanel(false);
     setActiveThreadId(id);
     setMessages([]);
     // Restore project context — use fromList if provided (avoids stale threads state)
@@ -852,10 +892,14 @@ function ChatApp() {
             .map((m: { id: string; role: string; content: string; createdAt?: string; isComplete?: boolean }) => ({
               id: m.id,
               role: m.role as "user" | "assistant",
-              // Empty incomplete assistant messages show as loading spinner on refresh
-              content: m.role === "assistant" && m.isComplete === false && m.content.trim() === ""
-                ? "__LOADING__"
-                : m.content,
+              content: (() => {
+                if (m.role !== "assistant") return m.content;
+                // Orphaned __LOADING__ in DB (stream died before finalize) → show interrupted
+                if (m.content === "__LOADING__") return "__INTERRUPTED__";
+                // Empty incomplete message → show loading spinner (user refreshed mid-stream on this tab)
+                if (m.isComplete === false && m.content.trim() === "") return "__LOADING__";
+                return m.content;
+              })(),
               createdAt: m.createdAt,
             }))
         );
@@ -942,6 +986,8 @@ function ChatApp() {
         // `if (id === activeThreadId) return`)
         setActiveThreadId(null);
         setTimeout(() => setActiveThreadId(thread.remoteId), 0);
+        // pendingMsgForProjectRef is fired by a useEffect that watches
+        // activeThreadId + activeProjectId (declared after runtime hook).
       }
     } catch { /* silently fail */ }
   }
@@ -1053,7 +1099,22 @@ function ChatApp() {
         res.body,
         abort.signal,
         (accumulated) => { pendingRef.current = accumulated; }, // ref only — no setState per chunk
-        (tool) => setThinkingSteps((prev) => [...prev, tool]),
+        (tool) => {
+          const stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          setThinkingSteps((prev) => {
+            const toolBase = tool.replace(/^\[[\d:]+\] /, "");
+            if (prev.length > 0) {
+              const last = prev[prev.length - 1];
+              const lastBase = last.replace(/ \(×\d+\)$/, "").replace(/^\[[\d:]+\] /, "");
+              if (lastBase === toolBase) {
+                const match = last.match(/\(×(\d+)\)$/);
+                const count = match ? parseInt(match[1]) + 1 : 2;
+                return [...prev.slice(0, -1), `${last.replace(/ \(×\d+\)$/, "")} (×${count})`];
+              }
+            }
+            return [...prev, `[${stamp}] ${toolBase}`];
+          });
+        },
         // Reconcile temp ID with the real DB message ID so refresh shows the right message.
         // Also update liveIdRef so RAF/finally keep finding the message after rename.
         (realId) => {
@@ -1069,11 +1130,21 @@ function ChatApp() {
       );
     } finally {
       streamDone = true;
-      // Cancel RAF and snap immediately to full received text
       if (rafId !== null) cancelAnimationFrame(rafId);
-      setMessages((prev) =>
-        prev.map((m) => m.id === liveIdRef.current ? { ...m, content: pendingRef.current } : m)
-      );
+      if (abort.signal.aborted) {
+        // Stream was cancelled — always show interrupted marker (discard partial text)
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.id !== liveIdRef.current) return m;
+            return { ...m, content: "__INTERRUPTED__" };
+          })
+        );
+      } else {
+        // Normal end — snap to full received text
+        setMessages((prev) =>
+          prev.map((m) => m.id === liveIdRef.current ? { ...m, content: pendingRef.current } : m)
+        );
+      }
     }
   }
 
@@ -1088,6 +1159,14 @@ function ChatApp() {
     // Extract attachments provided by assistant-ui's attachment adapter
     const msgAttachments = (message as AppendMessage & { attachments?: Array<{ name: string; contentType?: string; content?: Array<{ type: string; image?: string; text?: string }> }> }).attachments ?? [];
     if (!userText && msgAttachments.length === 0) return;
+
+    // No project selected — intercept send and open project picker instead of
+    // letting the backend return a "no project bound" error card.
+    if (!activeProjectId) {
+      pendingMsgForProjectRef.current = userText || null;
+      setShowNewChatModal(true);
+      return;
+    }
 
     // Build backend attachment payload from CompleteAttachment content parts
     const backendAttachments = msgAttachments.flatMap((att) =>
@@ -1290,6 +1369,19 @@ function ChatApp() {
     }, 80);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isRunning]);
+
+  // After the user picks a project via the picker (triggered mid-message), auto-fire
+  // the message that was intercepted in onNew before the project was set.
+  useEffect(() => {
+    if (!activeThreadId || !activeProjectId) return;
+    const pending = pendingMsgForProjectRef.current;
+    if (!pending) return;
+    pendingMsgForProjectRef.current = null;
+    setTimeout(() => {
+      runtime.thread.append({ role: "user", content: [{ type: "text", text: pending }] });
+    }, 150);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeThreadId, activeProjectId]);
 
   // ── Render ────────────────────────────────────────────────────────────────────
 

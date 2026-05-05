@@ -108,8 +108,30 @@ def describe_tool(block: ToolUseBlock) -> str:
     if "host_cd" in name:
         return "📂 Entering project dir"
 
-    # Fallback
-    return f"🔧 {name.replace('mcp__', '').replace('__', ': ')}"
+    # Instance / task dispatch tools
+    if "remote_trigger" in name or name == "RemoteTrigger":
+        return "🚀 Queueing task..."
+    if "trigger_task" in name:
+        return "🚀 Dispatching task..."
+    if name == "Agent":
+        return "🤖 Running sub-agent"
+    if name == "Skill":
+        return "🛠 Invoking skill"
+    if "ListMcpResources" in name or "list_resources" in name:
+        return "📋 Checking available tools"
+    if "get_status" in name or "instance_status" in name:
+        return "📊 Checking status"
+    if "list_" in name or name.startswith("List"):
+        return "📋 Listing resources"
+    if "Task" in name and "create" in name.lower():
+        return "📝 Creating task"
+
+    # Fallback — strip MCP namespace noise for readability
+    readable = name.replace("mcp__", "").replace("__", ": ")
+    # CamelCase → spaced words (e.g. ListMcpResourcesTool → List Mcp Resources Tool)
+    import re as _re
+    readable = _re.sub(r"(?<=[a-z])(?=[A-Z])", " ", readable)
+    return f"🔧 {readable}"
 
 
 # Phrases that unambiguously indicate Claude auth failure. Bare "auth" was

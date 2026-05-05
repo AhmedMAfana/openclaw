@@ -1351,6 +1351,7 @@ async def assistant_endpoint(
                             _update_message(asst_msg_id_int, msg)
                         )
                         return
+                _stream_cancelled = False
                 try:
                     try:
                         async with asyncio.timeout(1800):
@@ -1413,8 +1414,12 @@ async def assistant_endpoint(
                                                 })
                     except (GeneratorExit, asyncio.CancelledError):
                         log.info("assistant.cancelled", session_id=session_id)
+                        _stream_cancelled = True
                 finally:
-                    save_content = final_text or streamed_text or "(no response)"
+                    if _stream_cancelled:
+                        save_content = "__INTERRUPTED__"
+                    else:
+                        save_content = final_text or streamed_text or "(no response)"
                     try:
                         await asyncio.shield(
                             _update_message(asst_msg_id_int, save_content)

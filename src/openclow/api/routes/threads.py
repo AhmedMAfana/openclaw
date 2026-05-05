@@ -362,9 +362,8 @@ async def _cancel_session(session_id: int, user_id: int) -> int:
     updated_card: tuple[int, dict] | None = None
     try:
         async with async_session() as db:
-            # First try incomplete messages; fall back to any recent progress card
-            # still marked "running" (handles the race where a heartbeat set
-            # is_complete=True while overall_status stayed "running").
+            import datetime as _dt
+            # Primary: find the most recent incomplete assistant message
             result = await db.execute(
                 _sa.select(WebChatMessage).where(
                     WebChatMessage.session_id == session_id,
@@ -374,7 +373,7 @@ async def _cancel_session(session_id: int, user_id: int) -> int:
             )
             msg = result.scalar_one_or_none()
             if not msg:
-                # Fallback: find stuck cards (is_complete=True but overall_status=running)
+                # Fallback: stuck progress cards (is_complete=True but still "running")
                 result2 = await db.execute(
                     _sa.select(WebChatMessage).where(
                         WebChatMessage.session_id == session_id,
@@ -398,9 +397,9 @@ async def _cancel_session(session_id: int, user_id: int) -> int:
                         updated_card = (msg.id, card)
                 except Exception:
                     pass
-            elif msg and msg.content in ("", "__LOADING__"):
-                await db.delete(msg)
             elif msg:
+                # Regular SSE message (empty, loading, or partial) — mark as interrupted
+                msg.content = "__INTERRUPTED__"
                 msg.is_complete = True
 
             # Update Task.status in the same DB session
