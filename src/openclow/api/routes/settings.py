@@ -1158,6 +1158,194 @@ async def set_dev_password(body: dict):
         return {"status": "ok", "message": "Dev password cleared — dev mode disabled"}
 
 
+# ---------------------------------------------------------------------------
+# Cloudflare settings (per-chat container tunnel provisioning)
+# ---------------------------------------------------------------------------
+
+def _mask_secret(val: str, keep: int = 6) -> str:
+    if not val or len(val) <= keep * 2:
+        return "****"
+    return val[:keep] + "****" + val[-keep:]
+
+
+@router.get("/cloudflare")
+async def get_cloudflare_config():
+    cfg = await config_service.get_config("cloudflare", "settings") or {}
+    if not cfg:
+        return {"configured": False}
+    return {
+        "configured": True,
+        "account_id": cfg.get("account_id", ""),
+        "zone_id": cfg.get("zone_id", ""),
+        "zone_domain": cfg.get("zone_domain", ""),
+        "api_token": _mask_secret(cfg.get("api_token", "")),
+    }
+
+
+@router.put("/cloudflare")
+async def update_cloudflare_config(body: dict):
+    account_id = (body.get("account_id") or "").strip()
+    zone_id = (body.get("zone_id") or "").strip()
+    zone_domain = (body.get("zone_domain") or "").strip()
+    api_token = (body.get("api_token") or "").strip()
+
+    if not all([account_id, zone_id, zone_domain]):
+        raise HTTPException(400, "account_id, zone_id, and zone_domain are required")
+
+    existing = await config_service.get_config("cloudflare", "settings") or {}
+
+    # Preserve existing token if masked value sent back
+    if "****" in api_token or not api_token:
+        api_token = existing.get("api_token", "")
+    if not api_token:
+        raise HTTPException(400, "api_token is required")
+
+    # Validate token against Cloudflare API
+    import urllib.request, urllib.error
+    def _cf_get(url: str):
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                import json as _json
+                return r.status, _json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            import json as _json
+            return e.code, _json.loads(e.read() or b"{}")
+        except Exception as exc:
+            return 0, {"error": str(exc)}
+
+    status, body_resp = _cf_get("https://api.cloudflare.com/client/v4/user/tokens/verify")
+    if status != 200 or not (body_resp or {}).get("success"):
+        raise HTTPException(400, f"Token invalid: {body_resp.get('errors', body_resp)}")
+
+    status, body_resp = _cf_get(f"https://api.cloudflare.com/client/v4/zones/{zone_id}")
+    if status != 200 or not (body_resp or {}).get("success"):
+        raise HTTPException(400, f"zone_id invalid or token lacks Zone:Read — {body_resp.get('errors', body_resp)}")
+
+    zone_name = (body_resp.get("result") or {}).get("name", "")
+
+    await config_service.set_config("cloudflare", "settings", {
+        "account_id": account_id,
+        "zone_id": zone_id,
+        "zone_domain": zone_domain,
+        "zone_name": zone_name,
+        "api_token": api_token,
+    })
+    return {"status": "ok", "message": f"Cloudflare configured (zone: {zone_name})"}
+
+
+@router.post("/test/cloudflare")
+async def test_cloudflare():
+    cfg = await config_service.get_config("cloudflare", "settings") or {}
+    if not cfg.get("api_token"):
+        raise HTTPException(400, "Cloudflare not configured")
+    import urllib.request, urllib.error
+    req = urllib.request.Request(
+        "https://api.cloudflare.com/client/v4/user/tokens/verify",
+        headers={"Authorization": f"Bearer {cfg['api_token']}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            import json as _json
+            data = _json.loads(r.read())
+            if data.get("success"):
+                return {"status": "ok", "message": f"Token active · zone: {cfg.get('zone_domain')}"}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+    raise HTTPException(400, "Token invalid")
+
+
+# ---------------------------------------------------------------------------
+# GitHub App settings (per-instance git token rotation)
+# ---------------------------------------------------------------------------
+
+@router.get("/github-app")
+async def get_github_app_config():
+    cfg = await config_service.get_config("github_app", "settings") or {}
+    if not cfg:
+        return {"configured": False}
+    return {
+        "configured": True,
+        "app_id": cfg.get("app_id", ""),
+        "installation_id": cfg.get("installation_id", ""),
+        "private_key_pem": _mask_secret(cfg.get("private_key_pem", ""), keep=10),
+    }
+
+
+@router.put("/github-app")
+async def update_github_app_config(body: dict):
+    app_id = str(body.get("app_id") or "").strip()
+    installation_id = str(body.get("installation_id") or "").strip()
+    private_key_pem = (body.get("private_key_pem") or "").strip()
+
+    if not app_id:
+        raise HTTPException(400, "app_id is required")
+
+    existing = await config_service.get_config("github_app", "settings") or {}
+
+    if "****" in private_key_pem or not private_key_pem:
+        private_key_pem = existing.get("private_key_pem", "")
+    if not private_key_pem:
+        raise HTTPException(400, "private_key_pem is required")
+
+    # Validate by minting a JWT and calling /app
+    try:
+        import time, jwt  # type: ignore
+        now = int(time.time())
+        token = jwt.encode(
+            {"iat": now - 60, "exp": now + 300, "iss": int(app_id)},
+            private_key_pem, algorithm="RS256",
+        )
+        import urllib.request
+        req = urllib.request.Request(
+            "https://api.github.com/app",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            import json as _json
+            data = _json.loads(r.read())
+            app_name = data.get("name", "?")
+    except ImportError:
+        app_name = None  # pyjwt not installed — skip validation, just save
+    except Exception as e:
+        raise HTTPException(400, f"GitHub App validation failed: {e}")
+
+    await config_service.set_config("github_app", "settings", {
+        "app_id": app_id,
+        "installation_id": installation_id,
+        "private_key_pem": private_key_pem,
+    })
+    msg = f"GitHub App configured" + (f" ({app_name})" if app_name else " (JWT validation skipped — install pyjwt)")
+    return {"status": "ok", "message": msg}
+
+
+@router.post("/test/github-app")
+async def test_github_app():
+    cfg = await config_service.get_config("github_app", "settings") or {}
+    if not cfg.get("app_id") or not cfg.get("private_key_pem"):
+        raise HTTPException(400, "GitHub App not configured")
+    try:
+        import time, jwt  # type: ignore
+        now = int(time.time())
+        token = jwt.encode(
+            {"iat": now - 60, "exp": now + 300, "iss": int(cfg["app_id"])},
+            cfg["private_key_pem"], algorithm="RS256",
+        )
+        import urllib.request
+        req = urllib.request.Request(
+            "https://api.github.com/app",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            import json as _json
+            data = _json.loads(r.read())
+            return {"status": "ok", "message": f"App: {data.get('name')} · id={data.get('id')}"}
+    except ImportError:
+        raise HTTPException(400, "pyjwt not installed in this container — install it to test")
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
 @router.post("/login")
 async def settings_login(body: dict):
     """Validate API key and return a cookie."""

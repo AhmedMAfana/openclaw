@@ -83,6 +83,13 @@ if [ "${WORKSPACES_BIND_MODE:-check}" != "skip" ]; then
         echo "[entrypoint] FATAL: /workspaces does not exist — compose file is missing the workspaces volume mount." >&2
         exit 78
     fi
+    # Fix ownership if the named volume was initialised as root (common on
+    # first `docker compose up` before the Dockerfile USER takes effect).
+    if [ "$(stat -c '%U' /workspaces)" != "openclow" ] || [ "$(stat -c '%U' /workspaces)" = "root" ]; then
+        chown openclow:openclow /workspaces 2>/dev/null || true
+    fi
+    mkdir -p /workspaces/_cache && chown openclow:openclow /workspaces/_cache 2>/dev/null || true
+
     _probe="/workspaces/.entrypoint_writable_$$"
     if ! touch "$_probe" 2>/dev/null; then
         echo "[entrypoint] FATAL: /workspaces is not writable by uid=$(id -u). Most likely cause: container started with the dev compose only — re-run with \`-f docker-compose.yml -f docker-compose.prod.yml\` (prod) so /workspaces gets the named volume mount, or chown the host bind dir if you're on dev." >&2

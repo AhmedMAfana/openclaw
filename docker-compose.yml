@@ -96,6 +96,25 @@ services:
       timeout: 5s
       retries: 3
 
+  # Runs once on every stack start as root to ensure named volumes have the
+  # right ownership before the worker (which runs as openclow) starts.
+  # Without this, a freshly-created Docker named volume is root-owned and
+  # os.makedirs('/workspaces/_cache') fails with EACCES inside the worker.
+  volume-init:
+    image: alpine:3.19
+    user: root
+    volumes:
+      - workspaces:/workspaces
+    command: >
+      sh -c "
+        adduser -D -u 1000 openclow 2>/dev/null || true;
+        chown -R openclow:openclow /workspaces;
+        mkdir -p /workspaces/_cache;
+        chown openclow:openclow /workspaces/_cache;
+        echo '[volume-init] /workspaces ready'
+      "
+    restart: "no"
+
   worker:
     build:
       context: .
@@ -107,6 +126,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      volume-init:
+        condition: service_completed_successfully
     environment:
       ACTIVITY_LOG: /app/logs/activity.jsonl
     volumes:

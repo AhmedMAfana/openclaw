@@ -161,8 +161,10 @@ def _seed_cloudflare() -> dict | None:
     _step("Validating against Cloudflare API…")
     if not _cf_verify_token(api_token):
         return None
-    if not _cf_verify_account(api_token, account_id):
-        return None
+    # Account-level read (GET /accounts/{id}) requires Account:Read scope which
+    # tunnel tokens often don't have — skip it, the account_id is validated
+    # implicitly when the first tunnel is created.
+    _ok(f"account_id accepted (not verified — Account:Read scope not required)")
     ok, zone_name = _cf_verify_zone(api_token, zone_id)
     if not ok:
         return None
@@ -278,9 +280,11 @@ def _docker_available() -> bool:
 def _write_platform_config(category: str, key: str, value: dict, dry_run: bool) -> bool:
     """UPSERT one row via `docker compose exec postgres psql`."""
     payload = json.dumps(value)
+    # Escape single quotes for SQL literal embedding ('' is standard SQL escaping).
+    escaped = payload.replace("'", "''")
     sql = (
         f"INSERT INTO platform_config (category, key, value, is_active) "
-        f"VALUES ('{category}', '{key}', :'val'::jsonb, true) "
+        f"VALUES ('{category}', '{key}', '{escaped}'::jsonb, true) "
         f"ON CONFLICT (category, key) DO UPDATE "
         f"SET value = EXCLUDED.value, updated_at = now();"
     )
@@ -292,7 +296,7 @@ def _write_platform_config(category: str, key: str, value: dict, dry_run: bool) 
     cmd = [
         "docker", "compose", "exec", "-T", "postgres",
         "psql", "-U", "openclow", "-d", "openclow",
-        "-v", f"val={payload}", "-c", sql,
+        "-c", sql,
     ]
     try:
         proc = subprocess.run(
