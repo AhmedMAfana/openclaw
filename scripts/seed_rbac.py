@@ -19,11 +19,11 @@ import asyncio
 
 async def main() -> None:
     from sqlalchemy import select
-    from openclow.models.base import async_session
-    from openclow.models.user import User
-    from openclow.models.project import Project
-    from openclow.models.user_project_access import UserProjectAccess
-    from openclow.api.web_auth import hash_password
+    from taghdev.models.base import async_session
+    from taghdev.models.user import User
+    from taghdev.models.project import Project
+    from taghdev.models.user_project_access import UserProjectAccess
+    from taghdev.api.web_auth import hash_password
 
     async with async_session() as session:
 

@@ -20,7 +20,7 @@ import os
 
 import pytest
 
-from openclow.services.instance_service import (
+from taghdev.services.instance_service import (
     InstanceService,
     PerUserCapExceeded,
 )
@@ -49,7 +49,7 @@ async def _new_chat_for_user(user_id: int, project_id: int):
     multiple chats.
     """
     from datetime import datetime, timezone
-    from openclow.models import WebChatSession, async_session
+    from taghdev.models import WebChatSession, async_session
     async with async_session() as s:
         chat = WebChatSession(
             user_id=user_id,
@@ -124,8 +124,8 @@ async def test_terminating_one_instance_frees_a_slot() -> None:
 
         # Mark the row destroyed directly so the test doesn't depend
         # on a live teardown_instance ARQ job.
-        from openclow.models import Instance, async_session
-        from openclow.models.instance import InstanceStatus
+        from taghdev.models import Instance, async_session
+        from taghdev.models.instance import InstanceStatus
         from datetime import datetime, timezone
         async with async_session() as s:
             row = await s.get(Instance, inst1.id)

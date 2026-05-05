@@ -9,7 +9,7 @@ import uuid
 import pytest
 from datetime import datetime, timedelta, timezone
 
-from openclow.models.instance import Instance, InstanceStatus, TerminatedReason
+from taghdev.models.instance import Instance, InstanceStatus, TerminatedReason
 
 
 def _seed(store, *, slug, status):

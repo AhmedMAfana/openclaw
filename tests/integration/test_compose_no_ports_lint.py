@@ -1,6 +1,6 @@
 """T016: enforce Principle V across all compose templates.
 
-For every template under src/openclow/setup/compose_templates/, render a
+For every template under src/taghdev/setup/compose_templates/, render a
 sample compose file and assert no service other than `cloudflared` carries
 a `ports:` key. Fails the CI build on violation.
 
@@ -12,7 +12,7 @@ import pathlib
 
 import pytest
 
-from openclow.services.instance_compose_renderer import (
+from taghdev.services.instance_compose_renderer import (
     ComposeRenderError,
     InstanceRenderContext,
     assert_no_host_ports,
@@ -20,7 +20,7 @@ from openclow.services.instance_compose_renderer import (
 )
 
 TEMPLATES_ROOT = pathlib.Path(__file__).resolve().parents[2] / (
-    "src/openclow/setup/compose_templates"
+    "src/taghdev/setup/compose_templates"
 )
 
 

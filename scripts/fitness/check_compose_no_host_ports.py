@@ -6,7 +6,7 @@ internet ONLY through its `cloudflared` sidecar." Host port
 publishing would create cross-tenant blast radius.
 
 Walks every per-instance compose template under
-``src/openclow/setup/compose_templates/*/compose.yml`` and asserts no
+``src/taghdev/setup/compose_templates/*/compose.yml`` and asserts no
 service other than ``cloudflared`` carries a ``ports:`` key.
 
 Reuses the line-scan from ``instance_compose_renderer.assert_no_host_ports``
@@ -20,7 +20,7 @@ from scripts.fitness import Finding, FitnessResult, Severity
 
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-TEMPLATES = REPO / "src" / "openclow" / "setup" / "compose_templates"
+TEMPLATES = REPO / "src" / "taghdev" / "setup" / "compose_templates"
 
 
 def check() -> FitnessResult:
@@ -38,7 +38,7 @@ def check() -> FitnessResult:
         return result
 
     # Inline the no-host-ports check so this fitness function doesn't
-    # depend on the openclow package being importable (the runner
+    # depend on the taghdev package being importable (the runner
     # may run from outside the venv on a fresh dev box).
     for compose_path in sorted(TEMPLATES.glob("*/compose.yml")):
         violations = _scan_compose_for_host_ports(compose_path.read_text(encoding="utf-8"))

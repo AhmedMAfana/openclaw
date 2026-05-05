@@ -1,8 +1,8 @@
 # Contract: `InstanceService`
 
-**Audience**: callers within the orchestrator — chat handlers in [src/openclow/worker/tasks/chat_task.py](../../../src/openclow/worker/tasks/chat_task.py), the inactivity reaper, and the FastAPI routes that back the admin UI.
+**Audience**: callers within the orchestrator — chat handlers in [src/taghdev/worker/tasks/chat_task.py](../../../src/taghdev/worker/tasks/chat_task.py), the inactivity reaper, and the FastAPI routes that back the admin UI.
 
-**Location**: [src/openclow/services/instance_service.py](../../../src/openclow/services/instance_service.py) (new file).
+**Location**: [src/taghdev/services/instance_service.py](../../../src/taghdev/services/instance_service.py) (new file).
 
 **Invariants enforced** (every public method):
 - **Principle I** — one chat binds to exactly one active instance at a time.
@@ -25,7 +25,7 @@ Begin provisioning a fresh instance for a chat that has none. Idempotent — if 
   - The owning user is below `per_user_cap` (see [research.md §9](../research.md#9-per-user-quota-enforcement)). Otherwise raises `PerUserCapExceeded`.
   - Platform is below host capacity. Otherwise raises `PlatformAtCapacity`.
 - **Side effects** (in order; each checkpointable):
-  1. `INSERT instances` row with `status='provisioning'` (held under Redis lock `openclow:user:<user_id>:provision`).
+  1. `INSERT instances` row with `status='provisioning'` (held under Redis lock `taghdev:user:<user_id>:provision`).
   2. Enqueue ARQ job `provision_instance(instance_id)`. The job itself is responsible for compose render, tunnel provision, compose up, projctl up, and status transition to `running`.
   3. Return the row immediately — callers observe lifecycle via `get_or_resume` or UI polling.
 - **Errors**:
@@ -118,9 +118,9 @@ Callers (specifically `chat_task.py`) are responsible for translating these into
 
 ## Concurrency rules
 
-- `provision(chat_session_id)` holds the user-scoped Redis lock `openclow:user:<user_id>:provision` only across the cap check + INSERT — not across the compose up (that's in an ARQ job).
+- `provision(chat_session_id)` holds the user-scoped Redis lock `taghdev:user:<user_id>:provision` only across the cap check + INSERT — not across the compose up (that's in an ARQ job).
 - `touch(instance_id)` is lockless — the UPDATE is inherently atomic.
-- `terminate(instance_id, ...)` holds the instance-scoped Redis lock `openclow:instance:<slug>` to prevent concurrent terminate vs provision on the same chat.
+- `terminate(instance_id, ...)` holds the instance-scoped Redis lock `taghdev:instance:<slug>` to prevent concurrent terminate vs provision on the same chat.
 - The reaper holds `FOR UPDATE SKIP LOCKED` on its query so multiple reaper replicas can coexist (v1 has one, but the design does not preclude more).
 
 ---

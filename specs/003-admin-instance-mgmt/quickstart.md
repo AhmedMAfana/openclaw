@@ -48,7 +48,7 @@ Expected: 1 item, `summary.running == 1`.
 
 ### 1.3 Verify SSE updates
 
-Open a second browser tab on the same `/settings/instances` page; in the first tab, open the chat and send another message. The first tab's row "last activity" updates within 10s without refresh. (If it doesn't, check the EventSource console for `instance_status` events; verify [src/openclow/api/routes/activity.py](src/openclow/api/routes/activity.py) accepts `?slug=` as documented in [contracts/sse-events.md](contracts/sse-events.md) §"Backend filter".)
+Open a second browser tab on the same `/settings/instances` page; in the first tab, open the chat and send another message. The first tab's row "last activity" updates within 10s without refresh. (If it doesn't, check the EventSource console for `instance_status` events; verify [src/taghdev/api/routes/activity.py](src/taghdev/api/routes/activity.py) accepts `?slug=` as documented in [contracts/sse-events.md](contracts/sse-events.md) §"Backend filter".)
 
 ### 1.4 Force terminate
 
@@ -66,7 +66,7 @@ Expected: one entry with `action: "force_terminate"`, `risk_level: "dangerous"`,
 Verify the instance row has `terminated_reason = 'admin_forced'`:
 
 ```bash
-docker compose exec db psql -U app -d openclow \
+docker compose exec db psql -U app -d taghdev \
   -c "SELECT slug, status, terminated_reason FROM instances ORDER BY created_at DESC LIMIT 1;"
 ```
 
@@ -171,7 +171,7 @@ curl -s -X POST -H "Cookie: $ADMIN_COOKIE" -H "Content-Type: application/json" \
 Verify `expires_at` advances:
 
 ```bash
-docker compose exec db psql -U app -d openclow \
+docker compose exec db psql -U app -d taghdev \
   -c "SELECT slug, expires_at FROM instances WHERE slug='inst-XXX';"
 ```
 
@@ -277,7 +277,7 @@ The e2e skill should be extended (or a new "admin-control-plane" phase added) to
 - **SSE staleness**: if the list view doesn't update within 10s, check the browser's Network tab → the SSE connection should be open with `text/event-stream` and receiving `data:` lines. If not, the `?slug=` filter in `/api/activity/stream` may not be merged yet — that is a bounded same-PR change per [contracts/sse-events.md](contracts/sse-events.md) §"Backend filter".
 - **Reprovision into the same compose project name**: the new instance has a fresh `compose_project`. If you see "compose project already exists" errors, it means the old teardown didn't fully complete — let it finish, then retry.
 - **Bulk terminate is async per slug**: the response returns immediately with `outcome: "queued"`; actual teardown takes ≤60s per instance and runs in parallel via ARQ. Use `/settings/instances` SSE to watch progress.
-- **Audit log batching**: `audit_service.log_action()` flushes in batches of 10 ([src/openclow/services/audit_service.py:119](src/openclow/services/audit_service.py#L119)). For tests asserting "audit row exists immediately", call the service's flush helper or wait briefly. The admin UI is unaffected because it always queries by slug after refresh.
+- **Audit log batching**: `audit_service.log_action()` flushes in batches of 10 ([src/taghdev/services/audit_service.py:119](src/taghdev/services/audit_service.py#L119)). For tests asserting "audit row exists immediately", call the service's flush helper or wait briefly. The admin UI is unaffected because it always queries by slug after refresh.
 
 ---
 

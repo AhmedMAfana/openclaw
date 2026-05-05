@@ -60,7 +60,7 @@ specs/002-instance-manifest-overlay/
 ### Source Code (repository root)
 
 ```text
-src/openclow/
+src/taghdev/
 ├── services/
 │   ├── instance_manifest_service.py      # NEW — load + validate .tagh/instance.yml from a worktree
 │   ├── instance_inference_service.py     # NEW — Sail-shape detector → InferredProposal

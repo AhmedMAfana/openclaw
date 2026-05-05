@@ -1,6 +1,6 @@
 // Package guide parses a guide.md file into a deterministic step list.
 //
-// Format spec: src/openclow/setup/compose_templates/GUIDE_SPEC.md.
+// Format spec: src/taghdev/setup/compose_templates/GUIDE_SPEC.md.
 // Each step is a `## <name>` heading followed by a ```projctl fenced block
 // carrying the step's metadata as key: value pairs.
 //

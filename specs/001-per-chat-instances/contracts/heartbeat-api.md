@@ -86,7 +86,7 @@ Called by `projctl rotate-git-token` (every 45 min, cron inside the instance) to
 
 ## Implementation notes
 
-- Both endpoints live in [src/openclow/api/routers/instances.py](../../../src/openclow/api/routers/instances.py) (new). They MUST NOT be re-exported from any public router.
+- Both endpoints live in [src/taghdev/api/routers/instances.py](../../../src/taghdev/api/routers/instances.py) (new). They MUST NOT be re-exported from any public router.
 - Rate limiting is per `instance_id`, implemented with Redis `INCR` + `EXPIRE`. Ephemeral state per Principle VI.
 - Every request is logged via `audit_service` with `{instance_slug, signal_summary}`. Redactor runs on the log path.
 

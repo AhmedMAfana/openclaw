@@ -4,15 +4,15 @@ Existing rows are untouched (FR-034) — verified indirectly: this test does
 not touch any DB; it asserts the in-process default only, which is what
 new-row insertion reads.
 """
-from openclow.models import Project
-from openclow.services.project_service import DEFAULT_PROJECT_MODE
+from taghdev.models import Project
+from taghdev.services.project_service import DEFAULT_PROJECT_MODE
 
 
 def test_new_project_defaults_to_container():
     p = Project(name="x", github_repo="org/x")
     assert p.mode == "container", (
         "FR-035: freshly instantiated Project must default to mode='container'. "
-        "If this fails, check src/openclow/models/project.py `mode` default."
+        "If this fails, check src/taghdev/models/project.py `mode` default."
     )
 
 

@@ -15,7 +15,7 @@ Seven required assertions:
 7. ``rotate-git-token`` on GitHub App outage → 503 with
    ``Retry-After``. Deferred to T064.
 
-The route handler is now live (``openclow.api.routes.instances``) but
+The route handler is now live (``taghdev.api.routes.instances``) but
 exercising it end-to-end requires a fixture ``Instance`` row + a real
 Redis for the rate limiter. Test bodies skip with a clear TODO until
 the fixture factory + in-memory Redis shim land.

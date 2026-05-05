@@ -34,7 +34,7 @@ import sys
 import urllib.request
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-TEMPLATE_DIR = REPO / "src" / "openclow" / "setup" / "compose_templates" / "laravel-vue"
+TEMPLATE_DIR = REPO / "src" / "taghdev" / "setup" / "compose_templates" / "laravel-vue"
 TEMPLATE_FILES = ("compose.yml", "cloudflared.yml", "project.yaml",
                   "vite.config.js", "guide.md", "_variant.sh")
 # Note: nginx.conf is NOT required — the serversideup/php-alpine base
@@ -108,7 +108,7 @@ def _check_platform_config() -> dict:
             proc = subprocess.run(
                 [
                     "docker", "compose", "exec", "-T", "postgres",
-                    "psql", "-U", "openclow", "-d", "openclow",
+                    "psql", "-U", "taghdev", "-d", "taghdev",
                     "-At", "-c",
                     f"SELECT value::text FROM platform_config "
                     f"WHERE category='{category}' AND key='{key}';",
@@ -175,7 +175,7 @@ def _check_container_project() -> dict:
         proc = subprocess.run(
             [
                 "docker", "compose", "exec", "-T", "postgres",
-                "psql", "-U", "openclow", "-d", "openclow",
+                "psql", "-U", "taghdev", "-d", "taghdev",
                 "-At", "-c",
                 "SELECT id, name, github_repo FROM projects "
                 "WHERE mode='container' AND status='active' "

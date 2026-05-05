@@ -33,7 +33,7 @@ import pytest
 # names are the hinge: if they are importable, the rest of the stack is
 # either present or will fail loudly on its own.
 _provision_job = pytest.importorskip(
-    "openclow.worker.tasks.instance_tasks",
+    "taghdev.worker.tasks.instance_tasks",
     reason="T036 (provision_instance) + T037 (teardown_instance) not landed yet",
 )
 

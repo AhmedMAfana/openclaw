@@ -100,7 +100,7 @@ All providers are configured in the database and instantiated via the factory pa
 ## Project Structure
 
 ```
-openclow/
+taghdev/
 ├── agents/                 # AI agent implementations
 │   ├── coder.py           # Coder agent (implements tasks)
 │   ├── reviewer.py        # Reviewer agent (code review)
@@ -148,7 +148,7 @@ openclow/
 │   ├── github_mcp.py        # GitHub MCP server
 │   └── docker_mcp.py        # Docker MCP server
 ├── setup/               # Interactive setup wizard
-│   └── __main__.py     # python -m openclow.setup
+│   └── __main__.py     # python -m taghdev.setup
 └── utils/               # Utilities
     └── logging.py       # Structured logging
 ```
@@ -175,7 +175,7 @@ docker compose run --rm migrate
 docker compose up -d
 
 # 6. Authenticate Claude (one-time)
-docker exec -it openclow-worker-1 claude login
+docker exec -it taghdev-worker-1 claude login
 ```
 
 ### Development Commands
@@ -197,10 +197,10 @@ docker compose run --rm migrate
 docker compose run --rm migrate alembic revision -m "description"
 
 # Access database
-docker compose exec postgres psql -U openclow -d openclow
+docker compose exec postgres psql -U taghdev -d taghdev
 
 # Access Redis
-docker compose exec redis redis-cli -a openclow
+docker compose exec redis redis-cli -a taghdev
 ```
 
 ### Setup Wizard
@@ -210,7 +210,7 @@ docker compose exec redis redis-cli -a openclow
 docker compose run --rm setup
 
 # Or run directly
-python -m openclow.setup
+python -m taghdev.setup
 ```
 
 ## Testing Instructions
@@ -305,7 +305,7 @@ await asyncio.create_subprocess_shell(
 Use structured logging via `get_logger()`:
 
 ```python
-from openclow.utils.logging import get_logger
+from taghdev.utils.logging import get_logger
 
 log = get_logger()
 
@@ -318,7 +318,7 @@ log.error("git.clone_failed", repo=repo_url, error=str(e))
 
 ```python
 # Use async_session context manager
-from openclow.models import async_session
+from taghdev.models import async_session
 
 async def get_project(project_id: int) -> Project | None:
     async with async_session() as session:
@@ -362,7 +362,7 @@ All subprocess calls must use `create_subprocess_exec` with argument lists, neve
 
 ### Docker Security
 
-- Worker runs as non-root user (`openclow`)
+- Worker runs as non-root user (`taghdev`)
 - Worker has access to host Docker socket (for project containers)
 - Each project runs in isolated Docker Compose network
 
@@ -434,7 +434,7 @@ Model Context Protocol (MCP) servers provide tools to Claude agents:
 
 ```bash
 # Check worker health
-docker compose exec worker python -c "import redis; r=redis.from_url('redis://:openclow@redis:6379/0'); print(r.ping())"
+docker compose exec worker python -c "import redis; r=redis.from_url('redis://:taghdev@redis:6379/0'); print(r.ping())"
 
 # Restart worker
 docker compose restart worker
@@ -447,17 +447,17 @@ docker compose restart worker
 docker compose ps postgres
 
 # Check connection
-docker compose exec api python -c "from openclow.models import engine; print(engine.url)"
+docker compose exec api python -c "from taghdev.models import engine; print(engine.url)"
 ```
 
 ### Claude Authentication
 
 ```bash
 # Check auth status
-docker exec -it openclow-worker-1 claude auth status
+docker exec -it taghdev-worker-1 claude auth status
 
 # Re-authenticate
-docker exec -it openclow-worker-1 claude login
+docker exec -it taghdev-worker-1 claude login
 ```
 
 ## Additional Resources

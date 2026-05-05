@@ -295,7 +295,7 @@ def _write_platform_config(category: str, key: str, value: dict, dry_run: bool) 
 
     cmd = [
         "docker", "compose", "exec", "-T", "postgres",
-        "psql", "-U", "openclow", "-d", "openclow",
+        "psql", "-U", "taghdev", "-d", "taghdev",
         "-c", sql,
     ]
     try:
@@ -326,7 +326,7 @@ def _update_project(name_eq_repo: str, dry_run: bool) -> bool:
     sql = f"UPDATE projects SET github_repo = '{repo}' WHERE name = '{name}';"
     proc = subprocess.run(
         ["docker", "compose", "exec", "-T", "postgres",
-         "psql", "-U", "openclow", "-d", "openclow", "-c", sql],
+         "psql", "-U", "taghdev", "-d", "taghdev", "-c", sql],
         cwd=REPO, capture_output=True, text=True, timeout=10,
     )
     if proc.returncode != 0:

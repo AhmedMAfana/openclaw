@@ -7,10 +7,10 @@ import sys
 
 async def seed_user(username: str = "testuser", password: str = "testpass123"):
     """Create or update a test user with web password."""
-    from openclow.models.user import User
-    from openclow.models.base import async_session
-    from openclow.models.project import Project
-    from openclow.api.web_auth import hash_password
+    from taghdev.models.user import User
+    from taghdev.models.base import async_session
+    from taghdev.models.project import Project
+    from taghdev.api.web_auth import hash_password
     from sqlalchemy import select
 
     async with async_session() as session:

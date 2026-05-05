@@ -8,7 +8,7 @@ greeting that the refactor is specifically eliminating.
 """
 from __future__ import annotations
 
-from openclow.api.routes.assistant import _build_system_prompt
+from taghdev.api.routes.assistant import _build_system_prompt
 
 
 _KW = dict(

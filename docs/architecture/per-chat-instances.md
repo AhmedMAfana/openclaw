@@ -106,12 +106,12 @@ create index idx_instances_chat on instances(chat_session_id);
 Notes:
 - `chat_session_id` UNIQUE: one chat → one instance. Reusing an existing chat after teardown creates a new row (archive-forward).
 - `slug` is the single stable identifier for DNS, compose project name, network name, volume prefix, and all audit logs. Formation: `inst-<8 hex chars>` picked from `uuid` at create time. Must be <20 chars to fit DNS label limits.
-- `workspace_path` is a *per-instance* worktree (not shared across chats), rooted at `/workspaces/inst-<slug>/`. The per-project clone cache at `/workspaces/_cache/<project>/` is still shared across instances of the same project — reuse [workspace_service.py:30–80](../../src/openclow/services/workspace_service.py#L30-L80) as-is, scoped to the instance ID instead of the task ID.
+- `workspace_path` is a *per-instance* worktree (not shared across chats), rooted at `/workspaces/inst-<slug>/`. The per-project clone cache at `/workspaces/_cache/<project>/` is still shared across instances of the same project — reuse [workspace_service.py:30–80](../../src/taghdev/services/workspace_service.py#L30-L80) as-is, scoped to the instance ID instead of the task ID.
 - `expires_at` is derived (`last_activity_at + idle_ttl`). Reaper queries are index-backed.
 
 ### 3.2 New: `instance_tunnels`
 
-Decided: tunnel state moves out of the worker-local `_active_processes` dict at [tunnel_service.py:29](../../src/openclow/services/tunnel_service.py#L29) and out of the overloaded `platform_config` rows. A dedicated table makes lifecycle explicit.
+Decided: tunnel state moves out of the worker-local `_active_processes` dict at [tunnel_service.py:29](../../src/taghdev/services/tunnel_service.py#L29) and out of the overloaded `platform_config` rows. A dedicated table makes lifecycle explicit.
 
 ```sql
 instance_tunnels (
@@ -347,9 +347,9 @@ When `TaskExecutor` starts a coding agent for a task on `inst-<slug>`, it spawns
 
 | MCP server      | Replaces / extends       | Launch argv                                                                    | Tools exposed                                                                 |
 |-----------------|--------------------------|--------------------------------------------------------------------------------|-------------------------------------------------------------------------------|
-| `instance_mcp`  | [docker_mcp.py](../../src/openclow/mcp_servers/docker_mcp.py) (new-mode only) | `--compose-project tagh-inst-<slug> --allowed-services app,web,node,db,redis` | `instance_exec(service, cmd)`, `instance_logs(service)`, `instance_restart(service)`, `instance_ps()`, `instance_health()` |
+| `instance_mcp`  | [docker_mcp.py](../../src/taghdev/mcp_servers/docker_mcp.py) (new-mode only) | `--compose-project tagh-inst-<slug> --allowed-services app,web,node,db,redis` | `instance_exec(service, cmd)`, `instance_logs(service)`, `instance_restart(service)`, `instance_ps()`, `instance_health()` |
 | `workspace_mcp` | generic Read/Write/Edit  | `--root /workspaces/inst-<slug>`                                               | `read_file(path)`, `write_file(path, content)`, `edit_file(...)`, `list_dir(path)`, `search(pattern)` |
-| `git_mcp`       | [git_mcp.py](../../src/openclow/mcp_servers/git_mcp.py) (extended)            | `--workspace /workspaces/inst-<slug> --branch <session_branch>`                | `git_status()`, `git_diff()`, `git_add(path)`, `git_commit(msg)`, `git_push()`, `git_log()` |
+| `git_mcp`       | [git_mcp.py](../../src/taghdev/mcp_servers/git_mcp.py) (extended)            | `--workspace /workspaces/inst-<slug> --branch <session_branch>`                | `git_status()`, `git_diff()`, `git_add(path)`, `git_commit(msg)`, `git_push()`, `git_log()` |
 
 Hard rules enforced at the MCP-server layer, not the agent layer:
 
@@ -366,14 +366,14 @@ The agent's visible MCP manifest describes tools with phrases like "…in the cu
 
 ### 7.5.3 Concurrency model
 
-- **Per-instance Redis lock** `openclow:instance:<slug>` — prevents two concurrent tasks in the same chat. Inherits the pattern at [workspace_service.py:36](../../src/openclow/services/workspace_service.py#L36); re-scoped from project to instance.
+- **Per-instance Redis lock** `taghdev:instance:<slug>` — prevents two concurrent tasks in the same chat. Inherits the pattern at [workspace_service.py:36](../../src/taghdev/services/workspace_service.py#L36); re-scoped from project to instance.
 - **Across different instances, full parallelism.** Separate compose projects, networks, volumes, and MCP processes. No shared mutable state.
 - **ARQ worker concurrency** (`max_jobs`) caps the fleet. Each concurrent task adds ~3 MCP subprocesses × ~30 MB RSS + one agent session; budget accordingly.
 - **MCP subprocesses carry `instance_slug` in their argv** so `ps` and container debugging make cross-contamination visible at a glance.
 
 ### 7.5.4 Audit trail
 
-Every MCP tool call is logged via [audit_service.py](../../src/openclow/services/audit_service.py) with fields `{instance_slug, chat_session_id, task_id, server, tool, args_hash, outcome}`. Two invariants the post-hoc auditor can assert:
+Every MCP tool call is logged via [audit_service.py](../../src/taghdev/services/audit_service.py) with fields `{instance_slug, chat_session_id, task_id, server, tool, args_hash, outcome}`. Two invariants the post-hoc auditor can assert:
 
 1. For any given `task_id`, every MCP call shares the same `instance_slug`.
 2. For any given `instance_slug`, every MCP call's `chat_session_id` is the one bound to that instance.
@@ -387,7 +387,7 @@ Violations of either imply a cross-tenancy bug and trip an alert.
 ### 7.5.6 What `TaskExecutor` actually does, in order
 
 1. Resolve `Instance` from `chat_session_id`; require `status='running'` (else wait or provision).
-2. Acquire Redis lock `openclow:instance:<slug>`.
+2. Acquire Redis lock `taghdev:instance:<slug>`.
 3. Spawn `instance_mcp`, `workspace_mcp`, `git_mcp` subprocesses with their bound argv.
 4. Start `claude_agent_sdk` session. MCP config lists *only* those three servers. No `Bash`, no system tool defaults.
 5. Run the task. Tool calls stream through audit service with `instance_slug`.
@@ -436,7 +436,7 @@ This is net-new code. The existing PAT path stays for legacy `mode="host"` and `
 
 ### 8.5 Log redaction
 
-Before any log reaches either (a) the chat UI, or (b) the LLM fallback envelope (§9), it passes through a redactor that masks: bearer tokens, AWS/GCP keys, CF tokens, SSH private keys, `.env`-style `KEY=value` pairs where key matches `/SECRET|TOKEN|PASSWORD|KEY|AUTH/i`. Implementation: extend the existing [audit_service.py](../../src/openclow/services/audit_service.py) with a redactor module; use it on both paths, not just one.
+Before any log reaches either (a) the chat UI, or (b) the LLM fallback envelope (§9), it passes through a redactor that masks: bearer tokens, AWS/GCP keys, CF tokens, SSH private keys, `.env`-style `KEY=value` pairs where key matches `/SECRET|TOKEN|PASSWORD|KEY|AUTH/i`. Implementation: extend the existing [audit_service.py](../../src/taghdev/services/audit_service.py) with a redactor module; use it on both paths, not just one.
 
 ### 8.6 Outbound network
 
@@ -489,7 +489,7 @@ LLM transport: decision deferred to the prior-art doc (LiteLLM vs direct `claude
 Four new internal services. Existing `bot_actions`, `workspace_service`, `tunnel_service`, `project_service` are reused.
 
 - **`InstanceService`** — `provision(chat_session_id) → Instance`, `touch(instance_id)`, `terminate(instance_id, reason)`, `get_or_resume(chat_session_id) → Instance`, `list_active() → [Instance]`. Owns the state machine (§4).
-- **`TunnelService` (rewritten)** — `provision(instance_id) → InstanceTunnel`, `destroy(instance_id)`, `health(instance_id) → bool`, `rotate_credentials(instance_id)`. Replaces the quick-tunnel paths in [tunnel_service.py](../../src/openclow/services/tunnel_service.py). The legacy quick-tunnel functions move to `legacy_tunnel_service.py` and are only called by host-mode code.
+- **`TunnelService` (rewritten)** — `provision(instance_id) → InstanceTunnel`, `destroy(instance_id)`, `health(instance_id) → bool`, `rotate_credentials(instance_id)`. Replaces the quick-tunnel paths in [tunnel_service.py](../../src/taghdev/services/tunnel_service.py). The legacy quick-tunnel functions move to `legacy_tunnel_service.py` and are only called by host-mode code.
 - **`CredentialsService`** — `github_push_token(instance_id) → str`, `heartbeat_secret(instance_id) → str`, `cf_token(instance_id) → str` (internal; CLI doesn't call). Handles rotation.
 - **`InactivityReaper`** — ARQ cron, see §6.
 
@@ -499,7 +499,7 @@ Task execution (`chat_task.py`, `orchestrator.py`) is re-plumbed to require an `
 
 ## 11. What stays legacy
 
-- **`mode="host"` and `mode="docker"` projects** continue to use the current bootstrap agent flow via [bootstrap.py](../../src/openclow/worker/tasks/bootstrap.py). No changes in this refactor. A one-line router at the top of `bootstrap_project` decides: new `mode="container"` → `InstanceService`, old modes → existing code.
+- **`mode="host"` and `mode="docker"` projects** continue to use the current bootstrap agent flow via [bootstrap.py](../../src/taghdev/worker/tasks/bootstrap.py). No changes in this refactor. A one-line router at the top of `bootstrap_project` decides: new `mode="container"` → `InstanceService`, old modes → existing code.
 - **Quick-tunnel service** (`cloudflared --url`) stays available as `legacy_tunnel_service.start_quick_tunnel(...)` for host-mode and for out-of-band admin testing. Not reachable from the new instance code path.
 - **Shared PAT** for git stays for legacy modes. GitHub App is the new-code default.
 
@@ -559,8 +559,8 @@ for the original Q1–Q5 discussion.
 |----|----------|------------|
 | **Q1** | Public preview URL is always a Cloudflare Tunnel hostname: `https://<slug>.<zone>` for the app, `https://hmr-<slug>.<zone>` for Vite HMR. No path-prefix routing, no per-user subdomains. | earlier mention of "custom domain per user" |
 | **Q2** | Per-user cap is **3 concurrent active instances**, operator-tunable via `platform_config(category='instance', key='per_user_cap')`. Read fresh on every `provision()` call — no worker restart required (T053). | "no cap" / "platform-wide cap only" |
-| **Q3** | Retention is **chat-lifetime**: deleting a chat synchronously tears down its instance, cascades `instances`/`instance_tunnels`/`tasks`/`web_chat_messages` via FK, deletes audit rows keyed by `instance_slug`, and enqueues a branch GC job. See [services/chat_session_service.py](../../src/openclow/services/chat_session_service.py). | "retain audit for 30 days after teardown" |
-| **Q4** | **Keep-running on upstream outage** (FR-027a). A CF / GitHub / DNS outage renders a non-blocking chat banner but MUST NOT flip `instances.status` to `failed`. The prober (`tunnel_health_check_cron`) records degradation in Redis at `openclow:instance_upstream:<slug>:<capability>` with a 180s TTL (3× its 60s cadence). | "flip to failed on any upstream error" |
+| **Q3** | Retention is **chat-lifetime**: deleting a chat synchronously tears down its instance, cascades `instances`/`instance_tunnels`/`tasks`/`web_chat_messages` via FK, deletes audit rows keyed by `instance_slug`, and enqueues a branch GC job. See [services/chat_session_service.py](../../src/taghdev/services/chat_session_service.py). | "retain audit for 30 days after teardown" |
+| **Q4** | **Keep-running on upstream outage** (FR-027a). A CF / GitHub / DNS outage renders a non-blocking chat banner but MUST NOT flip `instances.status` to `failed`. The prober (`tunnel_health_check_cron`) records degradation in Redis at `taghdev:instance_upstream:<slug>:<capability>` with a 180s TTL (3× its 60s cadence). | "flip to failed on any upstream error" |
 | **Q5** | **60-minute grace window** after the idle TTL. Running → idle transition notifies the chat; only after `grace_notification_at + 60min` does the reaper move idle → terminating. Any activity (chat message or projctl heartbeat) during the grace cancels the teardown. Window is operator-tunable via `platform_config(category='instance', key='idle_grace_minutes')` — also read fresh per sweep. | "immediate teardown at TTL" |
 
 ### Deltas from this document's original design

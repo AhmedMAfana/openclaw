@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from openclow.worker.tasks.instance_tasks import _detect_project_variant
+from taghdev.worker.tasks.instance_tasks import _detect_project_variant
 
 
 def _write_composer(tmp_path: Path, require: dict, require_dev: dict | None = None) -> Path:

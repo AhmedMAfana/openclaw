@@ -23,13 +23,13 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: openclow
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-openclow}
-      POSTGRES_DB: openclow
+      POSTGRES_USER: taghdev
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taghdev}
+      POSTGRES_DB: taghdev
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U openclow"]
+      test: ["CMD-SHELL", "pg_isready -U taghdev"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -38,11 +38,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD:-openclow}
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD:-taghdev}
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-openclow}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-taghdev}", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -52,7 +52,7 @@ services:
 
   bot:
     <<: *app
-    command: python -m openclow.bot.main
+    command: python -m taghdev.bot.main
     deploy:
       resources:
         limits:
@@ -69,12 +69,12 @@ services:
     command: >
       bash -c "
         if [ -z \"$$WEB_CHAT_JWT_SECRET\" ]; then
-          JWT_FILE=/home/openclow/.claude/.jwt_secret;
+          JWT_FILE=/home/taghdev/.claude/.jwt_secret;
           [ -f $$JWT_FILE ] || openssl rand -hex 32 > $$JWT_FILE;
           export WEB_CHAT_JWT_SECRET=$$(cat $$JWT_FILE);
           echo '[api] WEB_CHAT_JWT_SECRET loaded from volume';
         fi;
-        exec uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000
+        exec uvicorn taghdev.api.main:app --host 0.0.0.0 --port 8000
       "
     ports:
       - "8000:8000"
@@ -83,7 +83,7 @@ services:
       - ./src:/app/src
       - ./chat_frontend/dist:/app/chat_frontend/dist
       - workspaces:/workspaces          # inline agent needs project files
-      - claude_auth:/home/openclow/.claude  # Claude auth for claude_agent_sdk
+      - claude_auth:/home/taghdev/.claude  # Claude auth for claude_agent_sdk
       - /var/run/docker.sock:/var/run/docker.sock  # Docker MCP tools
       - ./auth.json:/app/auth.json:ro   # auth.json for project bootstrap
     deploy:
@@ -97,7 +97,7 @@ services:
       retries: 3
 
   # Runs once on every stack start as root to ensure named volumes have the
-  # right ownership before the worker (which runs as openclow) starts.
+  # right ownership before the worker (which runs as taghdev) starts.
   # Without this, a freshly-created Docker named volume is root-owned and
   # os.makedirs('/workspaces/_cache') fails with EACCES inside the worker.
   volume-init:
@@ -107,10 +107,10 @@ services:
       - workspaces:/workspaces
     command: >
       sh -c "
-        adduser -D -u 1000 openclow 2>/dev/null || true;
-        chown -R openclow:openclow /workspaces;
+        adduser -D -u 1000 taghdev 2>/dev/null || true;
+        chown -R taghdev:taghdev /workspaces;
         mkdir -p /workspaces/_cache;
-        chown openclow:openclow /workspaces/_cache;
+        chown taghdev:taghdev /workspaces/_cache;
         echo '[volume-init] /workspaces ready'
       "
     restart: "no"
@@ -132,7 +132,7 @@ services:
       ACTIVITY_LOG: /app/logs/activity.jsonl
     volumes:
       - workspaces:/workspaces
-      - claude_auth:/home/openclow/.claude
+      - claude_auth:/home/taghdev/.claude
       - activity_logs:/app/logs
       - /var/run/docker.sock:/var/run/docker.sock  # access to host Docker
       - ./src:/app/src  # live-reload: code changes without rebuild
@@ -143,7 +143,7 @@ services:
         limits:
           memory: 4G
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import redis; r=redis.from_url('redis://:openclow@redis:6379/0'); r.ping()\""]
+      test: ["CMD-SHELL", "python -c \"import redis; r=redis.from_url('redis://:taghdev@redis:6379/0'); r.ping()\""]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -170,7 +170,7 @@ services:
   # ======== Setup wizard (run interactively) ========
   setup:
     <<: *app
-    command: python -m openclow.setup
+    command: python -m taghdev.setup
     stdin_open: true
     tty: true
     restart: "no"

@@ -67,7 +67,7 @@ RUN npx playwright install --with-deps chromium
 RUN pip install --no-cache-dir playwright
 
 # Git identity
-RUN git config --system user.email "openclow@bot.local" \
+RUN git config --system user.email "taghdev@bot.local" \
     && git config --system user.name "TAGH Dev Bot"
 
 # Python app
@@ -79,16 +79,16 @@ RUN pip install --no-cache-dir -e .
 
 # Workspace + user
 RUN mkdir -p /workspaces \
-    && useradd -m -s /bin/bash openclow \
+    && useradd -m -s /bin/bash taghdev \
     && groupadd -f docker \
-    && usermod -aG docker openclow \
-    && mkdir -p /home/openclow/.claude \
-    && chown -R openclow:openclow /app /workspaces /home/openclow $NVM_DIR
+    && usermod -aG docker taghdev \
+    && mkdir -p /home/taghdev/.claude \
+    && chown -R taghdev:taghdev /app /workspaces /home/taghdev $NVM_DIR
 # Entrypoint that restores Claude credentials from volume
 COPY scripts/worker-entrypoint.sh /usr/local/bin/worker-entrypoint.sh
 RUN chmod +x /usr/local/bin/worker-entrypoint.sh
 
-USER openclow
+USER taghdev
 
 ENTRYPOINT ["worker-entrypoint.sh"]
-CMD ["arq", "openclow.worker.arq_app.WorkerSettings"]
+CMD ["arq", "taghdev.worker.arq_app.WorkerSettings"]

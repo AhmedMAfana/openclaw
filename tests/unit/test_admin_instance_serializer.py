@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from openclow.api.serializers.admin_instance import (
+from taghdev.api.serializers.admin_instance import (
     available_actions_for_status,
     to_audit_entry,
     to_detail,

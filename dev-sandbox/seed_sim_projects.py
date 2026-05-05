@@ -19,8 +19,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 async def main() -> int:
     from sqlalchemy import select
-    from openclow.models import Project, async_session
-    from openclow.services.config_service import set_host_setting
+    from taghdev.models import Project, async_session
+    from taghdev.services.config_service import set_host_setting
 
     # Point the "host.projects_base" at the sandbox's sample-apps dir so host_guard
     # considers the project_dir valid. In production this is set in the admin UI.
@@ -33,7 +33,7 @@ async def main() -> int:
     samples = [
         {
             "name": "sim-fastapi",
-            "github_repo": "openclow/sim-fastapi",
+            "github_repo": "taghdev/sim-fastapi",
             "default_branch": "main",
             "description": "[SANDBOX] FastAPI starter — port 8101",
             "tech_stack": "Python/FastAPI",

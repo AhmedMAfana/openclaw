@@ -3,7 +3,7 @@
 Race shape: a user taps "End session" at the exact moment a next
 message is coming in. The correct behaviour:
 
-1. The first of the two to acquire ``openclow:instance:<slug>`` wins
+1. The first of the two to acquire ``taghdev:instance:<slug>`` wins
    (via the Redis lock in ``instance_lock.py``).
 2. If ``terminate`` wins: the row flips to ``terminating`` and the
    inbound message sees the non-running status, waits for teardown to

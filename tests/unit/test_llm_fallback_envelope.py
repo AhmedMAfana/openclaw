@@ -23,7 +23,7 @@ def test_cap_tail_preserves_tail_with_marker() -> None:
     """``_cap_tail`` truncates the head and leaves a marker line."""
     # The helper lives inside the endpoint closure; import via the
     # internal path used by the endpoint itself.
-    from openclow.api.routes import instances as _inst
+    from taghdev.api.routes import instances as _inst
     # `_cap_tail` is a local helper inside `explain` — extract by
     # rebuilding its logic in a test-local shim. This keeps the helper
     # private to the handler while still asserting its shape.
@@ -43,7 +43,7 @@ def test_cap_tail_preserves_tail_with_marker() -> None:
 
 def test_redactor_masks_bearer_tokens() -> None:
     """Smoke: the redactor the endpoint uses does mask bearer tokens."""
-    from openclow.services.audit_service import redact
+    from taghdev.services.audit_service import redact
     raw = (
         "GET /api HTTP/1.1\nAuthorization: Bearer sk_live_abcdef0123456789\n"
     )

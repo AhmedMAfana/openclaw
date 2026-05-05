@@ -10,7 +10,7 @@ Three observations:
    tagh-inst-<slug>-cloudflared rm /etc/cloudflared/creds.json``).
 2. Within 60 s the ``tunnel_health_check_cron`` (T083) detects the
    failure and writes the Redis state key
-   ``openclow:instance_upstream:<slug>:preview_url``. The next chat
+   ``taghdev:instance_upstream:<slug>:preview_url``. The next chat
    message surfaces the ``instance_upstream_degraded`` data event
    (T084). Assert the chat banner text includes "preview URL
    temporarily unavailable" and ``instances.status == 'running'``
@@ -39,6 +39,6 @@ async def test_cf_outage_shows_banner_but_keeps_running() -> None:
         "Pending fixture factory + a real provisioned instance. "
         "Assertion shape documented in the module docstring. "
         "The state lives in Redis at "
-        "openclow:instance_upstream:<slug>:preview_url; verify via "
-        "openclow.services.instance_service.load_upstream_state."
+        "taghdev:instance_upstream:<slug>:preview_url; verify via "
+        "taghdev.services.instance_service.load_upstream_state."
     )

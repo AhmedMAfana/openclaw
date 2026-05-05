@@ -28,12 +28,12 @@ At minimum the following keys must be set before `docker compose up`:
 
 ```ini
 # Database — matches docker-compose.yml defaults
-POSTGRES_PASSWORD=openclow
-DATABASE_URL=postgresql+asyncpg://openclow:openclow@postgres:5432/openclow
+POSTGRES_PASSWORD=taghdev
+DATABASE_URL=postgresql+asyncpg://taghdev:taghdev@postgres:5432/taghdev
 
 # Redis — matches docker-compose.yml defaults
-REDIS_PASSWORD=openclow
-REDIS_URL=redis://:openclow@redis:6379/0
+REDIS_PASSWORD=taghdev
+REDIS_URL=redis://:taghdev@redis:6379/0
 
 # Web-chat auth (any 64-char hex; the api container will mint one on
 # first boot if WEB_CHAT_JWT_SECRET is empty)
@@ -75,7 +75,7 @@ docker compose run --rm api python -m scripts.seed_tagh_fre
 Verify:
 
 ```bash
-docker compose exec postgres psql -U openclow -c \
+docker compose exec postgres psql -U taghdev -c \
   "SELECT id, name, github_repo, mode FROM projects WHERE name='tagh-fre';"
 ```
 

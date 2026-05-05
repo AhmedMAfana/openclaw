@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from openclow.api import main as api_main
+from taghdev.api import main as api_main
 
 
 def _route_methods(path: str) -> set[str]:
@@ -34,22 +34,22 @@ def _route_response_model(path: str, method: str):
 
 
 def test_reprovision_response_model():
-    from openclow.api.schemas.admin_instances import ReprovisionResponse
+    from taghdev.api.schemas.admin_instances import ReprovisionResponse
     assert _route_response_model("/api/admin/instances/{slug}/reprovision", "POST") is ReprovisionResponse
 
 
 def test_rotate_token_response_model():
-    from openclow.api.schemas.admin_instances import RotateTokenResponse
+    from taghdev.api.schemas.admin_instances import RotateTokenResponse
     assert _route_response_model("/api/admin/instances/{slug}/rotate-token", "POST") is RotateTokenResponse
 
 
 def test_extend_expiry_response_model():
-    from openclow.api.schemas.admin_instances import ExtendExpiryResponse
+    from taghdev.api.schemas.admin_instances import ExtendExpiryResponse
     assert _route_response_model("/api/admin/instances/{slug}/extend-expiry", "POST") is ExtendExpiryResponse
 
 
 def test_extend_expiry_request_rejects_invalid_hours():
-    from openclow.api.schemas.admin_instances import ExtendExpiryRequest
+    from taghdev.api.schemas.admin_instances import ExtendExpiryRequest
 
     # Allowed values
     for h in (1, 4, 24):
@@ -61,7 +61,7 @@ def test_extend_expiry_request_rejects_invalid_hours():
 
 
 def test_reprovision_request_requires_confirm():
-    from openclow.api.schemas.admin_instances import ReprovisionRequest
+    from taghdev.api.schemas.admin_instances import ReprovisionRequest
 
     with pytest.raises(Exception):
         ReprovisionRequest()  # type: ignore[call-arg]
@@ -70,7 +70,7 @@ def test_reprovision_request_requires_confirm():
 def test_rotate_token_takes_no_request_body():
     """Per contract: POST /rotate-token has empty body."""
     import inspect
-    from openclow.api.routes.admin_instances import admin_rotate_token
+    from taghdev.api.routes.admin_instances import admin_rotate_token
 
     sig = inspect.signature(admin_rotate_token)
     # Only `slug` (path) and `user` (dep) — no body parameter.

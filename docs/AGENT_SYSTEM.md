@@ -157,12 +157,12 @@ User sends task via Telegram
 | `mcp-server-git` | Coder, Reviewer | Git status, diff, add, commit, branch |
 | `@playwright/mcp` | Coder | Visual testing — browser navigation, clicks, screenshots |
 | `docker` (custom) | Coder, Onboarding, Doctor | List containers, read logs, restart, exec, compose up/down |
-| `github-openclow` (custom) | Coder, Onboarding | List repos, check access, repo info, list PRs/branches |
+| `github-taghdev` (custom) | Coder, Onboarding | List repos, check access, repo info, list PRs/branches |
 | `project-info` (custom) | Coder | Read project config from DB |
 
 ### Custom MCP Tools
 
-**Docker MCP (`openclow.mcp_servers.docker_mcp`):**
+**Docker MCP (`taghdev.mcp_servers.docker_mcp`):**
 - `list_containers` — list running containers, filter by project
 - `container_logs` — read logs from any container
 - `container_health` — check health status
@@ -172,7 +172,7 @@ User sends task via Telegram
 - `compose_down` — stop a Docker Compose stack
 - `compose_ps` — list containers in a stack
 
-**GitHub MCP (`openclow.mcp_servers.github_mcp`):**
+**GitHub MCP (`taghdev.mcp_servers.github_mcp`):**
 - `list_repos` — list repos the user has access to
 - `repo_info` — get repo details (languages, default branch)
 - `list_branches` — list branches
@@ -189,7 +189,7 @@ Projects run as Docker containers. The worker container has Docker socket access
 Worker Container
     ├── Docker socket mounted (/var/run/docker.sock)
     ├── Clones project repo to /workspaces/task-xxx/
-    ├── Runs: docker compose -p openclow-<project>-<task> up -d
+    ├── Runs: docker compose -p taghdev-<project>-<task> up -d
     │   ├── <project>-app    (PHP/Laravel)
     │   ├── <project>-db     (MySQL/Postgres)
     │   └── <project>-redis  (Redis)

@@ -3,7 +3,7 @@ services:
   bot:
     command: >
       bash -c "
-        exec watchfiles --ignore-paths __pycache__,*.egg-info,.pytest_cache --grace-period 3 'python -m openclow.bot.main' src/
+        exec watchfiles --ignore-paths __pycache__,*.egg-info,.pytest_cache --grace-period 3 'python -m taghdev.bot.main' src/
       "
     volumes:
       - ./src:/app/src:cached
@@ -14,12 +14,12 @@ services:
     command: >
       bash -c "
         if [ -z \"$$WEB_CHAT_JWT_SECRET\" ]; then
-          JWT_FILE=/home/openclow/.claude/.jwt_secret;
+          JWT_FILE=/home/taghdev/.claude/.jwt_secret;
           [ -f $$JWT_FILE ] || openssl rand -hex 32 > $$JWT_FILE;
           export WEB_CHAT_JWT_SECRET=$$(cat $$JWT_FILE);
           echo '[api] WEB_CHAT_JWT_SECRET loaded from volume';
         fi;
-        exec uvicorn openclow.api.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir src/openclow/api --reload-dir src/openclow/models --timeout-graceful-shutdown 5
+        exec uvicorn taghdev.api.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir src/taghdev/api --reload-dir src/taghdev/models --timeout-graceful-shutdown 5
       "
     volumes:
       - ./src:/app/src:cached
@@ -43,15 +43,15 @@ services:
     command: >
       bash -c "
         chmod 666 /var/run/docker.sock 2>/dev/null || true;
-        python3 -c 'import asyncio; from openclow.services.docker_guard import _detect_host_workspace_path; asyncio.run(_detect_host_workspace_path())' 2>/dev/null || true;
-        exec su -l openclow -c 'watchfiles --filter python --ignore-paths __pycache__,*.egg-info,.pytest_cache --grace-period 3 \"arq openclow.worker.arq_app.WorkerSettings\" /app/src/openclow'
+        python3 -c 'import asyncio; from taghdev.services.docker_guard import _detect_host_workspace_path; asyncio.run(_detect_host_workspace_path())' 2>/dev/null || true;
+        exec su -l taghdev -c 'watchfiles --filter python --ignore-paths __pycache__,*.egg-info,.pytest_cache --grace-period 3 \"arq taghdev.worker.arq_app.WorkerSettings\" /app/src/taghdev'
       "
     user: root
     volumes:
       - ./src:/app/src:cached
       - ./workspaces_dev:/workspaces
       - ./dev-sandbox:/app/dev-sandbox:cached
-      - claude_auth:/home/openclow/.claude
+      - claude_auth:/home/taghdev/.claude
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:

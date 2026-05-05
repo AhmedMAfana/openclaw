@@ -62,7 +62,7 @@ For each failing check, drill into the findings and recommend concrete file edit
 Common patterns:
 
 - **`stream_event_contract` → frontend handler missing**: point at `chat_frontend/src/App.tsx:120-128` (or wherever `parseStream` lives) and reference Phase 10 task IDs (T100–T106). Show the exact `case` arm template.
-- **`arq_job_contract` → name not registered**: point at `src/openclow/worker/arq_app.py::_load_functions` and quote the missing function name.
+- **`arq_job_contract` → name not registered**: point at `src/taghdev/worker/arq_app.py::_load_functions` and quote the missing function name.
 - **`no_ambient_args`** failure: point at the offending `@mcp.tool` definition and show how to reshape the args without an ambient identifier.
 - **`compose_no_host_ports`** failure: point at the `ports:` line in the compose template and recommend moving ingress to the cloudflared sidecar.
 - **`redactor_coverage`** failure: point at the unguarded `controller.add_data` site and show the `redact()` wrap.

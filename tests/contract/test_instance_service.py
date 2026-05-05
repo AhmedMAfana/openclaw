@@ -28,9 +28,9 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.sql.elements import BooleanClauseList
 
-from openclow.models.instance import Instance, InstanceStatus
-from openclow.models.web_chat import WebChatSession
-from openclow.services.instance_service import (
+from taghdev.models.instance import Instance, InstanceStatus
+from taghdev.models.web_chat import WebChatSession
+from taghdev.services.instance_service import (
     ACTIVE_STATUSES,
     ChatNotFound,
     HeartbeatSignals,

@@ -4,7 +4,7 @@ Constitution Principle IX (Async-Python Correctness): "Every external
 call (HTTP, cloudflared, Docker CLI, LLM, git) carries an explicit
 timeout; 'no timeout' is a bug, not a default."
 
-Walks every ``.py`` under ``src/openclow/services/`` for
+Walks every ``.py`` under ``src/taghdev/services/`` for
 ``httpx.AsyncClient(...)`` constructions and asserts each one passes
 a ``timeout=`` kwarg (or sets ``DEFAULT_TIMEOUT`` via the constant
 named ``DEFAULT_TIMEOUT``, which the project uses everywhere).
@@ -23,7 +23,7 @@ from scripts.fitness import Finding, FitnessResult, Severity
 
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-SERVICES = REPO / "src" / "openclow" / "services"
+SERVICES = REPO / "src" / "taghdev" / "services"
 
 
 def check() -> FitnessResult:

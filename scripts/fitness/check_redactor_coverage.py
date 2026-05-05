@@ -26,7 +26,7 @@ from scripts.fitness import Finding, FitnessResult, Severity
 
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-ASSISTANT = REPO / "src" / "openclow" / "api" / "routes" / "assistant.py"
+ASSISTANT = REPO / "src" / "taghdev" / "api" / "routes" / "assistant.py"
 
 # Names treated as the redactor function. `redact` from audit_service
 # is the canonical one; aliases (e.g. `_redact_chat`) are accepted.

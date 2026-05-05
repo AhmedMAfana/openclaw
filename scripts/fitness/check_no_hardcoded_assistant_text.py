@@ -35,7 +35,7 @@ from scripts.fitness import Finding, FitnessResult, Severity
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 TARGETS = (
-    REPO / "src" / "openclow" / "api" / "routes" / "assistant.py",
+    REPO / "src" / "taghdev" / "api" / "routes" / "assistant.py",
 )
 
 

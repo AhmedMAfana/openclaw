@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from openclow.api import main as api_main
+from taghdev.api import main as api_main
 
 
 def _routes_by_path() -> dict[str, list]:
@@ -51,7 +51,7 @@ def test_audit_route_registered():
 def test_response_models_match_contract():
     """Ensure each endpoint declares the expected response_model class on its
     FastAPI route registration."""
-    from openclow.api.schemas.admin_instances import (
+    from taghdev.api.schemas.admin_instances import (
         InstancesListResponse,
         StatusCounts,
         InstanceDetail,
@@ -81,7 +81,7 @@ def test_response_models_match_contract():
 def test_status_filter_validation_raises_400_on_unknown():
     """Unknown status name should be a 400 with code=validation_error."""
     from fastapi import HTTPException
-    from openclow.api.routes.admin_instances import _parse_status_param
+    from taghdev.api.routes.admin_instances import _parse_status_param
 
     with pytest.raises(HTTPException) as ex:
         _parse_status_param(["bogus"])
@@ -90,14 +90,14 @@ def test_status_filter_validation_raises_400_on_unknown():
 
 
 def test_status_filter_default_is_active_set():
-    from openclow.api.routes.admin_instances import _parse_status_param
+    from taghdev.api.routes.admin_instances import _parse_status_param
 
     out = _parse_status_param(None)
     assert out == {"provisioning", "running", "idle", "terminating"}
 
 
 def test_status_filter_accepts_comma_separated_value():
-    from openclow.api.routes.admin_instances import _parse_status_param
+    from taghdev.api.routes.admin_instances import _parse_status_param
 
     out = _parse_status_param(["failed,destroyed"])
     assert out == {"failed", "destroyed"}

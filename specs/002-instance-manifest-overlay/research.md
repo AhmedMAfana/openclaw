@@ -57,7 +57,7 @@ This file resolves every Technical-Context unknown the plan flagged. Each sectio
 
 ## R3 — PR-open implementation path
 
-**Decision**: Reuse `src/openclow/providers/git/github.py::GitHubProvider.create_pr` (existing — implements the Provider abstraction's `create_pr(repo, branch, base, title, body)` via the `gh` CLI under the hood). Add a thin adapter `services/github_pr_service.py::open_manifest_pr(repo, manifest_yaml)` that:
+**Decision**: Reuse `src/taghdev/providers/git/github.py::GitHubProvider.create_pr` (existing — implements the Provider abstraction's `create_pr(repo, branch, base, title, body)` via the `gh` CLI under the hood). Add a thin adapter `services/github_pr_service.py::open_manifest_pr(repo, manifest_yaml)` that:
 
 1. Generates a deterministic branch name `tagh/manifest-init`.
 2. In the per-instance worktree, creates that branch off the project's default branch, writes `.tagh/instance.yml` with the inferred manifest content, commits with message `chore: add TAGH instance manifest`, pushes the branch (using the existing per-instance PAT).
@@ -171,7 +171,7 @@ None. Every Technical-Context item is resolved. The plan + this research are the
 
 - [docs/architecture/per-chat-instances.md](../../docs/architecture/per-chat-instances.md) — original audit + per-chat-instances arch doc; this feature is a follow-up that replaces the compose-template subsystem inside that arch.
 - [.specify/memory/constitution.md](../../.specify/memory/constitution.md) — the nine principles checked against in plan.md.
-- [src/openclow/providers/git/github.py](../../src/openclow/providers/git/github.py) — existing GitHubProvider; reused for PR-open.
-- [src/openclow/services/credentials_service.py](../../src/openclow/services/credentials_service.py) — existing per-instance PAT minting; reused for PR auth.
+- [src/taghdev/providers/git/github.py](../../src/taghdev/providers/git/github.py) — existing GitHubProvider; reused for PR-open.
+- [src/taghdev/services/credentials_service.py](../../src/taghdev/services/credentials_service.py) — existing per-instance PAT minting; reused for PR auth.
 - [scripts/fitness/](../../scripts/fitness/) — existing fitness-check directory; three new checks added under it.
 - [artifacts/e2e-20260426-200532/](../../artifacts/e2e-20260426-200532/) — empirical evidence that the prior flow is broken (the `tagh/laravel-vue-app:latest` image gap that motivated this feature).

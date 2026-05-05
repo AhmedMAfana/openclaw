@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import inspect
 
-from openclow.api.routes import assistant as assistant_module
+from taghdev.api.routes import assistant as assistant_module
 
 
 def test_short_circuit_branch_exists_in_assistant_endpoint():

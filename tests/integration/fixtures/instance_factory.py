@@ -32,7 +32,7 @@ from typing import AsyncIterator
 
 from sqlalchemy import delete
 
-from openclow.models import (
+from taghdev.models import (
     Instance,
     PlatformConfig,
     Project,
@@ -40,9 +40,9 @@ from openclow.models import (
     WebChatSession,
     async_session,
 )
-from openclow.models.instance import InstanceStatus
-from openclow.models.instance_tunnel import InstanceTunnel
-from openclow.services.credentials_service import CredentialsService
+from taghdev.models.instance import InstanceStatus
+from taghdev.models.instance_tunnel import InstanceTunnel
+from taghdev.services.credentials_service import CredentialsService
 
 
 def _env_enabled() -> bool:

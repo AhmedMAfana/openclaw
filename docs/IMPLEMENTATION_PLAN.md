@@ -48,7 +48,7 @@
 
 ### Files Created (60+ files)
 ```
-src/openclow/
+src/taghdev/
 ├── settings.py                        ✅ bootstrap config from .env
 ├── models/
 │   ├── base.py                        ✅ SQLAlchemy async engine
@@ -204,22 +204,22 @@ src/openclow/
 
 ┌─── CUSTOM (we built) ──────────────────────────────────────┐
 │                                                              │
-│  Docker MCP (openclow.mcp_servers.docker_mcp)                │
+│  Docker MCP (taghdev.mcp_servers.docker_mcp)                │
 │  ├── list_containers, container_logs, container_health       │
 │  ├── restart_container, docker_exec                          │
 │  ├── compose_up, compose_down, compose_ps                    │
 │  └── Used by: Coder, Chat, Onboarding, Doctor                │
 │                                                              │
-│  GitHub MCP (openclow.mcp_servers.github_mcp)                │
+│  GitHub MCP (taghdev.mcp_servers.github_mcp)                │
 │  ├── list_repos, repo_info, list_branches, list_prs          │
 │  ├── check_repo_access                                       │
 │  └── Used by: Chat, Onboarding                               │
 │                                                              │
-│  Project Info MCP (openclow.mcp_servers.project_info)        │
+│  Project Info MCP (taghdev.mcp_servers.project_info)        │
 │  ├── get_project_info, get_coding_conventions                │
 │  └── Used by: Coder, Chat                                    │
 │                                                              │
-│  Actions MCP (openclow.mcp_servers.actions_mcp) ❌ NOT BUILT │
+│  Actions MCP (taghdev.mcp_servers.actions_mcp) ❌ NOT BUILT │
 │  ├── trigger_task, trigger_addproject                         │
 │  ├── list_projects, list_tasks, system_status                │
 │  └── Used by: Chat (enables natural language → actions)      │
@@ -315,10 +315,10 @@ RULES:
 
 ### Files to Build
 ```
-src/openclow/mcp_servers/actions_mcp.py    — trigger_task, list_projects, etc.
-src/openclow/services/ai_chat.py           — wraps Claude for chat responses
-src/openclow/services/transcription.py     — faster-whisper voice → text
-src/openclow/bot/handlers/chat.py          — catch-all text + voice handler
+src/taghdev/mcp_servers/actions_mcp.py    — trigger_task, list_projects, etc.
+src/taghdev/services/ai_chat.py           — wraps Claude for chat responses
+src/taghdev/services/transcription.py     — faster-whisper voice → text
+src/taghdev/bot/handlers/chat.py          — catch-all text + voice handler
 ```
 
 ---
@@ -436,7 +436,7 @@ worker:
   volumes:
     - /var/run/docker.sock:/var/run/docker.sock
     - workspaces:/workspaces
-    - claude_auth:/home/openclow/.claude
+    - claude_auth:/home/taghdev/.claude
 ```
 
 ### Project Model Fields
@@ -523,7 +523,7 @@ Or via Telegram: /adduser, /addproject
 ### Adding a New Provider
 ```
 To add Slack support:
-1. Create src/openclow/providers/chat/slack.py
+1. Create src/taghdev/providers/chat/slack.py
 2. Implement ChatProvider abstract class
 3. Decorate with @register_chat("slack")
 4. Done — system auto-discovers it

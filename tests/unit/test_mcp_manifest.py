@@ -18,15 +18,15 @@ from __future__ import annotations
 import pytest
 
 _instance_mcp = pytest.importorskip(
-    "openclow.mcp_servers.instance_mcp",
+    "taghdev.mcp_servers.instance_mcp",
     reason="T038 instance_mcp not landed yet",
 )
 _workspace_mcp = pytest.importorskip(
-    "openclow.mcp_servers.workspace_mcp",
+    "taghdev.mcp_servers.workspace_mcp",
     reason="T039 workspace_mcp not landed yet",
 )
 _git_mcp = pytest.importorskip(
-    "openclow.mcp_servers.git_mcp",
+    "taghdev.mcp_servers.git_mcp",
     reason="T040 git_mcp extension not landed yet",
 )
 

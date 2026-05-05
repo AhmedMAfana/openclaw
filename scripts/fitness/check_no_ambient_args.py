@@ -23,7 +23,7 @@ from scripts.fitness import Finding, FitnessResult, Severity
 
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-MCP_DIR = REPO / "src" / "openclow" / "mcp_servers"
+MCP_DIR = REPO / "src" / "taghdev" / "mcp_servers"
 
 _FORBIDDEN = ("instance", "project", "workspace", "container")
 # These tool files are NOT scoped to a single instance — they're the

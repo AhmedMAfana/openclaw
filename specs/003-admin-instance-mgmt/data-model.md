@@ -9,7 +9,7 @@ The feature is overwhelmingly **read-only over existing models**. There is exact
 
 ## 1. Reused entities (no schema changes)
 
-### 1.1 `Instance` — [src/openclow/models/instance.py:66-123](src/openclow/models/instance.py#L66-L123)
+### 1.1 `Instance` — [src/taghdev/models/instance.py:66-123](src/taghdev/models/instance.py#L66-L123)
 
 Source of truth for everything the admin sees in the list and detail views.
 
@@ -28,7 +28,7 @@ Source of truth for everything the admin sees in the list and detail views.
 
 **No write paths added against this model from the admin UI** — every state mutation goes through `InstanceService` methods (Principle VI: idempotent lifecycle owned by the service).
 
-### 1.2 `AuditLog` — [src/openclow/models/audit.py:16-62](src/openclow/models/audit.py#L16-L62)
+### 1.2 `AuditLog` — [src/taghdev/models/audit.py:16-62](src/taghdev/models/audit.py#L16-L62)
 
 Reused for every admin-initiated action (FR-024, FR-025).
 
@@ -47,7 +47,7 @@ Reused for every admin-initiated action (FR-024, FR-025).
 
 **No schema change**; no migration for audit.
 
-### 1.3 `User` — [src/openclow/models/user.py](src/openclow/models/user.py)
+### 1.3 `User` — [src/taghdev/models/user.py](src/taghdev/models/user.py)
 
 Used only via the existing `_require_admin(user)` guard. Read fields: `id`, `name`, `is_admin`. The list view's "owning user" column dereferences `Instance → ChatSession → User` (existing relationship chain).
 
@@ -63,7 +63,7 @@ Read-only joins for list-view display fields (owner name, project name) and the 
 
 Add `'admin_forced'` to:
 1. The PostgreSQL CHECK constraint `ck_instances_terminated_reason` on `instances.terminated_reason`.
-2. The Python `TerminatedReason` enum in [src/openclow/models/instance.py](src/openclow/models/instance.py).
+2. The Python `TerminatedReason` enum in [src/taghdev/models/instance.py](src/taghdev/models/instance.py).
 
 **Justification**: FR-013 mandates that admin-initiated terminations are distinguishable from idle-reaper, user-request, project-deleted, chat-deleted, and failure-driven terminations in DB rows and analytics queries. This is the only new persisted vocabulary the feature needs.
 
@@ -101,7 +101,7 @@ Returned by `GET /api/admin/instances`.
 Returned by `GET /api/admin/instances/<slug>`. Aggregates:
 - All `InstanceListRow` fields plus full Instance row (minus secrets — see §4).
 - `transitions: list[StatusTransition]` — derived from existing audit/log substrate; one entry per `provisioning|running|idle|terminating|destroyed|failed` transition with `at: ISO8601` and `note: str`.
-- `tunnel: { url, health, last_probe_at, degradation_history: list[DegradationEvent] }` — pulled live from Redis upstream-state at `openclow:instance_upstream:<slug>:*`.
+- `tunnel: { url, health, last_probe_at, degradation_history: list[DegradationEvent] }` — pulled live from Redis upstream-state at `taghdev:instance_upstream:<slug>:*`.
 - `failure: { code: str, message: str } | null` — surfaces `failure_code`+`failure_message` when status is `failed`.
 - `chat: { id, deleted: bool, link: str }` — graceful "deleted" placeholder when `chat_session_id` is null.
 - `project: { id, name, deleted: bool, link: str }`.
@@ -204,7 +204,7 @@ No new indexes required. Existing coverage:
 Explicitly NOT added by 003:
 - New `admin_action_log` table (rejected — `AuditLog` covers it).
 - Any modification to `ChatSession`, `Project`, `User`, `Tunnel`, `Task` schemas.
-- New Redis keys (the existing `openclow:instance_upstream:<slug>:<cap>` keys are read-only-consumed by the detail view).
+- New Redis keys (the existing `taghdev:instance_upstream:<slug>:<cap>` keys are read-only-consumed by the detail view).
 - New ARQ queues or job registrations (admin actions enqueue *existing* jobs: `teardown_instance`, `provision_instance`, `rotate_github_token`).
 
 This keeps the feature's blast radius minimal and aligned with Principle VI (state owned by the service layer, not the UI).

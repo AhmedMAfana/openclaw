@@ -19,7 +19,7 @@ One new sibling code path (`mode="host"`) reusing everything that works in Docke
 
 ## 1. Data model changes
 
-**Edit** [src/openclow/models/project.py:9-29](src/openclow/models/project.py#L9-L29) — add host-mode columns (all nullable/defaulted so existing Docker rows are unaffected):
+**Edit** [src/taghdev/models/project.py:9-29](src/taghdev/models/project.py#L9-L29) — add host-mode columns (all nullable/defaulted so existing Docker rows are unaffected):
 
 ```python
 mode:               Mapped[str] = mapped_column(String(10), default="docker", server_default="docker")
@@ -42,7 +42,7 @@ Keep `is_dockerized`, `docker_compose_file`, `app_container_name`, `app_port`, `
 
 Projects base dir is **not an env var** — it's a dashboard setting saved in the existing `PlatformConfig` table so it can be changed per-deployment without a redeploy.
 
-**Edit** [src/openclow/services/settings_service.py](src/openclow/services/settings_service.py) — add keys:
+**Edit** [src/taghdev/services/settings_service.py](src/taghdev/services/settings_service.py) — add keys:
 - `host.projects_base` — absolute path; default value computed at runtime: `../` relative to the TAGH Dev repo (simulation) OR `/srv/projects` (production).
 - `host.mode_default` — `"docker"` | `"host"` (global default applied when onboarding a new project; can be overridden per-project).
 - `host.auto_clone_default` — bool.
@@ -55,7 +55,7 @@ Projects base dir is **not an env var** — it's a dashboard setting saved in th
 
 ## 3. New MCP server: `host_mcp`
 
-**New file** `src/openclow/mcp_servers/host_mcp.py` — modeled on [src/openclow/mcp_servers/docker_mcp.py](src/openclow/mcp_servers/docker_mcp.py). Tools:
+**New file** `src/taghdev/mcp_servers/host_mcp.py` — modeled on [src/taghdev/mcp_servers/docker_mcp.py](src/taghdev/mcp_servers/docker_mcp.py). Tools:
 
 | Tool | Signature | Purpose |
 |------|-----------|---------|
@@ -72,27 +72,27 @@ Projects base dir is **not an env var** — it's a dashboard setting saved in th
 | `host_stop_app` | `(project_dir, stop_command="")` | Run stop command or fall back to `pm2 stop` / `systemctl stop` based on `process_manager` |
 | `host_service_status` | `(unit)` | `systemctl status` / `pm2 status` auto-detect |
 
-**New file** `src/openclow/services/host_guard.py` — mirrors [src/openclow/services/docker_guard.py](src/openclow/services/docker_guard.py):
+**New file** `src/taghdev/services/host_guard.py` — mirrors [src/taghdev/services/docker_guard.py](src/taghdev/services/docker_guard.py):
 - Allowlist: `git`, `npm`, `yarn`, `pnpm`, `pip`, `pip3`, `python`, `python3`, `composer`, `php`, `node`, `bundle`, `rails`, `go`, `mvn`, `gradle`, `make`, `pm2`, `systemctl`, `journalctl`, `curl`, `wget`, `ls`, `cat`, `head`, `tail`, `grep`, `find`, `ps`, `ss`, `lsof`, `pwd`, `which`, `test`.
 - Blocklist: `rm -rf /`, fork-bombs, `dd if=`, `mkfs`, `shutdown`, `reboot`, `sudo su`, subshell-to-shell pipes, writes under `/etc/` `/boot/` `/root/`.
 - Confines writes to under `settings.host_projects_base` (realpath-resolved).
-- Uses the existing [audit_service](src/openclow/services/audit_service.py) `log_action` / `log_blocked`.
+- Uses the existing [audit_service](src/taghdev/services/audit_service.py) `log_action` / `log_blocked`.
 
-**Edit** [src/openclow/providers/llm/claude.py:35-44](src/openclow/providers/llm/claude.py#L35-L44) — add factory:
+**Edit** [src/taghdev/providers/llm/claude.py:35-44](src/taghdev/providers/llm/claude.py#L35-L44) — add factory:
 ```python
 def _mcp_host() -> dict:
-    return {"command": "python", "args": ["-m", "openclow.mcp_servers.host_mcp"]}
+    return {"command": "python", "args": ["-m", "taghdev.mcp_servers.host_mcp"]}
 ```
 
-**Edit** [src/openclow/worker/tasks/_agent_base.py:11-83](src/openclow/worker/tasks/_agent_base.py#L11-L83) — extend `describe_tool` for `host_*` names (📥 git pull, 📖 install guide, 🖥 run, 🌐 curl, 📜 logs, ▶️ start, ⏹ stop).
+**Edit** [src/taghdev/worker/tasks/_agent_base.py:11-83](src/taghdev/worker/tasks/_agent_base.py#L11-L83) — extend `describe_tool` for `host_*` names (📥 git pull, 📖 install guide, 🖥 run, 🌐 curl, 📜 logs, ▶️ start, ⏹ stop).
 
 ---
 
 ## 4. Onboarding flow (host mode)
 
-**Edit** [src/openclow/agents/onboarding.py](src/openclow/agents/onboarding.py) — add `HOST_ONBOARDING_PROMPT` + `analyze_repo_host()` alongside existing Docker versions. Extend `ProjectConfig` + `parse_config` with new fields (start_command, stop_command, process_manager, health_url, install_guide_path).
+**Edit** [src/taghdev/agents/onboarding.py](src/taghdev/agents/onboarding.py) — add `HOST_ONBOARDING_PROMPT` + `analyze_repo_host()` alongside existing Docker versions. Extend `ProjectConfig` + `parse_config` with new fields (start_command, stop_command, process_manager, health_url, install_guide_path).
 
-**Edit** [src/openclow/worker/tasks/onboarding.py:19-181](src/openclow/worker/tasks/onboarding.py#L19-L181) — top-level branch:
+**Edit** [src/taghdev/worker/tasks/onboarding.py:19-181](src/taghdev/worker/tasks/onboarding.py#L19-L181) — top-level branch:
 
 ```
 if mode == "host":
@@ -108,13 +108,13 @@ else:
     # existing Docker path unchanged
 ```
 
-`confirm_project` in [src/openclow/api/routes/actions.py:97-162](src/openclow/api/routes/actions.py#L97-L162) stores the new fields on the Project row.
+`confirm_project` in [src/taghdev/api/routes/actions.py:97-162](src/taghdev/api/routes/actions.py#L97-L162) stores the new fields on the Project row.
 
 ---
 
 ## 5. Bootstrap flow (host mode)
 
-**Edit** [src/openclow/worker/tasks/bootstrap.py](src/openclow/worker/tasks/bootstrap.py) — top-of-function branch in `bootstrap_project`:
+**Edit** [src/taghdev/worker/tasks/bootstrap.py](src/taghdev/worker/tasks/bootstrap.py) — top-of-function branch in `bootstrap_project`:
 ```
 if project.mode == "host":
     return await _bootstrap_project_host(ctx, project, chat, chat_id, message_id)
@@ -132,12 +132,12 @@ if project.mode == "host":
 6. Health check + tunnel + Playwright verify (host_curl → existing tunnel_service.start_tunnel → Playwright MCP)
 ```
 
-**New prompt** `HOST_MASTER_BOOTSTRAP_PROMPT` (sibling to the existing [MASTER_BOOTSTRAP_PROMPT lines 45-167](src/openclow/worker/tasks/bootstrap.py#L45-L167)). Same structure, same STATUS/DIAGNOSIS/ACTION/STEP_DONE/BOOTSTRAP_COMPLETE vocabulary. Rules:
+**New prompt** `HOST_MASTER_BOOTSTRAP_PROMPT` (sibling to the existing [MASTER_BOOTSTRAP_PROMPT lines 45-167](src/taghdev/worker/tasks/bootstrap.py#L45-L167)). Same structure, same STATUS/DIAGNOSIS/ACTION/STEP_DONE/BOOTSTRAP_COMPLETE vocabulary. Rules:
 - MCP-first: always try `host_*` tools before reasoning from scratch.
 - Never give up: 3 concretely-different approaches before surfacing blocker to user.
 - Stream narration before + after every tool call.
 
-**Reuse** the existing `_run_master_agent` ([src/openclow/worker/tasks/bootstrap.py:775-900](src/openclow/worker/tasks/bootstrap.py#L775-L900)) with `prompt_override=HOST_MASTER_BOOTSTRAP_PROMPT.format(...)`, `allowed_tools=["mcp__host__*", "Read", "Glob", "Grep"]`, `mcp_servers={"host": _mcp_host()}`. Idle watchdog, retry, heartbeat, cancel machinery all work as-is.
+**Reuse** the existing `_run_master_agent` ([src/taghdev/worker/tasks/bootstrap.py:775-900](src/taghdev/worker/tasks/bootstrap.py#L775-L900)) with `prompt_override=HOST_MASTER_BOOTSTRAP_PROMPT.format(...)`, `allowed_tools=["mcp__host__*", "Read", "Glob", "Grep"]`, `mcp_servers={"host": _mcp_host()}`. Idle watchdog, retry, heartbeat, cancel machinery all work as-is.
 
 Skip `_preflight` entirely for host mode (it's Docker-container cleanup). Host preflight: confirm `project_dir` exists (or auto-clone) and `app_port` is free or held by our known PID.
 
@@ -147,21 +147,21 @@ After STEP 6, reuse the existing tunnel block unchanged — `tunnel_target = f"h
 
 ## 6. Shared project-exec abstraction
 
-**New file** `src/openclow/services/project_exec.py`:
+**New file** `src/taghdev/services/project_exec.py`:
 
 ```python
 async def execute_in_project(project, command: str, timeout: int = 60) -> tuple[int, str]:
     if project.mode == "host":
         return await host_guard.run_host(command, cwd=project.project_dir, timeout=timeout,
                                          actor="task", project_id=project.id)
-    container = f"openclow-{project.name}-{project.app_container_name or 'app'}-1"
+    container = f"taghdev-{project.name}-{project.app_container_name or 'app'}-1"
     return await docker_guard.run_docker("docker", "exec", container, "sh", "-c", command,
                                          actor="task", project_id=project.id, timeout=timeout)
 ```
 
-**Edit** every deterministic `docker_exec` call in [src/openclow/worker/tasks/orchestrator.py:299-485](src/openclow/worker/tasks/orchestrator.py#L299-L485) (`_run_frontend_build`, `_run_lightweight_deploy`) + [src/openclow/worker/tasks/health_task.py](src/openclow/worker/tasks/health_task.py) HTTP probe → route through `execute_in_project`.
+**Edit** every deterministic `docker_exec` call in [src/taghdev/worker/tasks/orchestrator.py:299-485](src/taghdev/worker/tasks/orchestrator.py#L299-L485) (`_run_frontend_build`, `_run_lightweight_deploy`) + [src/taghdev/worker/tasks/health_task.py](src/taghdev/worker/tasks/health_task.py) HTTP probe → route through `execute_in_project`.
 
-**Edit** [src/openclow/providers/llm/claude.py](src/openclow/providers/llm/claude.py) — extract `_tools_and_mcp_for(project)` that returns `(allowed_tools, mcp_servers)` based on `project.mode`. Used by `run_coder`, `run_coder_fix`, `run_reviewer`, health_guard. Agent system prompts gain a conditional `HOST ENVIRONMENT: ...` section when mode=host.
+**Edit** [src/taghdev/providers/llm/claude.py](src/taghdev/providers/llm/claude.py) — extract `_tools_and_mcp_for(project)` that returns `(allowed_tools, mcp_servers)` based on `project.mode`. Used by `run_coder`, `run_coder_fix`, `run_reviewer`, health_guard. Agent system prompts gain a conditional `HOST ENVIRONMENT: ...` section when mode=host.
 
 ---
 
@@ -169,11 +169,11 @@ async def execute_in_project(project, command: str, timeout: int = 60) -> tuple[
 
 Current gap: `ToolUseBlock` announcements stream, but tool **output** (stdout from `host_run_command`) does not.
 
-**Edit** [src/openclow/providers/chat/web/__init__.py:146-227](src/openclow/providers/chat/web/__init__.py#L146-L227) — add `send_tool_output(chat_id, message_id, tool_name, chunk, final=False)` publishing a `"tool_output"` event to `wc:{user_id}:{session_id}`.
+**Edit** [src/taghdev/providers/chat/web/__init__.py:146-227](src/taghdev/providers/chat/web/__init__.py#L146-L227) — add `send_tool_output(chat_id, message_id, tool_name, chunk, final=False)` publishing a `"tool_output"` event to `wc:{user_id}:{session_id}`.
 
 **Wire** in `host_run_command`: the MCP tool reads `stream_hook` from env (published by the orchestrator) and writes incremental stdout chunks to that Redis channel directly. No callback plumbing.
 
-**Edit** the streaming helper in [src/openclow/worker/tasks/agent_session.py:590-740](src/openclow/worker/tasks/agent_session.py#L590-L740) + [orchestrator `_run_agent_with_streaming`](src/openclow/worker/tasks/orchestrator.py#L176-L276) — new `StreamEvent` branch for `mcp_tool_result` → `send_tool_output(final=True)`.
+**Edit** the streaming helper in [src/taghdev/worker/tasks/agent_session.py:590-740](src/taghdev/worker/tasks/agent_session.py#L590-L740) + [orchestrator `_run_agent_with_streaming`](src/taghdev/worker/tasks/orchestrator.py#L176-L276) — new `StreamEvent` branch for `mcp_tool_result` → `send_tool_output(final=True)`.
 
 **Edit** [chat_frontend/src/App.tsx:86-132](chat_frontend/src/App.tsx#L86-L132) `readStream()` + thread component — handle `tool_output` event: render as scrolling panel attached to its parent `tool_use`.
 
@@ -181,7 +181,7 @@ Current gap: `ToolUseBlock` announcements stream, but tool **output** (stdout fr
 
 ## 8. Senior DevOps + Chat Support Engineer persona
 
-**Edit** [src/openclow/api/routes/assistant.py:246-355](src/openclow/api/routes/assistant.py#L246-L355) `_build_system_prompt()` — replace the current TAGH block with three paragraphs:
+**Edit** [src/taghdev/api/routes/assistant.py:246-355](src/taghdev/api/routes/assistant.py#L246-L355) `_build_system_prompt()` — replace the current TAGH block with three paragraphs:
 
 > You are a Senior DevOps Engineer and AI Chat Support Engineer for TAGH Dev. You run the infrastructure and you talk to the user at the same time.
 >
@@ -191,7 +191,7 @@ Current gap: `ToolUseBlock` announcements stream, but tool **output** (stdout fr
 >
 > **Never give up.** "Unfixable" does not exist. If a command fails, read the output, form a hypothesis, try a different approach. If the app won't start, tail the logs, find the real error, fix it, restart. Keep trying different concrete approaches until the app is healthy or you've documented three specific attempts that each failed for a specific reason. "The tool kept failing" is not a reason — understand *why* and fix that first.
 
-**Edit** [src/openclow/worker/tasks/_agent_helper.py:14-76](src/openclow/worker/tasks/_agent_helper.py#L14-L76) — the existing persona already says "senior DevOps engineer" and "NEVER GIVE UP"; extract `_build_system_prompt(mode: str)` that swaps the "Available Tools" + "Critical Architecture" sections for host mode. The NEVER GIVE UP clause (line 52) stays verbatim.
+**Edit** [src/taghdev/worker/tasks/_agent_helper.py:14-76](src/taghdev/worker/tasks/_agent_helper.py#L14-L76) — the existing persona already says "senior DevOps engineer" and "NEVER GIVE UP"; extract `_build_system_prompt(mode: str)` that swaps the "Available Tools" + "Critical Architecture" sections for host mode. The NEVER GIVE UP clause (line 52) stays verbatim.
 
 ---
 
@@ -199,7 +199,7 @@ Current gap: `ToolUseBlock` announcements stream, but tool **output** (stdout fr
 
 Developers run user apps **at the same filesystem level as the TAGH Dev repo** — `../sim-fastapi/`, `../sim-next/`, `../sim-laravel/` — and a tiny FastAPI "local-VPS" supervisor exposes them to the browser, mimicking what Digital Ocean + tunnel will do in production.
 
-**New directory** `dev-sandbox/` in the openclow repo (tracked; a dev convenience, not deployed):
+**New directory** `dev-sandbox/` in the taghdev repo (tracked; a dev convenience, not deployed):
 
 ```
 dev-sandbox/
@@ -213,10 +213,10 @@ dev-sandbox/
 └── README.md                 # how to run
 ```
 
-User app skeletons live **outside** the openclow repo at the same level:
+User app skeletons live **outside** the taghdev repo at the same level:
 ```
 <parent-dir>/
-├── openclow/                 # this repo
+├── taghdev/                 # this repo
 ├── sim-fastapi/              # Python 3.12 + FastAPI, port 8101
 ├── sim-next/                 # Next.js 14, port 8102
 └── sim-laravel/              # Laravel 11, port 8103
@@ -260,7 +260,7 @@ make sim-doctor    # check deps (python/node/php/composer), ports 8101-8103,8120
 
 | | simulate | host (production) |
 |---|---|---|
-| `host.projects_base` setting | `../` (sibling to openclow) | `/srv/projects` or configured |
+| `host.projects_base` setting | `../` (sibling to taghdev) | `/srv/projects` or configured |
 | HTTP reachability from Docker | `host.docker.internal:<port>` | `localhost:<port>` |
 | SSH path | N/A (local filesystem) | optional, if worker off-box |
 | "Tunnel" | local_vps.py `/apps/{name}` redirect | existing cloudflared tunnel_service |
@@ -288,34 +288,34 @@ Use these as inspiration for: the new host_mcp tool surface (SWE-agent's ACI dis
 ## 11. File-by-file execution order
 
 **Phase 1 — foundation (no behavior change; Docker mode still default)**
-1. [src/openclow/models/project.py](src/openclow/models/project.py) — add columns
+1. [src/taghdev/models/project.py](src/taghdev/models/project.py) — add columns
 2. `alembic/versions/NNN_host_mode.py` — migration
-3. [src/openclow/services/settings_service.py](src/openclow/services/settings_service.py) — register `host.*` keys
-4. [src/openclow/providers/llm/claude.py](src/openclow/providers/llm/claude.py) — `_mcp_host()` factory + `_tools_and_mcp_for(project)`
+3. [src/taghdev/services/settings_service.py](src/taghdev/services/settings_service.py) — register `host.*` keys
+4. [src/taghdev/providers/llm/claude.py](src/taghdev/providers/llm/claude.py) — `_mcp_host()` factory + `_tools_and_mcp_for(project)`
 
 **Phase 2 — host MCP + guard**
-5. `src/openclow/services/host_guard.py` (new)
-6. `src/openclow/mcp_servers/host_mcp.py` (new)
-7. [src/openclow/worker/tasks/_agent_base.py](src/openclow/worker/tasks/_agent_base.py) — extend `describe_tool`
-8. `src/openclow/services/project_exec.py` (new) — shared `execute_in_project`
+5. `src/taghdev/services/host_guard.py` (new)
+6. `src/taghdev/mcp_servers/host_mcp.py` (new)
+7. [src/taghdev/worker/tasks/_agent_base.py](src/taghdev/worker/tasks/_agent_base.py) — extend `describe_tool`
+8. `src/taghdev/services/project_exec.py` (new) — shared `execute_in_project`
 
 **Phase 3 — onboarding (host mode)**
-9. [src/openclow/agents/onboarding.py](src/openclow/agents/onboarding.py) — `HOST_ONBOARDING_PROMPT`, `analyze_repo_host`, extended `ProjectConfig`
-10. [src/openclow/worker/tasks/onboarding.py](src/openclow/worker/tasks/onboarding.py) — mode branch + auto-clone
-11. [src/openclow/api/routes/actions.py](src/openclow/api/routes/actions.py) — `confirm_project` persists new fields
+9. [src/taghdev/agents/onboarding.py](src/taghdev/agents/onboarding.py) — `HOST_ONBOARDING_PROMPT`, `analyze_repo_host`, extended `ProjectConfig`
+10. [src/taghdev/worker/tasks/onboarding.py](src/taghdev/worker/tasks/onboarding.py) — mode branch + auto-clone
+11. [src/taghdev/api/routes/actions.py](src/taghdev/api/routes/actions.py) — `confirm_project` persists new fields
 
 **Phase 4 — bootstrap (host mode)**
-12. [src/openclow/worker/tasks/bootstrap.py](src/openclow/worker/tasks/bootstrap.py) — `HOST_MASTER_BOOTSTRAP_PROMPT`, `_bootstrap_project_host`, top-level mode branch
-13. [src/openclow/worker/tasks/health_task.py](src/openclow/worker/tasks/health_task.py) — mode branch; reuses `_run_master_agent` with host prompt
+12. [src/taghdev/worker/tasks/bootstrap.py](src/taghdev/worker/tasks/bootstrap.py) — `HOST_MASTER_BOOTSTRAP_PROMPT`, `_bootstrap_project_host`, top-level mode branch
+13. [src/taghdev/worker/tasks/health_task.py](src/taghdev/worker/tasks/health_task.py) — mode branch; reuses `_run_master_agent` with host prompt
 
 **Phase 5 — task execution + persona**
-14. [src/openclow/worker/tasks/orchestrator.py](src/openclow/worker/tasks/orchestrator.py) — swap direct `docker_exec` for `execute_in_project`; agent tool list via `_tools_and_mcp_for`
-15. [src/openclow/worker/tasks/_agent_helper.py](src/openclow/worker/tasks/_agent_helper.py) — `_build_system_prompt(mode)` for host-mode repair
-16. [src/openclow/api/routes/assistant.py](src/openclow/api/routes/assistant.py) — new DevOps+Chat-Support persona
+14. [src/taghdev/worker/tasks/orchestrator.py](src/taghdev/worker/tasks/orchestrator.py) — swap direct `docker_exec` for `execute_in_project`; agent tool list via `_tools_and_mcp_for`
+15. [src/taghdev/worker/tasks/_agent_helper.py](src/taghdev/worker/tasks/_agent_helper.py) — `_build_system_prompt(mode)` for host-mode repair
+16. [src/taghdev/api/routes/assistant.py](src/taghdev/api/routes/assistant.py) — new DevOps+Chat-Support persona
 
 **Phase 6 — streaming**
-17. [src/openclow/providers/chat/web/__init__.py](src/openclow/providers/chat/web/__init__.py) — `send_tool_output`
-18. [src/openclow/worker/tasks/agent_session.py](src/openclow/worker/tasks/agent_session.py) + orchestrator streaming helper — surface `mcp_tool_result` as `tool_output`
+17. [src/taghdev/providers/chat/web/__init__.py](src/taghdev/providers/chat/web/__init__.py) — `send_tool_output`
+18. [src/taghdev/worker/tasks/agent_session.py](src/taghdev/worker/tasks/agent_session.py) + orchestrator streaming helper — surface `mcp_tool_result` as `tool_output`
 19. [chat_frontend/src/App.tsx](chat_frontend/src/App.tsx) + thread component — render `tool_output` event
 
 **Phase 7 — admin UI**

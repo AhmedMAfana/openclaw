@@ -23,7 +23,7 @@ import os
 
 import pytest
 
-from openclow.services.instance_service import (
+from taghdev.services.instance_service import (
     InstanceService,
     PerUserCapExceeded,
     PlatformAtCapacity,

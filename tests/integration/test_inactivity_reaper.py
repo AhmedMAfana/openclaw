@@ -1,6 +1,6 @@
 """T045: full reaper lifecycle — running → idle → terminating → revived.
 
-Exercises ``openclow.services.inactivity_reaper.reap`` against real
+Exercises ``taghdev.services.inactivity_reaper.reap`` against real
 Postgres + the same row shape production uses. The v1 reaper is a
 two-phase sweep; this test walks every transition:
 
@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(
 async def _ping_db() -> bool:
     try:
         from sqlalchemy import text
-        from openclow.models.base import async_session
+        from taghdev.models.base import async_session
         async with async_session() as s:
             await s.execute(text("SELECT 1"))
         return True

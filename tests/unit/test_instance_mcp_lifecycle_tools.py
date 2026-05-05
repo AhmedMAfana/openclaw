@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-instance_mcp = pytest.importorskip("openclow.mcp_servers.instance_mcp")
+instance_mcp = pytest.importorskip("taghdev.mcp_servers.instance_mcp")
 
 
 _FORBIDDEN = ("instance", "project", "workspace", "container", "chat")
@@ -63,7 +63,7 @@ def test_lifecycle_tools_have_no_ambient_args():
 
 def test_lifecycle_tools_in_container_mode_allowlist():
     """The tool allowlist for container-mode chats must include the new tools."""
-    from openclow.providers.llm.claude import CONTAINER_MODE_TOOLS
+    from taghdev.providers.llm.claude import CONTAINER_MODE_TOOLS
     assert "mcp__instance__provision_now" in CONTAINER_MODE_TOOLS
     assert "mcp__instance__instance_status" in CONTAINER_MODE_TOOLS
     assert "mcp__instance__terminate_now" in CONTAINER_MODE_TOOLS
@@ -71,7 +71,7 @@ def test_lifecycle_tools_in_container_mode_allowlist():
 
 def test_mcp_instance_factory_passes_chat_session_id():
     """Argv-pinning carries chat_session_id from the Instance row."""
-    from openclow.providers.llm.claude import _mcp_instance
+    from taghdev.providers.llm.claude import _mcp_instance
 
     class _FakeInstance:
         compose_project = "tagh-inst-deadbeef"

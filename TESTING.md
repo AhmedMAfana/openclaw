@@ -12,7 +12,7 @@
 **How to test:**
 1. Ensure a project has a tunnel URL in the database:
    ```bash
-   docker compose exec postgres psql -U openclow -d openclow -c "SELECT key, value FROM platform_config WHERE category='tunnel';"
+   docker compose exec postgres psql -U taghdev -d taghdev -c "SELECT key, value FROM platform_config WHERE category='tunnel';"
    ```
 2. Look for entries with non-empty `url` field (should contain `https://...trycloudflare.com`)
 3. Send a message in a Slack channel linked to a project
@@ -103,7 +103,7 @@ docker compose up bot worker --build
 1. **Channel Setup** (if not already done):
    ```bash
    # Check if channels are linked
-   docker compose exec postgres psql -U openclow -d openclow -c "SELECT category, key, value FROM platform_config WHERE category='slack_channel';"
+   docker compose exec postgres psql -U taghdev -d taghdev -c "SELECT category, key, value FROM platform_config WHERE category='slack_channel';"
    ```
    - If empty, link a channel in the dashboard: http://localhost:8000/settings/chat
 
@@ -133,18 +133,18 @@ docker compose logs bot -f | grep -E "error|ERROR|Socket|tunnel"
 **Tunnel URL not appearing:**
 ```bash
 docker compose logs worker | grep tunnel
-docker compose exec postgres psql -U openclow -d openclow -c "SELECT key, value FROM platform_config WHERE category='tunnel';"
+docker compose exec postgres psql -U taghdev -d taghdev -c "SELECT key, value FROM platform_config WHERE category='tunnel';"
 ```
 
 **Project selector keeps reappearing:**
 ```bash
 # Check Redis cache
-docker compose exec redis redis-cli -a openclow
-> GET openclow:dm_project:slack:U<USER_ID>
+docker compose exec redis redis-cli -a taghdev
+> GET taghdev:dm_project:slack:U<USER_ID>
 > exit
 
 # Check DB default_project_id
-docker compose exec postgres psql -U openclow -d openclow -c "SELECT chat_provider_uid, default_project_id FROM users;"
+docker compose exec postgres psql -U taghdev -d taghdev -c "SELECT chat_provider_uid, default_project_id FROM users;"
 ```
 
 **Services not starting:**
@@ -156,10 +156,10 @@ docker compose logs --all -f
 
 ## Key Files Modified
 
-- `src/openclow/worker/tasks/agent_session.py` — Better tunnel URL error handling & logging
-- `src/openclow/providers/chat/slack/blocks.py` — Enhanced thinking blocks message
+- `src/taghdev/worker/tasks/agent_session.py` — Better tunnel URL error handling & logging
+- `src/taghdev/providers/chat/slack/blocks.py` — Enhanced thinking blocks message
 - `docker-compose.override.yml` — Watchfiles grace period (prevents infinite restarts)
-- `src/openclow/alembic/versions/005_*.py` — Default project DB migration
+- `src/taghdev/alembic/versions/005_*.py` — Default project DB migration
 
 ## Notes
 

@@ -4,8 +4,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from openclow.api.serializers.admin_instance import to_detail
-from openclow.api.schemas.admin_instances import InstanceDetail
+from taghdev.api.serializers.admin_instance import to_detail
+from taghdev.api.schemas.admin_instances import InstanceDetail
 
 
 def _fake_inst(**overrides):
@@ -76,7 +76,7 @@ def test_available_actions_for_failed_without_chat_blocks_reprovision():
 
 
 def test_logs_route_registered():
-    from openclow.api import main as api_main
+    from taghdev.api import main as api_main
 
     methods = set()
     for r in api_main.app.routes:
@@ -86,7 +86,7 @@ def test_logs_route_registered():
 
 
 def test_audit_route_registered():
-    from openclow.api import main as api_main
+    from taghdev.api import main as api_main
 
     methods = set()
     for r in api_main.app.routes:

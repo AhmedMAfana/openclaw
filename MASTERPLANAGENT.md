@@ -68,8 +68,8 @@ BOOTSTRAP_FAILED: <reason>                  → failure exit
 
 ### Files to Modify
 
-1. **[bootstrap.py](src/openclow/worker/tasks/bootstrap.py)** — Major: replace `_step_agentic_setup` + `_step_docker_up` + `_agent_fix_docker_config` + `_step_agent_migrations` + verify logic with single master agent call
-2. **[doctor.py](src/openclow/agents/doctor.py)** — No changes (kept for health_task.py periodic repairs)
+1. **[bootstrap.py](src/taghdev/worker/tasks/bootstrap.py)** — Major: replace `_step_agentic_setup` + `_step_docker_up` + `_agent_fix_docker_config` + `_step_agent_migrations` + verify logic with single master agent call
+2. **[doctor.py](src/taghdev/agents/doctor.py)** — No changes (kept for health_task.py periodic repairs)
 
 ### Step 1: Add master agent prompt template (~line 697 area in bootstrap.py)
 
@@ -316,7 +316,7 @@ This replaces:
 
 Add at top of bootstrap.py:
 ```python
-from openclow.providers.llm.claude import _mcp_docker
+from taghdev.providers.llm.claude import _mcp_docker
 ```
 
 ### Step 5: Remove dead code

@@ -307,4 +307,4 @@ Sidebar entry added in `templates/base.html` between Projects and Users (FR-001)
 
 ## Internal routes (NOT touched by 003)
 
-The internal heartbeat / token-rotation / explain endpoints under `/internal/instances/*` ([src/openclow/api/routes/instances.py:202-630](src/openclow/api/routes/instances.py#L202-L630)) remain compose-network only. **003 introduces no new routes under `/internal/*` and no admin route reads or proxies `heartbeat_secret`** (FR-004; data-model §4 redaction policy).
+The internal heartbeat / token-rotation / explain endpoints under `/internal/instances/*` ([src/taghdev/api/routes/instances.py:202-630](src/taghdev/api/routes/instances.py#L202-L630)) remain compose-network only. **003 introduces no new routes under `/internal/*` and no admin route reads or proxies `heartbeat_secret`** (FR-004; data-model §4 redaction policy).
