@@ -76,6 +76,17 @@ const overlay = defineConfig({
     force: false,
     holdUntilCrawlEnd: false,
   },
+  // Dedupe vue so only one copy lives in the module graph regardless
+  // of how many packages list it as a peer dep. Without this, shadcn-vue
+  // (and any other lib shipped in the project's node_modules with its
+  // own copy of vue) can end up with a separate Vue instance from the
+  // app's own copy. Two instances means `currentRenderingInstance` is
+  // null when a component from one copy tries to render a slot from the
+  // other — the "can't access property 'ce', currentRenderingInstance
+  // is null" crash seen in projects like sso-new / shadcn-based apps.
+  resolve: {
+    dedupe: ['vue'],
+  },
   server: {
     host: '0.0.0.0',
     port: 5173,
