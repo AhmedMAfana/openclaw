@@ -481,6 +481,17 @@ async def provision_instance(ctx: dict, instance_id: str) -> dict:
         await _mark_failed(inst_uuid, FailureCode.TUNNEL_PROVISION, str(e))
         return {"ok": False, "error": str(e), "failure_code": FailureCode.TUNNEL_PROVISION.value}
     except asyncio.CancelledError:
+        # Worker is shutting down mid-provision. Mark the instance failed so
+        # the UI shows the error card immediately (not a spinning forever card)
+        # and the startup recovery doesn't need to clean up on next boot.
+        log.warning("provision_instance.cancelled", slug=slug)
+        await _mark_failed(inst_uuid, FailureCode.ORCHESTRATOR_CRASH, "Worker cancelled mid-provision")
+        await _publish_progress_step(
+            instance_id=str(inst_uuid),
+            completed_step_index=-1,
+            overall_status="failed",
+            failed_step_index=0,
+        )
         raise
     except Exception as e:
         log.exception("provision_instance.unexpected", slug=slug, error=str(e))

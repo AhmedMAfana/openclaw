@@ -673,19 +673,29 @@ async def assistant_endpoint(
                     "type": "instance_retry_started",
                     "failed_instance_id": failed_id_str,
                 })
-                # Immediately attempt get_or_resume; if the teardown is
-                # still in-flight, the cap-check will reject and the user
-                # sees the "busy" pill — a rare race that resolves on
-                # next message.
+                # Immediately attempt get_or_resume. If the old row is still
+                # terminating (teardown in-flight), return it as a terminating
+                # banner instead of incorrectly claiming a new provision started.
+                # A fresh provision is triggered automatically on the next message
+                # once teardown completes.
                 try:
                     _ = await InstanceService().get_or_resume(
                         chat_session_id=session_id
                     )
-                    controller.add_data({
-                        "type": "instance_provisioning",
-                        "slug": getattr(_, "slug", ""),
-                        "estimated_seconds": 90,
-                    })
+                    if _.status == "provisioning":
+                        controller.add_data({
+                            "type": "instance_provisioning",
+                            "slug": _.slug,
+                            "estimated_seconds": 90,
+                        })
+                    elif _.status == "terminating":
+                        # Old instance still tearing down; new provision will
+                        # fire on the next user message once the row is gone.
+                        controller.add_data({
+                            "type": "instance_terminating",
+                            "slug": _.slug,
+                        })
+                    # running/idle → instance already up; no banner needed
                 except Exception as _e:
                     log.warning(
                         "assistant.retry_get_or_resume_failed",

@@ -270,22 +270,39 @@ case "${STEP}:${VARIANT}" in
     # `brands` plus a newer `create_brands_table.php` migration.)
     migrate:multidomain-gecche|migrate:multidomain-spatie|migrate:multidomain-stancl|migrate:*)
         rm -f database/schema/*.sql 2>/dev/null || :
+        # Some apps query the DB inside a job/model constructor that is
+        # instantiated during console route loading (routes/console.php).
+        # This crashes `php artisan migrate` on a fresh DB because the
+        # tables don't exist yet. Guard: swap console.php with a no-op
+        # for the duration of migrate, then restore it.
+        _console_php="routes/console.php"
+        _console_bak=""
+        if [ -f "$_console_php" ]; then
+            _console_bak="${_console_php}.migrate_bak"
+            cp "$_console_php" "$_console_bak"
+            printf '<?php // temporarily disabled during migrate\n' > "$_console_php"
+        fi
+        _migrate_rc=0
         case "${VARIANT}" in
             multidomain-gecche)
-                php artisan migrate --domain="${INSTANCE_HOST}" --force
+                php artisan migrate --domain="${INSTANCE_HOST}" --force || _migrate_rc=$?
                 ;;
             multidomain-spatie)
-                php artisan migrate --force --path=database/migrations/landlord
-                php artisan tenants:artisan "migrate --force"
+                php artisan migrate --force --path=database/migrations/landlord || _migrate_rc=$?
+                php artisan tenants:artisan "migrate --force" || _migrate_rc=$?
                 ;;
             multidomain-stancl)
-                php artisan migrate --force
-                php artisan tenants:migrate --force
+                php artisan migrate --force || _migrate_rc=$?
+                php artisan tenants:migrate --force || _migrate_rc=$?
                 ;;
             *)
-                php artisan migrate --force
+                php artisan migrate --force || _migrate_rc=$?
                 ;;
         esac
+        if [ -n "$_console_bak" ]; then
+            mv "$_console_bak" "$_console_php"
+        fi
+        [ "$_migrate_rc" -eq 0 ]
         ;;
 
     # seed: optional seed data. Same `--domain` rule as migrate for gecche.

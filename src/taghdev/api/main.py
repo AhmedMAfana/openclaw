@@ -21,7 +21,7 @@ async def shutdown_event():
 
 @app.get("/")
 async def root():
-    return RedirectResponse(url="/settings")
+    return RedirectResponse(url="/chat/login")
 
 
 # JSON API routes

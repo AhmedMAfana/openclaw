@@ -235,6 +235,31 @@ async def on_startup(ctx: dict):
     except Exception as e:
         log.warning("worker.orphan_task_recovery_failed", error=str(e))
 
+    # Recover orphaned "provisioning" instances — worker died / restarted mid-provision.
+    # Any instance still in 'provisioning' at startup has no in-flight job; mark failed
+    # so the UI shows the error card instead of spinning forever.
+    try:
+        from taghdev.models.instance import FailureCode, Instance
+        from taghdev.worker.tasks.instance_tasks import _mark_failed as _inst_mark_failed
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select2(Instance).where(Instance.status == "provisioning")
+            )
+            orphaned_instances = result.scalars().all()
+        for inst in orphaned_instances:
+            log.warning("worker.orphaned_instance", slug=inst.slug, instance_id=str(inst.id))
+            await _inst_mark_failed(inst.id, FailureCode.ORCHESTRATOR_CRASH, "Worker restarted mid-provision")
+            # Push failure update to any stuck progress card in the chat UI.
+            from taghdev.worker.tasks.instance_tasks import _publish_progress_step as _pps
+            await _pps(
+                instance_id=str(inst.id),
+                completed_step_index=-1,
+                overall_status="failed",
+                failed_step_index=0,
+            )
+    except Exception as e:
+        log.warning("worker.orphan_instance_recovery_failed", error=str(e))
+
     # Release ALL stale project locks on fresh startup — catch cases where
     # the task already transitioned to a terminal state but the lock wasn't released
     # (e.g. worker killed by SIGTERM before the finally block ran).
