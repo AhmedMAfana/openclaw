@@ -76,16 +76,27 @@ const overlay = defineConfig({
     force: false,
     holdUntilCrawlEnd: false,
   },
-  // Dedupe vue so only one copy lives in the module graph regardless
-  // of how many packages list it as a peer dep. Without this, shadcn-vue
-  // (and any other lib shipped in the project's node_modules with its
-  // own copy of vue) can end up with a separate Vue instance from the
-  // app's own copy. Two instances means `currentRenderingInstance` is
-  // null when a component from one copy tries to render a slot from the
-  // other — the "can't access property 'ce', currentRenderingInstance
-  // is null" crash seen in projects like sso-new / shadcn-based apps.
+  // Dedupe the entire Vue runtime family so only one copy of each
+  // lives in the module graph. The trigger for the
+  // "can't access property 'ce', currentRenderingInstance is null"
+  // crash is NOT always a duplicate `vue` package — reka-ui / radix-vue
+  // / shadcn-vue import directly from `@vue/runtime-core`, so if npm
+  // installs a nested copy of that package (e.g. inside reka-ui's own
+  // node_modules), `currentRenderingInstance` becomes a different
+  // module-level variable than the one the app's components use, and
+  // slot rendering breaks. Deduping all @vue/* packages collapses every
+  // copy back to the single root-level install.
   resolve: {
-    dedupe: ['vue'],
+    dedupe: [
+      'vue',
+      '@vue/runtime-core',
+      '@vue/runtime-dom',
+      '@vue/reactivity',
+      '@vue/shared',
+      '@vue/compiler-core',
+      '@vue/compiler-dom',
+      'vue-demi',
+    ],
   },
   server: {
     host: '0.0.0.0',
