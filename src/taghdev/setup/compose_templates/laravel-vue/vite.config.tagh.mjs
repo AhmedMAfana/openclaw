@@ -72,31 +72,32 @@ const overlay = defineConfig({
   // staging and OOM-killed esbuild before the dev server could
   // serve a single request. We want the persistent cache to survive
   // restarts, not be invalidated every boot.
+  //
+  // reka-ui / radix-vue / shadcn-vue MUST be pre-bundled through the
+  // same Vite optimizer chunk as the app's Vue runtime. The nested
+  // `pkg > dep` syntax tells esbuild: "when bundling pkg, externalize
+  // dep and share the pre-bundled copy the app already uses." Without
+  // this, reka-ui ships its @vue/runtime-core as a separate CJS bundle;
+  // `currentRenderingInstance` becomes a different module-level var →
+  // slot rendering crashes. `isFunction is not a function` is the
+  // follow-on symptom when deduping compiler/shared packages that are
+  // NOT installed at root level — so we only dedupe the runtime trio.
   optimizeDeps: {
     force: false,
     holdUntilCrawlEnd: false,
-  },
-  // Dedupe the entire Vue runtime family so only one copy of each
-  // lives in the module graph. The trigger for the
-  // "can't access property 'ce', currentRenderingInstance is null"
-  // crash is NOT always a duplicate `vue` package — reka-ui / radix-vue
-  // / shadcn-vue import directly from `@vue/runtime-core`, so if npm
-  // installs a nested copy of that package (e.g. inside reka-ui's own
-  // node_modules), `currentRenderingInstance` becomes a different
-  // module-level variable than the one the app's components use, and
-  // slot rendering breaks. Deduping all @vue/* packages collapses every
-  // copy back to the single root-level install.
-  resolve: {
-    dedupe: [
-      'vue',
+    include: [
+      'reka-ui > @vue/runtime-core',
+      'radix-vue > @vue/runtime-core',
       '@vue/runtime-core',
-      '@vue/runtime-dom',
-      '@vue/reactivity',
-      '@vue/shared',
-      '@vue/compiler-core',
-      '@vue/compiler-dom',
-      'vue-demi',
     ],
+  },
+  // Dedupe only the runtime packages that are guaranteed to be at root.
+  // Compiler packages (@vue/compiler-core, @vue/compiler-dom) and
+  // vue-demi are often NOT direct deps — deduping them causes Vite to
+  // fail resolution at root → broken imports → isFunction is not a
+  // function.
+  resolve: {
+    dedupe: ['vue', '@vue/runtime-core', '@vue/runtime-dom'],
   },
   server: {
     host: '0.0.0.0',
