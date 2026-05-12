@@ -73,21 +73,30 @@ const overlay = defineConfig({
   // serve a single request. We want the persistent cache to survive
   // restarts, not be invalidated every boot.
   //
-  // reka-ui / radix-vue / shadcn-vue: force their @vue/runtime-core
-  // dep to share the SAME pre-bundled chunk as the app (chunk-PKE3HONR
-  // in Vite's output). Without the nested `pkg > dep` syntax Vite
-  // creates a separate CJS pre-bundle for each package → two copies of
-  // `currentRenderingInstance` → slot rendering crash.
+  // holdUntilCrawlEnd: true — the root fix for `currentRenderingInstance
+  // is null` on first load.
   //
-  // CRITICAL: do NOT add '@vue/runtime-core' as a standalone include
-  // entry. A standalone entry makes Vite generate a thin re-export
-  // wrapper that skips esbuild's __esm lazy-init chain. Then any
-  // component that calls `defineComponent` at module-load time (before
-  // the `vue` bundle has triggered the init) sees `isFunction` as
-  // undefined → "isFunction is not a function" crash.
+  // With holdUntilCrawlEnd: false (our previous setting), Vite starts
+  // serving pre-bundled deps before it finishes crawling all imports.
+  // When it discovers a new dep mid-serve (e.g. vue-axios) it
+  // re-optimises and bumps the ?v= hash on ALL pre-bundled files.
+  // Any module already in flight (like vue.js chunk-PKE3HONR.js) now
+  // has a different module identity from newly-requested ones → two
+  // separate copies of `currentRenderingInstance` in memory → every
+  // renderSlot call crashes with "can't access property ce, null".
+  //
+  // With holdUntilCrawlEnd: true, Vite finishes the full dep crawl
+  // before serving the first byte. The hash is stable for the whole
+  // page load. force: false (below) prevents expensive forced rescans
+  // on container restart, so the crawl only runs once on cold start.
+  //
+  // The include entries below force reka-ui / radix-vue to share the
+  // same pre-bundled Vue runtime chunk as the app, which closes a
+  // second potential split if those packages happen to run before the
+  // main vue.js bundle is evaluated.
   optimizeDeps: {
     force: false,
-    holdUntilCrawlEnd: false,
+    holdUntilCrawlEnd: true,
     include: [
       'reka-ui > @vue/runtime-core',
       'radix-vue > @vue/runtime-core',
