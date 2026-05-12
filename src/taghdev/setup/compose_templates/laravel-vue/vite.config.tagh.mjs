@@ -64,40 +64,46 @@ async function loadProjectConfig() {
 const projectConfig = await loadProjectConfig();
 
 const overlay = defineConfig({
-  // Override expensive optimizeDeps settings that some project configs
-  // ship (Vuexy / Vuetify templates often set `force: true` and a wide
-  // `entries: ["./resources/ts/**/*.vue"]`). On every container
-  // restart Vite would then re-scan thousands of .vue files in
-  // parallel via esbuild workers — peak anon-rss hit 3.77 GB on
-  // staging and OOM-killed esbuild before the dev server could
-  // serve a single request. We want the persistent cache to survive
-  // restarts, not be invalidated every boot.
+  // Prevent mid-load re-optimisation — the actual root cause of
+  // `currentRenderingInstance is null`.
   //
-  // holdUntilCrawlEnd: true — the root fix for `currentRenderingInstance
-  // is null` on first load.
+  // The crash is NOT caused by duplicate packages. All Vue pre-bundles
+  // share the same chunk-PKE3HONR.js so currentRenderingInstance is one
+  // variable. The split happens because:
   //
-  // With holdUntilCrawlEnd: false (our previous setting), Vite starts
-  // serving pre-bundled deps before it finishes crawling all imports.
-  // When it discovers a new dep mid-serve (e.g. vue-axios) it
-  // re-optimises and bumps the ?v= hash on ALL pre-bundled files.
-  // Any module already in flight (like vue.js chunk-PKE3HONR.js) now
-  // has a different module identity from newly-requested ones → two
-  // separate copies of `currentRenderingInstance` in memory → every
-  // renderSlot call crashes with "can't access property ce, null".
+  //   1. The project sets optimizeDeps.entries: ['./resources/ts/**/*.vue']
+  //      which only scans .vue files. vue-axios (and similar deps) are
+  //      imported in main.ts / store .ts files → NOT found during crawl.
+  //   2. Vite starts serving. Browser loads the page. Vite encounters
+  //      vue-axios for the first time and re-optimises.
+  //   3. The ?v= hash on ALL pre-bundled files changes. Modules already
+  //      in-flight use old-hash chunk-PKE3HONR.js; new requests use
+  //      new-hash chunk-PKE3HONR.js → two separate module identities →
+  //      two separate currentRenderingInstance variables → crash.
   //
-  // With holdUntilCrawlEnd: true, Vite finishes the full dep crawl
-  // before serving the first byte. The hash is stable for the whole
-  // page load. force: false (below) prevents expensive forced rescans
-  // on container restart, so the crawl only runs once on cold start.
+  // Fix A — add TypeScript entry patterns so ALL imports are found
+  // during the initial crawl (mergeConfig concatenates the entries
+  // arrays, so the project's .vue entries are preserved):
+  //   entries: ['./resources/**/*.ts'] covers main.ts, stores, plugins.
   //
-  // The include entries below force reka-ui / radix-vue to share the
-  // same pre-bundled Vue runtime chunk as the app, which closes a
-  // second potential split if those packages happen to run before the
-  // main vue.js bundle is evaluated.
+  // Fix B — holdUntilCrawlEnd:true holds the first HTTP response until
+  // the crawl completes. Even if a dep slips past Fix A, Vite won't
+  // serve anything until the optimiser is done.
+  //
+  // Fix C — explicit include for known late-discovered packages so they
+  // are pre-bundled on the first crawl regardless of scan order.
+  //
+  // force:false keeps the existing pre-bundle cache on container restart
+  // to avoid the 3.77 GB esbuild OOM hit we saw on 2026-04-28.
   optimizeDeps: {
     force: false,
     holdUntilCrawlEnd: true,
+    entries: [
+      './resources/**/*.ts',
+      './resources/**/*.js',
+    ],
     include: [
+      'vue-axios',
       'reka-ui > @vue/runtime-core',
       'radix-vue > @vue/runtime-core',
     ],
